@@ -1,0 +1,473 @@
+GigForge
+Freelance Technology Consultancy
+
+
+
+
+JudicialPredict
+Predictive Analytics Platform for Judicial Case Outcomes
+
+
+
+
+Document Type:                              Software Specification & Project Plan
+Client:                                     Drazen Komarica
+Prepared by:                                Alex Reeves, Operations Director - GigForge
+Date:                                       25 March 2026
+Version:                                    1.0 (Draft for Client Review)
+Classification:                             Confidential
+
+
+
+
+This document is confidential and intended solely for the named client. The contents may not be reproduced, distributed, or disclosed to any
+third party without the prior written consent of GigForge.
+GIGFORGE . CONFIDENTIAL                                                            JudicialPredict - Project Plan
+
+
+
+
+   Table of Contents
+
+   1.    Executive Summary                                                                                     3
+   2.    Project Overview & Objectives                                                                         3
+   3.    Scope of Work                                                                                         4
+   4.    Data Sources & Predictive Factors                                                                     4
+   5.    Technical Architecture                                                                                5
+   6.    Machine Learning & Statistical Methodology                                                            6
+   7.    Key Features & User Experience                                                                        7
+   8.    Civil vs Criminal Case Handling                                                                       7
+   9.    Delivery Milestones & Timeline                                                                        8
+   10.   Team Assignments                                                                                      9
+   11.   Deliverables                                                                                          9
+   12.   Risks & Mitigations                                                                                 10
+   13.   Commercial Summary & Next Steps                                                                     10
+
+
+
+
+                                      Page 1 . Prepared 25 March 2026 . GigForge
+GIGFORGE . CONFIDENTIAL                                                                         JudicialPredict - Project Plan
+
+
+
+
+    1. Executive Summary
+
+   JudicialPredict is a sophisticated predictive analytics and prediction-market platform designed to model and
+   forecast the outcomes of judicial cases and appeals. Drawing on structured court data, historical rulings, party
+   profiles, attorney records, and publicly available information, the system applies ensemble machine-learning
+   models, Bayesian inference, and graph analytics to generate real-time, calibrated probability estimates for case
+   outcomes.
+   The platform serves legal professionals, researchers, journalists, and market participants who wish to track,
+   analyse, and take positions on judicial proceedings. A live 'ticker tape' bar provides continuous probability
+   updates as each new development - motion, ruling, witness testimony, or expert opinion - is entered into the
+   system. Separate analytical frameworks handle civil and criminal matters, reflecting the fundamentally different
+   standards and dynamics of each.
+   This document constitutes the full software specification and project plan, including technical architecture, data
+   model, ML methodology, phased delivery milestones, team assignments, and commercial framework.
+
+
+    2. Project Overview & Objectives
+
+   Vision
+   To build the leading intelligence platform for judicial case prediction - empowering legal practitioners and market
+   participants with data-driven probabilistic insights that are transparent, explainable, and continuously updated.
+
+   Primary Objectives
+       • Provide calibrated outcome probabilities for civil and criminal cases and appeals.
+       • Enable a real-time prediction market where registered users can submit and track forecasts.
+       • Ingest and process structured data from court records, party databases, and public sources.
+       • Surface attorney-judge interaction analytics and historical bias indicators.
+       • Deliver a live ticker tape feed that updates as case events unfold.
+       • Distinguish meaningfully between civil and criminal proceedings in all models and UX.
+       • Provide explainable AI outputs - not a black box, but auditable factor breakdowns.
+
+
+
+
+                                          Page 2 . Prepared 25 March 2026 . GigForge
+GIGFORGE . CONFIDENTIAL                                                                             JudicialPredict - Project Plan
+
+
+
+
+    3. Scope of Work
+
+   In Scope
+       • Full-stack web application (desktop & mobile-responsive).
+       • Data ingestion pipelines for court records, party profiles, and public data.
+       • ML prediction engine with ensemble models and Bayesian updating.
+       • Graph analytics layer (attorney-judge relationships, win-rate networks).
+       • Real-time ticker tape UI component with WebSocket updates.
+       • Prediction market module - users submit probability estimates and track accuracy.
+       • Civil case module: damages prediction, liability split, injunction likelihood.
+       • Criminal case module: conviction probability, sentencing range, acquittal likelihood.
+       • Admin dashboard for data management, model monitoring, and audit logging.
+       • REST + WebSocket API for potential third-party integrations.
+       • Role-based access control: public viewer, registered predictor, legal professional, admin.
+       • Deployment on Kubernetes with full CI/CD pipeline.
+                                                                                                                                     Out of Scop
+       • Real-money wagering / regulated gambling functionality (architecture will support it in Phase 2).
+       • Mobile native applications (iOS / Android).
+       • Automated legal document ingestion via OCR (scheduled for Phase 2).
+       • Integration with live court e-filing systems.
+
+
+    4. Data Sources & Predictive Factors
+
+   Judge Profile Factors
+       • Historical ruling record by case type, plaintiff/defendant class, and attorney.
+       • Reversal-on-appeal rate - indicates susceptibility to higher-court override.
+       • Sentencing leniency/severity index vs jurisdiction mean (criminal cases).
+       • Temporal bias: ruling patterns by day-of-month, month, court session load.
+       • Recusal history and disclosed conflicts of interest.
+                                                                                                                                     Party & Atto
+       • Plaintiff / defendant profiles: prior litigation history, win/loss record, jurisdiction.
+       • Attorney win rate by case type, court level, opposing counsel, and judge.
+       • Attorney-judge interaction graph: historical outcomes in prior shared cases.
+       • Law firm resources, specialist expertise, and seniority of lead counsel.
+       • Publicly available personal/corporate information about plaintiff and defendant.
+                                                                                                                                     Case Dynam
+       • Procedural history: motions filed, granted/denied ratios, continuances.
+       • Expert witness credentials, field, and prior testimony outcomes.
+       • Evidence rulings: admissibility decisions and their historical impact.
+       • Real-time event feed: new filings, rulings, and hearing outcomes.
+       • Precedent similarity score to settled landmark cases.
+       • Civil: financial exposure of defendant, insurance coverage, settlement pressure signals.
+       • Criminal: charge severity, prosecutorial track record, bail/remand status.
+
+
+
+
+                                            Page 3 . Prepared 25 March 2026 . GigForge
+GIGFORGE . CONFIDENTIAL                                                                                            JudicialPredict - Project Plan
+
+
+
+
+    5. Technical Architecture
+
+   System Overview
+   The platform is built as a set of loosely-coupled services communicating over REST and message queues,
+   deployed on Kubernetes. The front end is a Next.js 15 single-page application that connects to an API gateway
+   backed by Python microservices for the prediction engine and data pipelines.
+
+
+     Architecture Diagram (logical)
+       +----------------------------------------------------------------+
+       |            Next.js 15 + React 19 (Frontend)                        |
+       | Ticker Tape . Case Dashboard . Prediction Market . Admin UI |
+       +--------------------------+-------------------------------------+
+                             | REST / WebSocket
+       +--------------------------v-------------------------------------+
+       |           Node.js / Express - API Gateway                              |
+       |       Auth (JWT) . Rate Limiting . Request Routing                         |
+       +----+--------------+----------------------+--------------------+
+           |           |                 |
+       +----v---+ +------v------+        +----------v----------+
+       | ML Svc | | Data Ingest|             | Prediction Market |
+       |(FastAPI| | (Airflow) |          | Service (FastAPI) |
+       +----+---+ +------+------+        +---------------------+
+           |           |
+       +----v--------------v----------------------------------+
+       | PostgreSQL + pgvector | Neo4j | Redis | S3/Minio |
+       +------------------------------------------------------+
+
+   Technology Stack
+     • Frontend: Next.js 15, React 19, Tailwind CSS 4                               • Primary DB: PostgreSQL 16 + pgvector
+     • API Gateway: Node.js 20, Express 5                                           • Graph DB: Neo4j 5 (attorney-judge graph)
+     • ML Service: Python 3.12, FastAPI, Uvicorn                                    • Cache / Queues: Redis 7
+     • Data Pipelines: Apache Airflow 2.9                                           • Object Storage: S3 / MinIO
+     • Realtime: Socket.IO / WebSocket                                              • Orchestration: Kubernetes (K8s), Helm
+
+   Key Design Principles
+       • Event-driven updates: case events published to Redis Streams; ML service subscribes and recomputes
+           probabilities.
+       • Explainability-first: every prediction includes a SHAP factor breakdown.
+       • Auditability: all model versions, inputs, and outputs are stored with immutable timestamps.
+       • Horizontal scalability: stateless ML service instances behind a load balancer.
+       • Security: JWT authentication, row-level security in PostgreSQL, TLS everywhere.
+
+
+
+
+                                                    Page 4 . Prepared 25 March 2026 . GigForge
+GIGFORGE . CONFIDENTIAL                                                                          JudicialPredict - Project Plan
+
+
+
+
+    6. Machine Learning & Statistical Methodology
+
+   The prediction engine uses a multi-layer ensemble approach. Base models capture different signal types; a
+   meta-learner combines their outputs into a final calibrated probability.
+
+   Base Model Layer
+     XGBoost / LightGBM Ensemble
+          Tabular features: judge stats, attorney win rates, procedural counts, temporal variables. Primary workhorse for
+          structured prediction.
+     Bayesian Network
+          Captures causal dependencies between factors (e.g. judge x attorney interaction -> ruling). Enables transparent,
+          interpretable inference chains.
+     Random Forest
+          Robust baseline; provides feature importance scores used in SHAP explanations.
+     Legal-BERT NLP Model
+          Fine-tuned on legal text to encode case descriptions, motion text, and expert testimony into semantic vectors
+          stored in pgvector.
+     Graph Neural Network (Neo4j + PyG)
+          Models the attorney-judge relationship graph. Node embeddings capture latent interaction patterns beyond raw
+          win rates.
+     ARIMA / Prophet (Temporal)
+          Captures seasonal and longitudinal bias patterns (day-of-week, court calendar effects, judge tenure phase).
+
+   Meta-Learner & Calibration
+       • Stacked generalisation: a logistic meta-learner combines base-model outputs.
+       • Platt scaling applied to convert raw scores to well-calibrated probabilities.
+       • Brier Score and Expected Calibration Error tracked continuously in model monitoring.
+       • Bayesian updating: posterior probabilities updated in real time as case events arrive.
+                                                                                                                                  Continuous
+       • Nightly retraining on new case outcomes ingested during the day.
+       • Model versioning in MLflow; champion/challenger framework for safe promotions.
+       • Drift detection via Population Stability Index on key feature distributions.
+
+
+
+
+                                            Page 5 . Prepared 25 March 2026 . GigForge
+GIGFORGE . CONFIDENTIAL                                                                         JudicialPredict - Project Plan
+
+
+
+
+    7. Key Features & User Experience
+
+   Live Ticker Tape
+   A horizontally-scrolling, auto-updating probability bar runs persistently at the top of every case page. It displays
+   the current outcome probability and a directional arrow indicating whether it has moved up or down since the last
+   event. Each new court filing, ruling, or witness testimony triggers a WebSocket push that updates the ticker within
+   seconds.
+
+   Case Dashboard
+       • Summary card: parties, judge, court level, current probability, market consensus.
+       • Factor breakdown panel: SHAP waterfall chart showing top 10 probability drivers.
+       • Timeline: chronological event log with associated probability movements.
+       • Attorney-Judge history graph: interactive network visualisation.
+       • Expert witness panel: credentials, field, prior testimony outcome record.
+       • Comparables: top 5 precedent cases by similarity score.
+                                                                                                                                 Prediction M
+       • Registered users submit probability estimates on case outcomes.
+       • Aggregate market consensus displayed alongside model prediction.
+       • Accuracy scoring: users ranked by Brier Score over all their predictions.
+       • Leaderboard and expert badge system for consistently accurate predictors.
+       • Historical performance graph per user.
+                                                                                                                                 Admin & Da
+       • Case ingestion UI: manual entry and bulk CSV import.
+       • Model monitoring dashboard: accuracy, calibration, drift metrics.
+       • Audit log: full immutable history of all data changes.
+       • Role management: assign/revoke legal professional access.
+
+
+    8. Civil vs Criminal Case Handling
+
+   Civil Cases
+       • Outcome targets: liability (binary), damages quantum (regression), injunction granted (binary).
+       • Key additional factors: insurance coverage, defendant financial capacity, settlement history.
+       • Discovery phase signals: number of depositions, document production volume, sanctions motions.
+       • Expert witnesses weighted by financial/technical domain credibility.
+       • Appellate module: probability of reversal, partial reversal, or affirmation.
+                                                                                                                                 Criminal Ca
+       • Outcome targets: conviction (binary per charge), sentence range (regression), acquittal.
+       • Key additional factors: charge severity class, prior criminal record, bail/remand status.
+       • Prosecutorial stats: charge-to-conviction rate, plea bargain frequency, dismissal rate.
+       • Jury vs bench trial distinction with separate sub-models.
+       • Post-conviction: appeal success probability, sentence reduction likelihood.
+       • Separate visualisation language: conviction probability vs liability probability.
+
+
+
+
+                                          Page 6 . Prepared 25 March 2026 . GigForge
+GIGFORGE . CONFIDENTIAL                                                                           JudicialPredict - Project Plan
+
+
+
+
+    9. Delivery Milestones & Timeline (16 Weeks)
+
+   Phase 1 - Foundation (Weeks 1-4)
+   Infrastructure, data model, core ingestion pipelines, and authentication. Deliverable: running Kubernetes cluster
+   with live database, API gateway, and basic case/judge/attorney data populated from seed dataset.
+
+   Phase 2 - Core Product (Weeks 5-9)
+   ML pipeline v1, ensemble model training, ticker tape component, case dashboard, SHAP explainability layer, and
+   prediction market MVP. Deliverable: internal beta - end-to-end flow from case event to probability update on
+   screen.
+
+   Phase 3 - Civil & Criminal Specialisation (Weeks 10-13)
+   Civil and criminal sub-models, attorney-judge graph analytics, expert witness module, appellate branch. Full
+   Bayesian updating pipeline. Deliverable: feature-complete application entering QA.
+
+   Phase 4 - Hardening & Launch (Weeks 14-16)
+   Performance testing, security audit, model calibration validation, documentation, staging-to-production promotion,
+   and client handover. Deliverable: production deployment with runbook and operator training.
+
+     #                         Milestone                              Start               End                  Owner
+
+     1       Kubernetes cluster + CI/CD pipeline live                 Wk 1                Wk 2         Casey M.
+
+     2       PostgreSQL + Neo4j + Redis schema deployed               Wk 1                Wk 3         Chris N.
+
+     3       Data ingestion pipelines (Airflow) - seed data           Wk 2                Wk 4         Chris N.
+
+     4       API gateway + JWT auth complete                          Wk 3                Wk 4         Chris N.
+
+     5       ML ensemble v1 trained and serving predictions           Wk 5                Wk 7         Chris N.
+
+     6       Ticker tape WebSocket component live                     Wk 6                Wk 8         Chris N.
+
+     7       Case dashboard + SHAP explainability                     Wk 7                Wk 9         Chris N.
+
+     8       Prediction market module                                 Wk 8                Wk 9         Chris N.
+
+     9       Civil sub-model + damages regression                     Wk 10               Wk 11        Chris N.
+
+     10      Criminal sub-model + sentencing regression               Wk 10               Wk 11        Chris N.
+
+     11      Attorney-Judge graph neural network                      Wk 11               Wk 12        Chris N.
+
+     12      Expert witness & appellate modules                       Wk 12               Wk 13        Chris N.
+
+     13      QA - automated test suite + regression                   Wk 13               Wk 14        Riley S.
+
+     14      Security audit + penetration test                        Wk 14               Wk 15        Casey M.
+
+     15      Production deployment + client handover                  Wk 15               Wk 16        Alex R.
+
+
+
+
+                                             Page 7 . Prepared 25 March 2026 . GigForge
+GIGFORGE . CONFIDENTIAL                                                                       JudicialPredict - Project Plan
+
+
+
+
+    10. Team Assignments
+
+                    Name                             Role                                 Responsibility
+
+   Alex Reeves                      Operations Director                      Overall delivery, client communication
+
+   Jamie Okafor                     Project Manager                          Sprint planning, backlog, TDD enforcement
+
+   Chris Novak                      Lead Engineer / CTO                      Architecture, ML pipeline, all backend
+
+   Casey Muller                     DevOps Engineer                          Kubernetes, CI/CD, security, monitoring
+
+   Riley Svensson                   QA Engineer                              Test plans, automated suites, acceptance
+
+   Jordan Whitaker                  Customer Delivery                        Client-side review & approval gate
+
+
+
+    11. Deliverables
+
+                      Deliverable                              Format                             Responsible
+
+   Production web application                  Deployed URL + access creds             Chris N. / Casey M.
+
+   Source code repository                      Private GitHub repo                     Chris N.
+
+   Architecture & data model docs              Markdown + diagrams                     Chris N.
+
+   ML model registry + runbooks                MLflow + Markdown                       Chris N.
+
+   Automated test suite                        Jest / pytest / Playwright              Riley S.
+
+   Test report                                 PDF / HTML report                       Riley S.
+
+   CI/CD pipeline + Helm charts                GitHub Actions + K8s YAML               Casey M.
+
+   Operator runbook                            PDF                                     Casey M.
+
+   User documentation                          Web-based docs site                     Jamie O.
+
+   Project retrospective                       Written summary                         Alex R.
+
+
+
+
+                                     Page 8 . Prepared 25 March 2026 . GigForge
+GIGFORGE . CONFIDENTIAL                                                                             JudicialPredict - Project Plan
+
+
+
+
+    12. Risks & Mitigations
+
+                     Risk              Likelihood         Impact                             Mitigation
+
+   Data Availability                       High          Medium       Court records may be sparse or inconsistently
+
+                                                                      formatted. Mitigation: begin data audit in Week 1;
+
+                                                                      agree minimum viable dataset with client.
+
+   Model Accuracy                        Medium            Low        Initial models may underperform without sufficient
+
+                                                                      historical data. Mitigation: publish confidence intervals;
+
+                                                                      communicate calibration metrics transparently.
+
+   Legal / Ethical                       Medium            High       Predictions     may   be   perceived     as    influencing
+
+                                                                      proceedings. Mitigation: clearly label outputs as
+
+                                                                      statistical estimates; legal counsel review of T&Cs.
+
+   Scope Creep                           Medium          Medium       Stakeholder requests may expand scope mid-delivery.
+
+                                                                      Mitigation: formal change control process; all additions
+
+                                                                      assessed against appetite budget.
+
+   Third-Party Data APIs                   Low           Medium       External data sources may change or become
+
+                                                                      unavailable. Mitigation: abstract behind adapter layer;
+
+                                                                      maintain local cache of ingested data.
+
+
+
+
+    13. Commercial Summary & Next Steps
+
+   Indicative Pricing
+   Based on the scope defined above, we estimate this engagement at the Premium tier of our AI & Automation
+   practice. A detailed fixed-price proposal will be issued once the following open items are resolved:
+       • Confirmed geographic scope (Croatian courts only vs multi-jurisdiction).
+       • Data handover format from the related Croatian Judiciary project.
+       • Decision on real-money prediction market vs analysis-only in Phase 1.
+       • Authentication model: open registration, invite-only, or enterprise SSO.
+       • Language requirements: Croatian, English, or multilingual.
+       • Target launch date and any hard deadline constraints.
+       • Budget envelope confirmation.
+
+   Immediate Next Steps
+       • Client reviews this specification and returns annotated feedback within 5 business days.
+       • GigForge schedules a kick-off call to resolve open items above.
+       • Data audit commenced in parallel - client to provide sample court record exports.
+       • Fixed-price proposal and Statement of Work issued following kick-off call.
+       • Sprint 1 commences upon SOW signature.
+
+
+      Contact
+      Alex Reeves - Operations Director, GigForge
+      ops@gigforge.ai . gigforge.ai
+
+
+
+
+                                         Page 9 . Prepared 25 March 2026 . GigForge
+

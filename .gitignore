@@ -1,0 +1,90 @@
+# Rust
+target/
+Cargo.lock
+*.rs.bk
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+
+# Django
+*.log
+db.sqlite3
+local_settings.py
+staticfiles/
+media/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Secrets (never commit)
+*.pem
+*.key
+secrets/
+.secrets/
+
+# Build / cache
+.cache/
+*.lock
+sccache/
+
+# Test artifacts
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+
+# Logs
+*.log
+logs/
+
+# Generated docs
+docs/build/
+docs/_build/
+
+# ML / data
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+*.h5
+mlruns/
+.mlflow/
+data/raw/
+data/processed/
+*.parquet
+*.feather
+
+# Notebook checkpoints
+.ipynb_checkpoints/
