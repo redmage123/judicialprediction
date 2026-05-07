@@ -1,0 +1,242 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+# Cancel in-progress runs on the same branch/PR so stale runs don't block merges.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Disable incremental compilation in CI — cheaper to rebuild than to cache incremental artefacts.
+  CARGO_INCREMENTAL: "0"
+  # Faster linker where available.
+  RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Rust — lint (rustfmt + clippy)
+  # ---------------------------------------------------------------------------
+  lint-rust:
+    name: Rust lint (fmt + clippy)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable (rustfmt + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry + build artefacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            rust/target
+          key: cargo-lint-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            cargo-lint-${{ runner.os }}-
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  # ---------------------------------------------------------------------------
+  # Rust — build (debug + release check)
+  # ---------------------------------------------------------------------------
+  build-rust:
+    name: Rust build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build artefacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            rust/target
+          key: cargo-build-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            cargo-build-${{ runner.os }}-
+
+      - name: Install system deps (OpenSSL)
+        run: sudo apt-get update -q && sudo apt-get install -y -q pkg-config libssl-dev
+
+      - name: Build (debug)
+        run: cargo build --workspace
+
+      - name: Check release profile
+        run: cargo check --workspace --release
+
+  # ---------------------------------------------------------------------------
+  # Rust — test (all crates, with coverage gate)
+  # ---------------------------------------------------------------------------
+  test-rust:
+    name: Rust test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # cargo-llvm-cov requires the llvm-tools component.
+          components: llvm-tools-preview
+
+      - name: Cache cargo registry + build artefacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            rust/target
+          key: cargo-test-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            cargo-test-${{ runner.os }}-
+
+      - name: Install system deps (OpenSSL)
+        run: sudo apt-get update -q && sudo apt-get install -y -q pkg-config libssl-dev
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Run tests with coverage
+        run: |
+          cargo llvm-cov --workspace --all-targets \
+            --lcov --output-path lcov.info \
+            -- --test-threads=4
+
+      - name: Enforce 70% line coverage (spec §11.6.3)
+        run: |
+          cargo llvm-cov report --lcov --input-files lcov.info \
+            --ignore-filename-regex 'tests?/' \
+            --fail-under-lines 70
+
+      - name: Upload coverage artefact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lcov-rust
+          path: rust/lcov.info
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Proto — buf lint
+  # ---------------------------------------------------------------------------
+  proto-lint:
+    name: Proto lint (buf)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up buf
+        uses: bufbuild/buf-setup-action@v1
+
+      - name: buf lint
+        working-directory: protos
+        run: buf lint
+
+  # ---------------------------------------------------------------------------
+  # Proto — buf breaking (PRs only; skipped on push to main)
+  # ---------------------------------------------------------------------------
+  proto-breaking:
+    name: Proto breaking change check (buf)
+    runs-on: ubuntu-latest
+    # Only meaningful on PRs — comparing against the base branch HEAD.
+    if: github.event_name == 'pull_request'
+
+    steps:
+      # Full history so buf can resolve the base-branch ref.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up buf
+        uses: bufbuild/buf-setup-action@v1
+
+      - name: buf breaking (compare against target branch)
+        working-directory: protos
+        run: |
+          buf breaking \
+            --against ".git#branch=${{ github.base_ref }},subdir=protos"
+
+  # ---------------------------------------------------------------------------
+  # Proto — buf format check
+  # ---------------------------------------------------------------------------
+  proto-format:
+    name: Proto format check (buf)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up buf
+        uses: bufbuild/buf-setup-action@v1
+
+      - name: buf format (check only)
+        working-directory: protos
+        run: buf format --diff --exit-code
+
+  # ---------------------------------------------------------------------------
+  # Aggregator — single required check for branch protection
+  # ---------------------------------------------------------------------------
+  all-green:
+    name: All checks green
+    runs-on: ubuntu-latest
+    needs:
+      - lint-rust
+      - build-rust
+      - test-rust
+      - proto-lint
+      - proto-breaking
+      - proto-format
+    # Run even if proto-breaking was skipped (push to main) so the aggregator
+    # is not blocked. result == 'skipped' is treated as success here.
+    if: always()
+
+    steps:
+      - name: Check all jobs passed or were skipped
+        run: |
+          results='${{ toJson(needs) }}'
+          echo "$results" | python3 -c "
+          import sys, json
+          needs = json.load(sys.stdin)
+          failed = [
+              name for name, job in needs.items()
+              if job['result'] not in ('success', 'skipped')
+          ]
+          if failed:
+              print('FAILED jobs:', ', '.join(failed))
+              sys.exit(1)
+          print('All checks green.')
+          "
