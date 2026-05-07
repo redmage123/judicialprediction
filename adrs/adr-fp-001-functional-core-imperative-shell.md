@@ -142,3 +142,44 @@ Three paradigm tiers, applied per service / crate / module:
 ---
 
 *This ADR is part of the JudicialPredict architectural decision record. ADRs are append-only; supersession is documented via `Superseded by` not by edit.*
+
+---
+
+## Engineer Review — 2026-05-07
+
+**Reviewed by:** gigforge-engineer (Chris Novak persona, Claude Sonnet 4.6)
+**Code artifacts inspected:**
+- `rust/feature-store-types/src/lib.rs` — Tier-1 ADTs
+- `rust/decision-arith/src/lib.rs` — EV / CVaR / Nash pure functions
+- `rust/monte-carlo-sim/src/lib.rs` — `(seed, params) -> bool` pure trials
+- `rust/cost-engine/src/lib.rs` — distributional composition
+- `rust/decision-arith/tests/proptest_ev.rs`
+- `rust/cost-engine/tests/proptest_cost.rs`
+- `rust/monte-carlo-sim/tests/proptest_sim.rs`
+- `rust/feature-store-types/tests/proptest_types.rs`
+- CI workflow `.github/workflows/ci.yml`
+
+### Aspects matching shipped reality
+
+- **`// FUNCTIONAL-CORE` marker at top of every Tier-1 file:** ✅ All four Rust functional-core crates (`decision-arith`, `monte-carlo-sim`, `cost-engine`, `feature-store-types`) have `// FUNCTIONAL-CORE` as the first comment line in their lib.rs. Also includes the doc comment confirming the invariants (no I/O, no mutable global state, no unsafe).
+- **Zero mutable global state in Tier-1 crates:** ✅ Verified: no `static mut`, no `lazy_static!`, no `OnceLock` or `Mutex` at module level in any of the four crates.
+- **No `unsafe {}` in Tier-1 crates:** ✅ Confirmed by inspection.
+- **Property-based testing on all four Tier-1 crates:** ✅ proptest suites exist for all four crates, covering the specified algebraic invariants (scale/translation invariance for EV, CVaR(1.0) == mean, Nash Pareto-efficiency, compose_independent associativity/commutativity, determinism, convergence for Monte Carlo).
+- **rayon `par_iter` in monte-carlo-sim:** ✅ `run_simulation` uses `(0..n_trials).into_par_iter()`. Trivially safe because `simulate_trial` is pure.
+- **`rust/api-gateway` as Tier-2 (functional-leaning):** ✅ Request handlers are `async fn handler(State(state), ...) -> impl IntoResponse` — no global mutable state; the tokio runtime is the imperative shell; `AppState` is injected via `axum::extract::State`.
+
+### Divergences from seed
+
+1. **Tier-1 CI linter (`static mut` / `lazy_static` rejection) not yet wired.** The ADR mandates a linter rule that rejects `static mut`, `lazy_static!` with mutable contents, and I/O calls inside `// FUNCTIONAL-CORE` marked files. The `cargo clippy` run in CI does not currently have a custom Clippy lint or `cargo-deny` rule enforcing this. The marker comment is present but not machine-checked. **Sprint 2 gap.**
+
+2. **Property-test count gate not yet in CI.** The ADR mandates a CI gate tracking proptest count per Tier-1 module; PRs that drop the count below baseline need explicit acknowledgement. This is not wired — `cargo test --workspace` runs proptests but does not count them or compare against a baseline. **Sprint 2 gap.**
+
+3. **`monte-carlo-sim` `splitmix64` was added post-seed.** The ADR describes the function shape as `(seed, params) -> Trajectory`. The shipped impl uses `splitmix64` for the pseudo-random mapping (seed → f64), which was a bug-fix applied during property-test development: the original LCG produced non-uniform output for consecutive seeds 0..N, causing the convergence proptest to fail. The fix is correct and improves the implementation; it is consistent with the ADR's intent (pure, deterministic, seed-reproducible). No amendment required, but noted here as a detail not anticipated in the PM seed.
+
+4. **Python Tier-1 services (logic-svc, causal-inference-svc, nlp-svc, ml-inference-svc/conformal) not yet scaffolded.** The ADR lists eight Tier-1 modules; only four Rust crates have been implemented. The four Python modules are Sprint 2+ work. The ADR correctly anticipates them — this is schedule, not design, divergence.
+
+5. **`// FUNCTIONAL-CORE` (Python: `# FUNCTIONAL-CORE`) CI enforcement hook not present.** Same as point 1 but for Python. No `ruff` plugin or pre-commit hook currently checks Python files for the marker or enforces the purity rules. **Sprint 2 gap.**
+
+### Amendment: none required
+
+The Tier-1 paradigm decisions are faithfully implemented in the four Rust crates. The CI enforcement gaps are backlog items, not design regressions. No amendment to ADR text is needed.

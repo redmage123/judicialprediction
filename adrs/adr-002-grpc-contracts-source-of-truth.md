@@ -117,3 +117,48 @@ Specifics:
 *This ADR is part of the JudicialPredict architectural decision record. ADRs are append-only; supersession is documented via `Superseded by` not by edit.*
 
 *Note on authorship: this ADR was authored by the PM after the gigforge-engineer agent dispatch returned off-topic content (the local Gemma 4 e4b-class model on the dev Hetzner is too weak for multi-step file-I/O instruction following). The agent will be re-engaged for ADR-003 and ADR-004 once a stronger model is available, or those will be PM-authored as well. The seed-then-iterate pattern continues.*
+
+---
+
+## Engineer Review — 2026-05-07
+
+**Reviewed by:** gigforge-engineer (Chris Novak persona, Claude Sonnet 4.6)
+**Code artifacts inspected:**
+- `protos/judicialpredict/data_plane/feature_store/v1/feature_store.proto`
+- `protos/judicialpredict/ml_plane/inference/v1/inference.proto`
+- `protos/buf.yaml`, `protos/buf.gen.yaml`, `protos/INVENTORY.md`
+- `rust/feature-store/build.rs`
+- `rust/feature-store/src/lib.rs` (codegen re-exports)
+- CI workflow `.github/workflows/ci.yml` (proto-lint + proto-breaking + proto-format jobs)
+
+### Aspects matching shipped reality
+
+- **`protos/` as canonical location:** ✅ Implemented exactly as specified. Two packages: `judicialpredict.data_plane.feature_store.v1` and `judicialpredict.ml_plane.inference.v1`. Directory layout matches the dot-notation rule.
+- **buf lint + buf breaking in CI:** ✅ Both wired into `.github/workflows/ci.yml` as separate parallel jobs (`proto-lint`, `proto-breaking`, `proto-format`). `buf breaking` is PR-only as specified.
+- **prost + tonic codegen on the Rust side:** ✅ `rust/feature-store/build.rs` uses `tonic_build::configure().build_server(true).build_client(true).compile_protos(...)` from the protos root. Runs on every `cargo build` via `cargo:rerun-if-changed`.
+- **buf.yaml with recommended ruleset:** ✅ `protos/buf.yaml` uses `use: [STANDARD]`. Lint passes cleanly after a one-round correction (directory paths must mirror package names — this was caught and fixed before shipping).
+- **`INVENTORY.md` tracking package versions and status:** ✅ Created at `protos/INVENTORY.md` with both packages listed as Active v1.
+- **`TIER_UNSPECIFIED = 0` rule on all proto enums:** ✅ All four enums in feature_store.proto (`Tier`, `Sensitivity`, `PermittedUse`) and both enums in inference.proto (`ModelVariant`, `OutcomeLabel`) carry `*_UNSPECIFIED = 0` as first value.
+
+### Divergences from seed
+
+1. **Python codegen path differs from spec.** The ADR specifies `python/<service>/_generated/` as the output directory, and `python/scripts/protoc-build.sh` as the generator script. Shipped reality: the script is at `python/ml-inference-svc/scripts/generate_stubs.sh` and outputs to `python/ml-inference-svc/src/ml_inference_svc/grpc_stubs/`. This is a naming divergence, not a structural one — the pattern is correct. The ADR path convention will be enforced as more Python services are added.
+
+2. **Generated Python stubs are not yet committed.** The ADR specifies generate-and-commit under `_generated/` with a generator-stamp provenance comment. Sprint 1 left Python stub generation as a manual `bash generate_stubs.sh` step without CI enforcement. This is a **Sprint 2 gap** — the `buf generate` invocation for Python stubs is not yet in CI.
+
+3. **Cross-plane integration test not yet wired.** The ADR specifies a CI integration test stage that spins up matched Rust + Python images for every `.proto` change. This does not yet exist in `.github/workflows/ci.yml`. Round-trip tests exist as Rust unit tests (`feature-store/src/lib.rs`) and Python pytest (`test_proto_roundtrip.py`) but they don't run as a cross-plane matched-image test. **Sprint 2 gap.**
+
+4. **`buf.gen.yaml` specifies codegen plugins but `buf generate` is not wired into CI.** The CI `proto-format` job runs `buf format`; no CI job runs `buf generate` to validate that the plugins produce compilable output. **Sprint 2 gap.**
+
+5. **CODEOWNERS file not yet created.** The ADR specifies `CODEOWNERS` entries for `protos/`. Not yet present in the repo. **Sprint 2 gap.**
+
+### Amendment: none required
+
+The divergences above are execution gaps (Sprint 2 backlog), not design divergences. The core decision — protos/ as canonical SSoT, buf lint + breaking in CI, prost+tonic on Rust, grpcio on Python — is correctly implemented. No amendment to the ADR text is needed.
+
+### Sprint 2 follow-ups (engineer-identified)
+
+- Wire `buf generate` into CI to validate plugin compilation on every proto change.
+- Commit generated Python stubs with generator-stamp provenance check in CI.
+- Build cross-plane integration test stage (matched Rust + Python images, real gRPC roundtrip).
+- Add `CODEOWNERS` for `protos/` tree.

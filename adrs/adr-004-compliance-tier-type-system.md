@@ -194,3 +194,58 @@ The disclosure is generated mechanically from the feature-lineage data; cannot b
 ---
 
 *This ADR is part of the JudicialPredict architectural decision record. ADRs are append-only; supersession is documented via `Superseded by` not by edit.*
+
+---
+
+## Engineer Review — 2026-05-07
+
+**Reviewed by:** gigforge-engineer (Chris Novak persona, Claude Sonnet 4.6)
+**Code artifacts inspected:**
+- `rust/feature-store-types/src/lib.rs` — `Tier`, `Sensitivity`, `PermittedUse`, `TieredFeature<T>`
+- `rust/feature-store-types/tests/proptest_types.rs`
+- `rust/feature-store/migrations/20260507120000_baseline.sql` — `feature_tier`, `feature_sensitivity` SQL enums
+- `protos/judicialpredict/data_plane/feature_store/v1/feature_store.proto` — `Tier`, `Sensitivity`, `PermittedUse` proto enums
+
+### Aspects matching shipped reality
+
+- **`Tier` enum with `A`, `B`, `C`, `D` variants, `is_safe_for_model()` method:** ✅ Exactly as described. `Tier::C.is_safe_for_model()` returns `false`; all others return `true`. Unit tests confirm.
+- **`PermittedUse` enum gating Tier-C reads:** ✅ `TieredFeature<T>::read(permitted_use: Option<PermittedUse>) -> Option<&T>` returns `None` for Tier-C without a `PermittedUse` value. This is a runtime gate on the value, not compile-time.
+- **`Sensitivity` enum with `Public`, `QuasiPublic`, `Inferred`, `Protected`:** ✅ All four variants present, matching the proto `Sensitivity` enum.
+- **`TieredFeature<T>` newtype wrapper:** ✅ Generic over `T`; carries `tier`, `sensitivity`; `read()` enforces the Tier-C gate; `is_safe_for_model()` delegates to `Tier::is_safe_for_model()`.
+- **SQL `feature_tier` enum matching proto values:** ✅ `CREATE TYPE feature_tier AS ENUM ('TIER_A', 'TIER_B', 'TIER_C', 'TIER_D')`. Includes a note that `TIER_UNSPECIFIED` is absent (cannot have a zero-sentinel in SQL enums) — consistent with ADR-004's design intent.
+- **Proto enums match Rust ADTs in structure:** ✅ `Tier` proto enum has `TIER_A=1`, `TIER_B=2`, `TIER_C=3`, `TIER_D=4` with `TIER_UNSPECIFIED=0`. Rust prost-generated code strips the common prefix; property tests verified the round-trip: `TIER_A ↔ Tier::TierA` (prost naming).
+
+### Divergences from seed
+
+1. **PhantomData-based phantom-type enforcement not implemented.** The ADR specifies the full phantom-type pattern:
+   ```rust
+   pub struct Feature<Tier, Sensitivity> { ..., _phantom: PhantomData<(Tier, Sensitivity)> }
+   pub struct TierA; pub struct TierC; ...
+   pub trait PermittedUseInModel {}
+   impl PermittedUseInModel for TierA {} // TierC: NOT impl
+   ```
+   The shipped implementation uses a **simpler enum-based approach** (`TieredFeature<T>` with a `Tier` enum field and a runtime `read()` gate), not the phantom-type compile-time enforcement the ADR describes.
+
+   This is the most significant divergence. The compile-time guarantee described in the ADR ("A call like `extract_features_for_model(case, tier_c_features)` is a compile error") does not exist in the shipped code — the Tier-C gate is a runtime `Option` check, not a type-system rejection.
+
+   **Assessment:** The shipped approach is correct for Sprint 1 (simpler, testable, unblocking). The full phantom-type system is a Sprint 2 task. See amendment below.
+
+2. **`ProtectedClassElementToken` and `CrossTenantAuthorizedToken` not yet implemented.** These are the explicit token types for the narrow Tier-C exception path and cross-tenant authorization. Neither exists in the codebase. **Sprint 2+ gap.**
+
+3. **Feature metadata registry (entity_tier, sensitivity, permitted_uses, lineage, provenance) not yet implemented.** The SQL `features` table has `tier` and `sensitivity` columns but no `permitted_uses` or `provenance` column. The metadata registry is Phase 2 work. The `lineage` column is present as `jsonb NOT NULL DEFAULT '{}'`.
+
+4. **Protected-class proxy audit job not yet built.** Quarterly correlation audit is Phase 2. **Out of Sprint 1 scope.**
+
+5. **`feature_fn!` macro to reduce generic boilerplate not yet created.** The ADR mentions it as a mitigation for phantom-type verbosity. Not needed until the phantom-type system is implemented.
+
+### Amendment — 2026-05-07
+
+**Addendum to Decision — Phased type-system implementation:**
+
+> **Sprint 1 baseline (shipped):** `Tier` is a runtime enum on `TieredFeature<T>`. Tier-C reads are gated by `read(permitted_use: Option<PermittedUse>) -> Option<&T>`. This provides correct behaviour but not compile-time enforcement — a caller can pass `None` and observe `None`, rather than having the call rejected at build time.
+
+> **Sprint 2 target (planned):** Introduce the full phantom-type system described in this ADR (`Feature<TierA, Public>`, `PermittedUseInModel` trait, `TierC` excluded). The runtime `TieredFeature<T>` wrapper will be kept at the gRPC boundary (proto deserialization layer) and converted to the phantom-type form at parse time — exactly the "parse, don't validate" pattern cited in References.
+
+> **Migration path:** `TieredFeature<T>::into_typed()` will produce `Feature<TierA|B|C|D, Sensitivity>` with a compile-time branch. Downstream functions constrained by `PermittedUseInModel` will reject the `TierC` variant at compile time. Existing runtime tests become redundant but are kept as regression tests.
+
+> This phasing is consistent with the reversibility note in the original ADR: "the type-system structure is additive; new tiers or new permitted-use traits can be added without breaking existing code."
