@@ -3,6 +3,10 @@ name = "monte-carlo-sim"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "monte_carlo_sim"
+path = "src/lib.rs"
+
 [[bin]]
 name = "monte-carlo-sim"
 path = "src/main.rs"
@@ -13,3 +17,6 @@ ndarray = { workspace = true }
 serde = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
