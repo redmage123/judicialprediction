@@ -1,0 +1,21 @@
+version: v2
+plugins:
+  # Rust — prost + tonic (data plane and ML plane stubs)
+  - remote: buf.build/community/neoeinstein-prost:v0.4.0
+    out: ../rust/generated/proto
+    opt:
+      - compile_well_known_types=true
+      - extern_path=.google.protobuf=::pbjson_types
+
+  - remote: buf.build/community/neoeinstein-tonic:v0.4.0
+    out: ../rust/generated/proto
+    opt:
+      - compile_well_known_types=true
+      - extern_path=.google.protobuf=::pbjson_types
+
+  # Python — grpcio-tools (ML plane stubs)
+  - remote: buf.build/protocolbuffers/python:v29.3
+    out: ../python/generated/proto
+
+  - remote: buf.build/grpc/python:v1.68.1
+    out: ../python/generated/proto

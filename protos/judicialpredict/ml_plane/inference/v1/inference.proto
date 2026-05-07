@@ -1,0 +1,106 @@
+// Copyright JudicialPredict. All rights reserved.
+//
+// ML Inference service — Python ML plane.
+// Single source of truth per ADR-002.
+// Rust api-gateway calls this service to obtain case-outcome predictions.
+
+syntax = "proto3";
+
+package judicialpredict.ml_plane.inference.v1;
+
+option go_package = "github.com/judicialpredict/protos/judicialpredict/ml_plane/inference/v1;inference_v1";
+option java_package = "ai.judicialpredict.mlplane.inference.v1";
+
+// Identifies the model variant to use for prediction.
+enum ModelVariant {
+  // Default — unset; server will use the current production model.
+  MODEL_VARIANT_UNSPECIFIED = 0;
+  // XGBoost gradient-boosted tree ensemble (primary model, Sprint M3).
+  MODEL_VARIANT_XGBOOST = 1;
+  // PyMC Bayesian hierarchical judge model (Sprint M4).
+  MODEL_VARIANT_BAYESIAN_JUDGE = 2;
+  // Random-forest attorney model (Sprint M4).
+  MODEL_VARIANT_RF_ATTORNEY = 3;
+  // Stacked meta-learner over XGBoost + Bayesian + RF (Sprint M4).
+  MODEL_VARIANT_META_LEARNER = 4;
+}
+
+// A single SHAP feature attribution value.
+message ShapValue {
+  // The feature whose contribution is being reported.
+  string feature_id = 1;
+
+  // SHAP contribution in log-odds units (positive = increases p_win).
+  double shap_contribution = 2;
+
+  // Absolute rank among all features (1 = highest |shap|).
+  int32 rank = 3;
+}
+
+// A conformal prediction interval around the point estimate.
+message ConformalInterval {
+  // Lower bound of the conformal prediction interval.
+  double lower = 1;
+
+  // Upper bound of the conformal prediction interval.
+  double upper = 2;
+
+  // Nominal coverage level (e.g. 0.90 for 90 % coverage).
+  double coverage = 3;
+}
+
+// Request to predict the outcome of a legal case.
+message PredictCaseOutcomeRequest {
+  // The case for which a prediction is requested.
+  string case_id = 1;
+
+  // Feature vector — list of feature IDs whose values should be read
+  // from the feature store. The ML service resolves these via the
+  // FeatureStoreService (data plane).
+  repeated string feature_ids = 2;
+
+  // Override the model variant. Leave unset to use the production default.
+  ModelVariant model_variant = 3;
+
+  // Conformal prediction coverage level (0.0 uses server default of 0.90).
+  double conformal_coverage = 4;
+
+  // Caller-supplied trace correlation ID (OpenTelemetry propagation).
+  string trace_id = 5;
+}
+
+// Prediction response including point estimate, conformal interval, and SHAP.
+message PredictCaseOutcomeResponse {
+  // Case for which this prediction was generated.
+  string case_id = 1;
+
+  // Predicted probability of a plaintiff win (0.0 – 1.0).
+  double p_win = 2;
+
+  // Conformal prediction interval at the requested coverage level.
+  ConformalInterval conformal_interval = 3;
+
+  // SHAP feature attribution values, sorted by |shap_contribution| descending.
+  // Only the top-N features are returned (server-configurable; default 20).
+  repeated ShapValue shap_values = 4;
+
+  // Which model variant produced this prediction.
+  ModelVariant model_variant_used = 5;
+
+  // MLflow run ID for reproducibility / audit.
+  string mlflow_run_id = 6;
+
+  // Epoch seconds when this prediction was generated.
+  int64 predicted_at_unix = 7;
+}
+
+// InferenceService provides case-outcome predictions from the Python ML plane.
+// Called by the Rust api-gateway to serve the case workspace UI.
+// See ADR-001 §Python ML plane and ADR-002 for the gRPC contract guarantees.
+service InferenceService {
+  // PredictCaseOutcome returns a point-estimate win probability, a conformal
+  // prediction interval, and SHAP feature attributions for a single case.
+  // Returns NOT_FOUND if the case_id is unknown to the feature store.
+  // Returns FAILED_PRECONDITION if required features are missing.
+  rpc PredictCaseOutcome(PredictCaseOutcomeRequest) returns (PredictCaseOutcomeResponse);
+}

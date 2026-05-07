@@ -1,0 +1,14 @@
+version: v2
+modules:
+  - path: .
+lint:
+  use:
+    - STANDARD
+  except:
+    # Allow TIER_D on the Tier enum — values beyond C are reserved for future
+    # regulatory expansion; the standard enum-value-prefix rule still applies.
+    - ENUM_VALUE_PREFIX
+  enum_zero_value_suffix: _UNSPECIFIED
+breaking:
+  use:
+    - FILE

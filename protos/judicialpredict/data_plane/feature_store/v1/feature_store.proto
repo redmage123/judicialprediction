@@ -1,0 +1,162 @@
+// Copyright JudicialPredict. All rights reserved.
+//
+// Feature Store service — Rust data plane.
+// Single source of truth per ADR-002.
+// Tier and Sensitivity enumerations per ADR-004.
+
+syntax = "proto3";
+
+package judicialpredict.data_plane.feature_store.v1;
+
+option go_package = "github.com/judicialpredict/protos/judicialpredict/data_plane/feature_store/v1;feature_store_v1";
+option java_package = "ai.judicialpredict.dataplane.featurestore.v1";
+
+// Compliance tier classification for a feature.
+// Tier C features (protected-class) require an explicit PermittedUse
+// acknowledgement at every call site — mirrored from the Rust ADT in
+// feature-store-types. TIER_D is reserved for future regulatory expansion.
+enum Tier {
+  // Default — unset; must not appear in stored records.
+  TIER_UNSPECIFIED = 0;
+  // Public / non-sensitive features (e.g. docket number, filing date).
+  TIER_A = 1;
+  // Sensitive-but-permissible features (e.g. prior case outcomes, win rate).
+  TIER_B = 2;
+  // Protected-class features — Title VII / ADA / ADEA exposure.
+  // Reads require an explicit PermittedUse acknowledgement.
+  TIER_C = 3;
+  // Reserved for future regulatory tier (do not use).
+  TIER_D = 4;
+}
+
+// Fine-grained sensitivity classification orthogonal to Tier.
+enum Sensitivity {
+  // Default — unset; must not appear in stored records.
+  SENSITIVITY_UNSPECIFIED = 0;
+  // Publicly available information (court dockets, published opinions).
+  SENSITIVITY_PUBLIC = 1;
+  // Quasi-public: not published but derivable from public sources.
+  SENSITIVITY_QUASI_PUBLIC = 2;
+  // Inferred: derived from ML models; not directly observed.
+  SENSITIVITY_INFERRED = 3;
+  // Protected: directly observed protected-class attribute.
+  SENSITIVITY_PROTECTED = 4;
+}
+
+// PermittedUse declares the legal basis for reading a Tier-C feature.
+// Must be supplied on any RPC that returns Tier-C data.
+enum PermittedUse {
+  // Default — no permitted-use declared.
+  PERMITTED_USE_UNSPECIFIED = 0;
+  // Disparate-impact audit (read-only; never used as model input).
+  PERMITTED_USE_DISPARATE_IMPACT_AUDIT = 1;
+  // Operator override with human-in-the-loop review log.
+  PERMITTED_USE_OPERATOR_OVERRIDE_WITH_AUDIT_LOG = 2;
+}
+
+// A typed feature value with its compliance metadata.
+message Feature {
+  // Unique stable identifier for this feature (e.g. "judge.reversal_rate.circuit9").
+  string feature_id = 1;
+
+  // Human-readable display name.
+  string name = 2;
+
+  // Serialised value — JSON-encoded scalar or array.
+  string value_json = 3;
+
+  // Compliance tier — must always be set.
+  Tier tier = 4;
+
+  // Sensitivity classification — must always be set.
+  Sensitivity sensitivity = 5;
+
+  // Unique case identifier this feature belongs to.
+  string case_id = 6;
+
+  // Epoch seconds when this feature was last derived.
+  int64 derived_at_unix = 7;
+}
+
+// Request to retrieve a single feature by its ID and case context.
+message GetFeatureRequest {
+  // The case this feature belongs to.
+  string case_id = 1;
+
+  // The stable feature identifier.
+  string feature_id = 2;
+
+  // Required when feature Tier is TIER_C; ignored for TIER_A / TIER_B.
+  PermittedUse permitted_use = 3;
+}
+
+// Response wrapping the retrieved feature.
+message GetFeatureResponse {
+  // The retrieved feature.
+  Feature feature = 1;
+}
+
+// Request to stream all features for a case, optionally filtered by tier.
+message ListFeaturesRequest {
+  // The case whose features are to be listed.
+  string case_id = 1;
+
+  // Filter to only features at or below this tier.
+  // TIER_UNSPECIFIED means "return all tiers caller is permitted to see".
+  Tier max_tier = 2;
+
+  // Required when max_tier is TIER_C (or TIER_UNSPECIFIED, which may
+  // include Tier-C features).
+  PermittedUse permitted_use = 3;
+
+  // Maximum number of features per stream message.
+  int32 page_size = 4;
+}
+
+// One streamed feature record returned by ListFeatures.
+message ListFeaturesResponse {
+  // The feature in this stream message.
+  Feature feature = 1;
+}
+
+// Request to ingest a derived feature into the feature store.
+message IngestFeatureRequest {
+  // The feature to store. feature_id, case_id, tier, and sensitivity
+  // must all be set; value_json must be valid JSON.
+  Feature feature = 1;
+
+  // Idempotency key — safe to retry on transient failure.
+  string idempotency_key = 2;
+}
+
+// Response confirming a successful ingest operation.
+message IngestFeatureResponse {
+  // Server-assigned storage identifier.
+  string storage_id = 1;
+
+  // Epoch seconds when the feature was stored.
+  int64 stored_at_unix = 2;
+
+  // Echo of the idempotency key for client-side deduplication.
+  string idempotency_key = 3;
+}
+
+// FeatureStoreService is the authoritative API for reading and writing
+// compliance-tiered features on the Rust data plane.
+// Consumed by the Python ML plane via gRPC (grpcio stubs generated from
+// this file). See ADR-001 §gRPC contract boundary and ADR-002.
+service FeatureStoreService {
+  // GetFeature returns a single feature by case and feature ID.
+  // Returns NOT_FOUND if the feature does not exist.
+  // Returns PERMISSION_DENIED if a Tier-C feature is requested without
+  // a valid PermittedUse.
+  rpc GetFeature(GetFeatureRequest) returns (GetFeatureResponse);
+
+  // ListFeatures streams all features for a case, respecting tier filters.
+  // Tier-C features are silently omitted if permitted_use is not set.
+  rpc ListFeatures(ListFeaturesRequest) returns (stream ListFeaturesResponse);
+
+  // IngestFeature stores a derived feature. Idempotent on idempotency_key.
+  // Called by the feature-deriver Rust service after derivation.
+  rpc IngestFeature(IngestFeatureRequest) returns (IngestFeatureResponse);
+}
