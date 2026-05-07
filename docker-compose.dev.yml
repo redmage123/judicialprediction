@@ -1,0 +1,146 @@
+# =============================================================================
+# JudicialPredict — LOCAL DEV STACK ONLY
+#
+# This file is for local development and CI integration tests ONLY.
+# Production uses managed operators per ADR-003 and spec §11.5:
+#   - Postgres  → CloudNativePG operator (K8s)
+#   - Neo4j     → Neo4j Helm chart (K8s)
+#   - Redis     → Redis Operator / Upstash (K8s / managed)
+#   - MinIO     → MinIO Operator (K8s) / S3-compatible cloud bucket
+#
+# Never point production credentials at this compose file.
+# Never commit real secrets to this file.
+# =============================================================================
+
+name: judicialpredict-dev
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Postgres 16 + pgvector
+  # Production equivalent: CloudNativePG cluster (ADR-003)
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: judicialpredict_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: judicialpredict
+      POSTGRES_PASSWORD: judicialpredict_dev_pwd
+      POSTGRES_DB: judicialpredict_dev
+    ports:
+      - "127.0.0.1:5454:5432"
+    volumes:
+      - jp_pg_data:/var/lib/postgresql/data
+    networks:
+      - jp_dev_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U judicialpredict -d judicialpredict_dev"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # Neo4j 5 Community Edition
+  # Production equivalent: Neo4j Helm chart (ADR-003)
+  # ---------------------------------------------------------------------------
+  neo4j:
+    image: neo4j:5-community
+    container_name: judicialpredict_neo4j
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: neo4j/judicialpredict_dev_pwd
+      # Allow up to 2 GB heap for local graph queries.
+      NEO4J_server_memory_heap_initial__size: 512m
+      NEO4J_server_memory_heap_max__size: 2g
+    ports:
+      - "127.0.0.1:7474:7474"  # HTTP / browser
+      - "127.0.0.1:7687:7687"  # Bolt
+    volumes:
+      - jp_neo4j_data:/data
+      - jp_neo4j_logs:/logs
+    networks:
+      - jp_dev_net
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - |
+          cypher-shell -u neo4j -p judicialpredict_dev_pwd \
+            'RETURN 1' --format plain 2>/dev/null | grep -q '1'
+      interval: 15s
+      timeout: 10s
+      retries: 6
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # Redis 7 with persistence + Streams
+  # Production equivalent: Redis Operator / Upstash (ADR-003)
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: judicialpredict_redis
+    restart: unless-stopped
+    # AOF + RDB persistence; Streams are a native Redis 5+ data type.
+    command: >
+      redis-server
+      --appendonly yes
+      --appendfsync everysec
+      --save 60 1
+      --save 300 10
+    ports:
+      - "127.0.0.1:6385:6379"
+    volumes:
+      - jp_redis_data:/data
+    networks:
+      - jp_dev_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # ---------------------------------------------------------------------------
+  # MinIO (S3-compatible object store)
+  # Production equivalent: MinIO Operator / S3-compatible cloud bucket (ADR-003)
+  # ---------------------------------------------------------------------------
+  minio:
+    image: minio/minio:latest
+    container_name: judicialpredict_minio
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: judicialpredict
+      MINIO_ROOT_PASSWORD: judicialpredict_dev_pwd
+    command: server /data --console-address ":9001"
+    ports:
+      - "127.0.0.1:9100:9000"   # S3 API
+      - "127.0.0.1:9101:9001"   # Web console
+    volumes:
+      - jp_minio_data:/data
+    networks:
+      - jp_dev_net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/minio/health/live"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+# =============================================================================
+# Volumes — all local-dev data persists across restarts.
+# Destroy with: docker compose -f docker-compose.dev.yml down -v
+# =============================================================================
+volumes:
+  jp_pg_data:
+  jp_neo4j_data:
+  jp_neo4j_logs:
+  jp_redis_data:
+  jp_minio_data:
+
+# =============================================================================
+# Network — isolated bridge; services address each other by container name.
+# =============================================================================
+networks:
+  jp_dev_net:
+    driver: bridge
