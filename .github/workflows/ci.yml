@@ -208,6 +208,76 @@ jobs:
         run: buf format --diff --exit-code
 
   # ---------------------------------------------------------------------------
+  # Rust — E2E smoke (Postgres + RLS via docker compose)
+  # ---------------------------------------------------------------------------
+  e2e-rust:
+    name: Rust E2E smoke (Postgres + RLS)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      # jp_app (non-superuser, subject to RLS) — used by the test's app pool.
+      DATABASE_URL: postgres://jp_app:judicialpredict_dev_pwd@localhost:5454/judicialpredict_dev
+      # Superuser — used by the test's admin pool and by sqlx migrate run.
+      ADMIN_DATABASE_URL: postgres://judicialpredict:judicialpredict_dev_pwd@localhost:5454/judicialpredict_dev
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build artefacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            rust/target
+          key: cargo-e2e-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            cargo-e2e-${{ runner.os }}-
+
+      - name: Install system deps (OpenSSL)
+        run: sudo apt-get update -q && sudo apt-get install -y -q pkg-config libssl-dev
+
+      - name: Boot Postgres via docker compose
+        run: docker compose -f docker-compose.dev.yml up -d postgres
+
+      - name: Wait for Postgres healthcheck
+        run: |
+          echo "Waiting for Postgres to report healthy..."
+          for i in $(seq 1 30); do
+            status=$(docker inspect --format='{{.State.Health.Status}}' judicialpredict_postgres 2>/dev/null || echo "missing")
+            if [ "$status" = "healthy" ]; then
+              echo "Postgres is healthy."
+              exit 0
+            fi
+            echo "  attempt $i/30 — status=$status — sleeping 2s"
+            sleep 2
+          done
+          echo "Postgres did not become healthy after 60s." >&2
+          docker compose -f docker-compose.dev.yml logs postgres
+          exit 1
+
+      - name: Install sqlx-cli
+        run: |
+          cargo install sqlx-cli \
+            --features postgres,rustls \
+            --no-default-features
+
+      - name: Apply database migrations
+        run: |
+          sqlx migrate run \
+            --database-url "$ADMIN_DATABASE_URL" \
+            --source rust/feature-store/migrations
+
+      - name: Run e2e smoke tests (--include-ignored)
+        working-directory: rust
+        run: cargo test --test e2e_smoke -p api-gateway -- --include-ignored
+
+  # ---------------------------------------------------------------------------
   # Aggregator — single required check for branch protection
   # ---------------------------------------------------------------------------
   all-green:
@@ -220,6 +290,7 @@ jobs:
       - proto-lint
       - proto-breaking
       - proto-format
+      - e2e-rust
     # Run even if proto-breaking was skipped (push to main) so the aggregator
     # is not blocked. result == 'skipped' is treated as success here.
     if: always()

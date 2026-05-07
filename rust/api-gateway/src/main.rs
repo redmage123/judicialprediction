@@ -1,7 +1,11 @@
 // JudicialPredict API Gateway — binary entry point.
 //
-// Reads FEATURE_STORE_GRPC_URL from the environment (default: http://127.0.0.1:4001)
-// and binds the HTTP/GraphQL server on 0.0.0.0:4000.
+// Reads from the environment:
+//   FEATURE_STORE_GRPC_URL  — gRPC address of the feature-store service
+//                             (default: http://127.0.0.1:4001)
+//   JWT_SECRET              — HS256 signing secret (required; no default)
+//
+// Binds the HTTP/GraphQL server on 0.0.0.0:4000.
 
 use anyhow::Result;
 
@@ -12,8 +16,12 @@ async fn main() -> Result<()> {
     let feature_store_url = std::env::var("FEATURE_STORE_GRPC_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:4001".to_string());
 
+    let jwt_secret = std::env::var("JWT_SECRET")
+        .expect("JWT_SECRET environment variable must be set")
+        .into_bytes();
+
     tracing::info!("api-gateway: feature-store gRPC at {feature_store_url}");
-    let app = api_gateway::build_app(&feature_store_url).await?;
+    let app = api_gateway::build_app(&feature_store_url, jwt_secret).await?;
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:4000").await?;
     tracing::info!("api-gateway listening on {}", listener.local_addr()?);

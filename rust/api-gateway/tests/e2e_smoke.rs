@@ -10,7 +10,7 @@
 //   cargo test -p api-gateway --test e2e_smoke -- --include-ignored
 //
 // The tests prove the full path:
-//   HTTP client → api-gateway (axum/GraphQL) → feature-store-server (tonic/gRPC) → Postgres RLS
+//   HTTP client → api-gateway (axum/GraphQL/JWT) → feature-store-server (tonic/gRPC) → Postgres RLS
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -20,10 +20,21 @@ use feature_store::{
 };
 use tower::ServiceExt as _;
 
+// ---------------------------------------------------------------------------
+// Test constants
+// ---------------------------------------------------------------------------
+
+/// HS256 secret used for all test JWTs.  Never used outside of test code.
+const TEST_JWT_SECRET: &[u8] = b"judicialpredict-test-jwt-secret!";
+
 /// Dev tenant seeded by migration 20260507120001.
 const DEV_TENANT: &str = "00000000-0000-0000-0000-000000000001";
 /// A second UUID that has no data — used to probe RLS isolation.
 const OTHER_TENANT: &str = "00000000-0000-0000-0000-000000000002";
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 fn jp_app_url() -> String {
     std::env::var("DATABASE_URL").unwrap_or_else(|_| {
@@ -38,12 +49,82 @@ fn admin_url() -> String {
     })
 }
 
+/// Mint a valid HS256 test JWT for the given tenant UUID.
+///
+/// The token has a 1-hour expiry and a `features:read` scope.
+fn make_jwt(tenant_id: &str) -> String {
+    use jsonwebtoken::{encode, EncodingKey, Header};
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as usize;
+
+    // Matches the Claims struct in auth.rs without importing it.
+    #[derive(serde::Serialize)]
+    struct TestClaims {
+        sub: String,
+        tenant_id: String,
+        scopes: Vec<String>,
+        exp: usize,
+        iat: usize,
+    }
+
+    let claims = TestClaims {
+        sub: "e2e-test-subject".to_string(),
+        tenant_id: tenant_id.to_string(),
+        scopes: vec!["features:read".to_string()],
+        exp: now + 3600,
+        iat: now,
+    };
+
+    encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(TEST_JWT_SECRET),
+    )
+    .expect("test JWT encoding failed")
+}
+
+/// Mint an already-expired HS256 JWT for the given tenant UUID.
+fn make_expired_jwt(tenant_id: &str) -> String {
+    use jsonwebtoken::{encode, EncodingKey, Header};
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as usize;
+
+    #[derive(serde::Serialize)]
+    struct TestClaims {
+        sub: String,
+        tenant_id: String,
+        scopes: Vec<String>,
+        exp: usize,
+        iat: usize,
+    }
+
+    let claims = TestClaims {
+        sub: "e2e-test-subject".to_string(),
+        tenant_id: tenant_id.to_string(),
+        scopes: vec![],
+        exp: now - 3600, // 1 hour in the past
+        iat: now - 7200,
+    };
+
+    encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(TEST_JWT_SECRET),
+    )
+    .expect("expired JWT encoding failed")
+}
+
 /// Spawn the feature-store gRPC server on a random free port.
 /// Returns the URL and a join handle (abort to shut down).
 async fn spawn_feature_store(pool: sqlx::PgPool) -> (String, tokio::task::JoinHandle<()>) {
     // Bind to a random free port so parallel test runs don't collide.
-    let listener =
-        tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let url = format!("http://{addr}");
     let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
@@ -63,19 +144,21 @@ async fn spawn_feature_store(pool: sqlx::PgPool) -> (String, tokio::task::JoinHa
 }
 
 /// Helper: send a GraphQL query through the axum router (in-process, no TCP).
-async fn graphql(
-    app: &axum::Router,
-    query: &str,
-    tenant_id: &str,
-) -> (StatusCode, bytes::Bytes) {
+///
+/// `jwt` should be a Bearer token string (e.g. from `make_jwt`).
+/// Pass `""` to send a request with no Authorization header (for testing 401 paths).
+async fn graphql(app: &axum::Router, query: &str, jwt: &str) -> (StatusCode, bytes::Bytes) {
     let body = format!(r#"{{"query": "{}"}}"#, query.replace('"', "\\\""));
-    let req = Request::builder()
+    let mut builder = Request::builder()
         .method("POST")
         .uri("/graphql")
-        .header("content-type", "application/json")
-        .header("x-tenant-id", tenant_id)
-        .body(Body::from(body))
-        .unwrap();
+        .header("content-type", "application/json");
+
+    if !jwt.is_empty() {
+        builder = builder.header("authorization", format!("Bearer {jwt}"));
+    }
+
+    let req = builder.body(Body::from(body)).unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
     let status = resp.status();
     let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
@@ -88,14 +171,14 @@ async fn graphql(
 // Tests
 // ---------------------------------------------------------------------------
 
-/// S2.1 E2E smoke: api-gateway → feature-store-server (gRPC) → Postgres with RLS.
+/// S2.2 E2E smoke: api-gateway (JWT auth) → feature-store-server (gRPC) → Postgres with RLS.
 ///
 /// 1. Starts feature-store-server on a random port.
-/// 2. Builds api-gateway pointing at that port.
+/// 2. Builds api-gateway with the test JWT secret, pointing at that port.
 /// 3. Inserts a feature for the dev tenant via the admin pool (bypasses RLS).
-/// 4. Queries `feature(id: ...)` via GraphQL with the correct tenant header.
+/// 4. Queries `feature(id: ...)` via GraphQL with a valid JWT for the correct tenant.
 ///    Expects 200 and the feature name in the response body.
-/// 5. Repeats with a different tenant header.
+/// 5. Repeats with a JWT for a DIFFERENT tenant.
 ///    Expects 200 with `data.feature = null` — RLS in the feature-store blocks the read.
 /// 6. Cleans up.
 #[tokio::test]
@@ -110,9 +193,9 @@ async fn graphql_feature_rls_smoke() {
     let (fs_url, _fs_handle) = spawn_feature_store(jp_pool).await;
 
     // -----------------------------------------------------------------------
-    // 2. Build the api-gateway pointing at the feature-store server.
+    // 2. Build the api-gateway with the test JWT secret.
     // -----------------------------------------------------------------------
-    let app = api_gateway::build_app(&fs_url)
+    let app = api_gateway::build_app(&fs_url, TEST_JWT_SECRET.to_vec())
         .await
         .expect("build_app");
 
@@ -139,10 +222,11 @@ async fn graphql_feature_rls_smoke() {
     .expect("insert test feature");
 
     // -----------------------------------------------------------------------
-    // 4. Query with the CORRECT tenant — expect the feature to be returned.
+    // 4. Query with the CORRECT tenant JWT — expect the feature to be returned.
     // -----------------------------------------------------------------------
+    let dev_jwt = make_jwt(DEV_TENANT);
     let gql = format!("{{ feature(id: \"{feature_id}\") {{ id name tier }} }}");
-    let (status, body) = graphql(&app, &gql, DEV_TENANT).await;
+    let (status, body) = graphql(&app, &gql, &dev_jwt).await;
 
     assert_eq!(status, StatusCode::OK, "graphql must return 200");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("parse JSON");
@@ -153,9 +237,10 @@ async fn graphql_feature_rls_smoke() {
     );
 
     // -----------------------------------------------------------------------
-    // 5. Query with a DIFFERENT tenant — RLS must block the read.
+    // 5. Query with a DIFFERENT tenant JWT — RLS must block the read.
     // -----------------------------------------------------------------------
-    let (status2, body2) = graphql(&app, &gql, OTHER_TENANT).await;
+    let other_jwt = make_jwt(OTHER_TENANT);
+    let (status2, body2) = graphql(&app, &gql, &other_jwt).await;
 
     assert_eq!(status2, StatusCode::OK, "graphql must still return 200");
     let json2: serde_json::Value = serde_json::from_slice(&body2).expect("parse JSON 2");
@@ -182,12 +267,13 @@ async fn graphql_feature_rls_smoke() {
 async fn feature_store_grpc_unavailable_returns_error() {
     // Point api-gateway at a port with nothing listening.
     let dead_url = "http://127.0.0.1:49999";
-    let app = api_gateway::build_app(dead_url)
+    let app = api_gateway::build_app(dead_url, TEST_JWT_SECRET.to_vec())
         .await
         .expect("build_app");
 
+    let dev_jwt = make_jwt(DEV_TENANT);
     let gql = r#"{ feature(id: "00000000-0000-0000-0000-000000000099") { id name } }"#;
-    let (status, body) = graphql(&app, gql, DEV_TENANT).await;
+    let (status, body) = graphql(&app, gql, &dev_jwt).await;
 
     // GraphQL always returns HTTP 200 even when resolvers error.
     assert_eq!(status, StatusCode::OK, "must return 200 even when feature-store is down");
@@ -211,7 +297,7 @@ async fn feature_store_grpc_unavailable_returns_error() {
 #[ignore = "requires docker-compose dev stack; run with --include-ignored"]
 async fn health_endpoint_ok() {
     // Feature-store doesn't need to be up for the health endpoint.
-    let app = api_gateway::build_app("http://127.0.0.1:49998")
+    let app = api_gateway::build_app("http://127.0.0.1:49998", TEST_JWT_SECRET.to_vec())
         .await
         .expect("build_app");
 
@@ -224,26 +310,46 @@ async fn health_endpoint_ok() {
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
-/// Verify that a missing X-Tenant-Id header returns HTTP 401.
+/// Verify that a missing Authorization header returns HTTP 401.
 #[tokio::test]
 #[ignore = "requires docker-compose dev stack; run with --include-ignored"]
 async fn missing_tenant_header_is_unauthorized() {
-    // Feature-store doesn't need to be up for an auth rejection.
-    let app = api_gateway::build_app("http://127.0.0.1:49997")
+    let app = api_gateway::build_app("http://127.0.0.1:49997", TEST_JWT_SECRET.to_vec())
         .await
         .expect("build_app");
 
-    let req = Request::builder()
-        .method("POST")
-        .uri("/graphql")
-        .header("content-type", "application/json")
-        // No X-Tenant-Id header.
-        .body(Body::from(r#"{"query":"{ healthcheck }"}"#))
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
+    // `graphql` helper with an empty jwt string omits the Authorization header.
+    let (status, _) = graphql(&app, "{ healthcheck }", "").await;
     assert_eq!(
-        resp.status(),
+        status,
         StatusCode::UNAUTHORIZED,
-        "missing X-Tenant-Id must yield 401"
+        "missing Authorization header must yield 401"
     );
+}
+
+/// Verify that a missing or expired JWT returns HTTP 401.
+///
+/// Tests three sub-cases:
+///   a) No Authorization header at all.
+///   b) A syntactically valid but expired JWT.
+///   c) A garbage token that fails signature verification.
+#[tokio::test]
+#[ignore = "requires docker-compose dev stack; run with --include-ignored"]
+async fn missing_or_expired_jwt_returns_401() {
+    let app = api_gateway::build_app("http://127.0.0.1:49996", TEST_JWT_SECRET.to_vec())
+        .await
+        .expect("build_app");
+
+    // a) No Authorization header.
+    let (status_a, _) = graphql(&app, "{ healthcheck }", "").await;
+    assert_eq!(status_a, StatusCode::UNAUTHORIZED, "no auth header → 401");
+
+    // b) Expired JWT.
+    let expired = make_expired_jwt(DEV_TENANT);
+    let (status_b, _) = graphql(&app, "{ healthcheck }", &expired).await;
+    assert_eq!(status_b, StatusCode::UNAUTHORIZED, "expired JWT → 401");
+
+    // c) Garbage token (invalid signature).
+    let (status_c, _) = graphql(&app, "{ healthcheck }", "garbage.token.here").await;
+    assert_eq!(status_c, StatusCode::UNAUTHORIZED, "invalid token → 401");
 }

@@ -140,11 +140,56 @@ buf format --write              # apply formatting in-place (then commit)
 
 ---
 
+### `e2e-rust` — Rust E2E smoke (Postgres + RLS)
+
+**What it gates:** the full request path — HTTP client → api-gateway (axum/GraphQL/JWT) → feature-store-server (tonic/gRPC) → Postgres with Row-Level Security. Specifically verifies:
+- A valid tenant JWT can read its own features.
+- A JWT for a *different* tenant gets `null` back (RLS isolation — spec §S2.2).
+- A missing or expired JWT receives HTTP 401.
+- The health endpoint returns 200 without auth.
+- When feature-store-server is unreachable, the GraphQL response contains a structured `errors` array (not a 500).
+
+**Runs on:** every PR and push to `main`. `timeout-minutes: 10`.
+
+**Database setup:** boots only the `postgres` service from `docker-compose.dev.yml` (port 5454), applies migrations as the superuser (`ADMIN_DATABASE_URL`), then runs tests with the non-superuser app DSN (`DATABASE_URL = jp_app`) so RLS is enforced at query time.
+
+**Reproduce locally:**
+```bash
+# 1. Start Postgres (dev stack — port 5454)
+docker compose -f docker-compose.dev.yml up -d postgres
+
+# 2. Wait until healthy
+until [ "$(docker inspect --format='{{.State.Health.Status}}' judicialpredict_postgres 2>/dev/null)" = "healthy" ]; do sleep 2; done
+
+# 3. Apply migrations (superuser DSN)
+export ADMIN_DATABASE_URL="postgres://judicialpredict:judicialpredict_dev_pwd@127.0.0.1:5454/judicialpredict_dev"
+export DATABASE_URL="postgres://jp_app:judicialpredict_dev_pwd@127.0.0.1:5454/judicialpredict_dev"
+sqlx migrate run --database-url "$ADMIN_DATABASE_URL" --source rust/feature-store/migrations
+
+# 4. Run the smoke tests
+cd rust/
+cargo test --test e2e_smoke -p api-gateway -- --include-ignored
+```
+
+**Tear down:**
+```bash
+docker compose -f docker-compose.dev.yml down postgres
+```
+
+**Common failures:**
+- `judicialpredict_postgres` container not found → run `docker compose -f docker-compose.dev.yml up -d postgres` first.
+- `jp_app` password rejected → ensure migration `20260507120003_jp_app_password.sql` was applied (`sqlx migrate run`).
+- RLS isolation assertion fails (`other tenant must NOT see the feature`) → a migration or code change accidentally bypassed `FORCE ROW LEVEL SECURITY` or granted `BYPASSRLS` to `jp_app`.
+- `feature-store unavailable` error not present → the gRPC error message from `api-gateway` does not match the expected string; check `src/graphql/feature_resolver.rs`.
+- `sqlx-cli` not installed → `cargo install sqlx-cli --features postgres,rustls --no-default-features`.
+
+---
+
 ### `all-green` — aggregator (single required check)
 
 **What it gates:** nothing directly — it exists so branch protection can require a single check (`all-green`) instead of listing every job individually. Configure GitHub branch protection to require `all-green` on `main`.
 
-`proto-breaking` is allowed to be `skipped` (push-to-main path) and still passes the aggregator. All other jobs must be `success`.
+`proto-breaking` is allowed to be `skipped` (push-to-main path) and still passes the aggregator. `e2e-rust` must be `success`. All other jobs must be `success`.
 
 ---
 
@@ -157,6 +202,7 @@ source "$HOME/.cargo/env"
 rustup component add rustfmt clippy llvm-tools-preview
 sudo apt install pkg-config libssl-dev lld
 cargo install cargo-llvm-cov
+cargo install sqlx-cli --features postgres,rustls --no-default-features
 
 # buf
 curl -sSL https://github.com/bufbuild/buf/releases/latest/download/buf-Linux-x86_64 \

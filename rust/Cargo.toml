@@ -38,3 +38,4 @@ tonic = { version = "0.12" }
 prost = { version = "0.13" }
 tonic-build = { version = "0.12" }
 proptest = { version = "1", default-features = true }
+jsonwebtoken = { version = "9" }

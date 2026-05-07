@@ -26,6 +26,7 @@ anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
+jsonwebtoken = { workspace = true }
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
@@ -33,3 +34,5 @@ tower = { version = "0.5" }
 bytes = "1"
 sqlx = { workspace = true }
 tokio-stream = { version = "0.1", features = ["net"] }
+jsonwebtoken = { workspace = true }
+serde = { workspace = true }

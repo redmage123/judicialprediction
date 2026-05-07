@@ -4,10 +4,14 @@
 // `src/lib.rs` re-exports `build_app`; `src/main.rs` just binds the
 // TCP listener and calls into the library.
 //
-// SECURITY: every request must supply an `X-Tenant-Id: <uuid>` header.
-// The gateway injects it into the GraphQL request data; resolvers attach it
-// as gRPC metadata on every call to the feature-store-server so Postgres RLS
-// evaluates the correct tenant isolation policy.
+// SECURITY: every request to /graphql must carry an `Authorization: Bearer
+// <jwt>` header. The middleware decodes and verifies the token; on success,
+// the validated Claims (including tenant_id) are injected into the GraphQL
+// request data so resolvers can attach the tenant UUID as gRPC metadata on
+// every call to the feature-store-server, ensuring Postgres RLS evaluates the
+// correct isolation policy.
+//
+// The /health endpoint is unauthenticated and always returns 200.
 
 use anyhow::Result;
 use async_graphql::{Context, EmptyMutation, EmptySubscription, Object, Schema, SimpleObject};
@@ -26,11 +30,13 @@ use std::sync::Arc;
 use tonic::transport::Channel;
 use uuid::Uuid;
 
+use crate::auth::{decode_jwt, Claims};
+
 // ---------------------------------------------------------------------------
 // Tenant identity — injected per request into the GraphQL context
 // ---------------------------------------------------------------------------
 
-/// Wraps the tenant UUID extracted from the `X-Tenant-Id` HTTP header.
+/// Wraps the tenant UUID extracted from the validated JWT `tenant_id` claim.
 #[derive(Clone, Copy)]
 struct TenantId(Uuid);
 
@@ -103,7 +109,7 @@ impl Query {
     ///
     /// Returns a GraphQL error if the feature-store gRPC service is unavailable.
     ///
-    /// Requires `X-Tenant-Id` header on the HTTP request.
+    /// Requires a valid `Authorization: Bearer <jwt>` header on the HTTP request.
     async fn feature(
         &self,
         ctx: &Context<'_>,
@@ -158,30 +164,61 @@ impl Query {
 }
 
 // ---------------------------------------------------------------------------
-// GraphQL handler — bridges axum headers into the GraphQL request data
+// Application state — owns the GraphQL schema + JWT secret
 // ---------------------------------------------------------------------------
 
 type AppSchema = Schema<Query, EmptyMutation, EmptySubscription>;
 
+/// Shared application state injected into every axum handler via `State<Arc<AppState>>`.
+struct AppState {
+    schema: AppSchema,
+    /// HS256 secret bytes. In dev, read from `JWT_SECRET` env var or the test
+    /// constant. In prod, injected from External Secrets Operator (Sprint 3+).
+    jwt_secret: Vec<u8>,
+}
+
+// ---------------------------------------------------------------------------
+// Handlers
+// ---------------------------------------------------------------------------
+
 /// Serves the GraphQL endpoint.
 ///
-/// Extracts `X-Tenant-Id` from HTTP headers and injects it into the GraphQL
-/// request's data map so resolvers can attach it as gRPC metadata.
-/// Returns HTTP 401 if the header is absent or not a valid UUID.
+/// Validates the `Authorization: Bearer <jwt>` header; on success, injects
+/// the validated [`Claims`] (including `tenant_id` as [`TenantId`]) into the
+/// GraphQL request data so resolvers can use them.
+///
+/// Returns HTTP 401 if the header is absent, the token is malformed, the
+/// signature is invalid, or the token is expired.
 async fn graphql_handler(
-    State(schema): State<Arc<AppSchema>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     req: GraphQLRequest,
 ) -> Result<GraphQLResponse, StatusCode> {
-    let tenant_str = headers
-        .get("x-tenant-id")
+    // Extract "Authorization: Bearer <token>"
+    let auth_header = headers
+        .get("authorization")
         .and_then(|v| v.to_str().ok())
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    let tenant_id = Uuid::parse_str(tenant_str).map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let token = auth_header
+        .strip_prefix("Bearer ")
+        .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    let gql_req = req.into_inner().data(TenantId(tenant_id));
-    Ok(schema.execute(gql_req).await.into())
+    // Decode and verify the JWT.
+    let claims: Claims =
+        decode_jwt(token, &state.jwt_secret).map_err(|_| StatusCode::UNAUTHORIZED)?;
+
+    // Parse tenant_id claim into a UUID.
+    let tenant_id = Uuid::parse_str(&claims.tenant_id).map_err(|_| StatusCode::UNAUTHORIZED)?;
+
+    // Inject both the opaque TenantId (used by resolvers) and the full Claims
+    // (available to resolvers that need sub or scopes).
+    let gql_req = req
+        .into_inner()
+        .data(TenantId(tenant_id))
+        .data(claims);
+
+    Ok(state.schema.execute(gql_req).await.into())
 }
 
 /// Simple HTTP liveness probe — does not require authentication.
@@ -193,12 +230,15 @@ async fn health_handler() -> impl IntoResponse {
 // App builder — exported via lib.rs for use in tests
 // ---------------------------------------------------------------------------
 
-/// Build the axum `Router`, wiring the GraphQL schema and health endpoint.
+/// Build the axum `Router`, wiring the GraphQL schema, JWT middleware, and
+/// health endpoint.
 ///
-/// `feature_store_grpc_url` is the gRPC endpoint for the feature-store service,
-/// e.g. `http://127.0.0.1:4001`. The channel is created lazily so the service
-/// does not need to be up at startup time.
-pub async fn build_app(feature_store_grpc_url: &str) -> Result<Router> {
+/// # Parameters
+/// - `feature_store_grpc_url` — gRPC endpoint for the feature-store service,
+///   e.g. `http://127.0.0.1:4001`. Channel is created lazily.
+/// - `jwt_secret` — raw bytes of the HS256 signing secret. In tests pass the
+///   `TEST_JWT_SECRET` constant; in production read `JWT_SECRET` from env.
+pub async fn build_app(feature_store_grpc_url: &str, jwt_secret: Vec<u8>) -> Result<Router> {
     let channel = Channel::from_shared(feature_store_grpc_url.to_string())
         .expect("invalid feature-store URL")
         .connect_lazy();
@@ -209,10 +249,12 @@ pub async fn build_app(feature_store_grpc_url: &str) -> Result<Router> {
         .data(fs_client)
         .finish();
 
+    let state = Arc::new(AppState { schema, jwt_secret });
+
     let app = Router::new()
         .route("/health", get(health_handler))
         .route("/graphql", post(graphql_handler))
-        .with_state(Arc::new(schema));
+        .with_state(state);
 
     Ok(app)
 }

@@ -7,3 +7,4 @@
 pub use crate::app::build_app;
 
 mod app;
+mod auth;
