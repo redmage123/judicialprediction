@@ -144,3 +144,6 @@ volumes:
 networks:
   jp_dev_net:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 10.250.0.0/24
