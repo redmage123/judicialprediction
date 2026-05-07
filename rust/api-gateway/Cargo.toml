@@ -12,8 +12,10 @@ name = "api-gateway"
 path = "src/main.rs"
 
 [dependencies]
+# feature-store is still a compile-time dep for its generated stubs + FeatureStoreServiceClient.
+# At runtime the api-gateway connects to feature-store-server over gRPC (no in-process Repo).
 feature-store = { path = "../feature-store" }
-sqlx = { workspace = true }
+tonic = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 async-graphql = { workspace = true }
@@ -29,3 +31,5 @@ uuid = { workspace = true }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 tower = { version = "0.5" }
 bytes = "1"
+sqlx = { workspace = true }
+tokio-stream = { version = "0.1", features = ["net"] }

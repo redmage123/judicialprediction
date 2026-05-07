@@ -1,0 +1,96 @@
+# Default values for feature-store.
+# Override per-environment in gitops/<env>/values/feature-store.yaml.
+
+replicaCount: 2
+
+image:
+  repository: ghcr.io/openclaw/jp-feature-store
+  pullPolicy: IfNotPresent
+  tag: "dev"
+
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # Whether to create a ServiceAccount for the pod.
+  create: true
+  # Annotations to add to the ServiceAccount.
+  annotations: {}
+  # Name override — defaults to the chart fullname.
+  name: ""
+
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/path: "/metrics"
+  prometheus.io/port: "4001"
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  fsGroup: 10001
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  type: ClusterIP
+  # gRPC port — matches the binary's bind address 0.0.0.0:4001.
+  port: 4001
+  targetPort: 4001
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+# Liveness and readiness probes use TCP connect (gRPC, not HTTP).
+# Sprint 2: switch to grpc health protocol once the health service is wired.
+probes:
+  liveness:
+    tcpPort: 4001
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    failureThreshold: 3
+  readiness:
+    tcpPort: 4001
+    initialDelaySeconds: 3
+    periodSeconds: 5
+    failureThreshold: 3
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Environment variables. DATABASE_URL is injected from a Kubernetes Secret.
+env:
+  # The Kubernetes Secret name that holds DATABASE_URL (jp_app DSN).
+  databaseSecretName: "feature-store-db-credentials"
+  databaseSecretKey: "DATABASE_URL"
+
+  # Additional env vars as plain key/value pairs.
+  extra: []
+  # - name: RUST_LOG
+  #   value: "info"
+
+# NetworkPolicy configuration.
+networkPolicy:
+  enabled: true
+  # Only api-gateway pods are permitted to reach the feature-store on the gRPC port.
+  apiGatewaySelector:
+    matchLabels:
+      app.kubernetes.io/name: api-gateway

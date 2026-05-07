@@ -7,6 +7,9 @@
 
 pub use feature_store_types::{PermittedUse, Sensitivity, Tier, TieredFeature};
 
+// gRPC server implementation (imperative shell wrapping the repo functions).
+pub mod server;
+
 // ---------------------------------------------------------------------------
 // Generated tonic stubs (prost + tonic from protos/)
 // ---------------------------------------------------------------------------

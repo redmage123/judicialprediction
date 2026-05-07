@@ -1,0 +1,47 @@
+# Child Application: feature-store (dev environment).
+# Managed by the root Application at gitops/dev/applications.yaml.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: judicialpredict-dev-feature-store
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: judicialpredict
+    judicialpredict/env: dev
+    judicialpredict/service: feature-store
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    # TODO: replace with the real private repo URL before applying to a cluster.
+    repoURL: https://github.com/openclaw/judicialpredict.git
+    targetRevision: main
+    path: charts/feature-store
+
+    helm:
+      # Base values from the chart merged with dev-specific overrides.
+      valueFiles:
+        - values.yaml
+        - ../../../gitops/dev/values/feature-store.yaml
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: judicialpredict-dev
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+
+  # Health check ignores the NetworkPolicy resource (no built-in health check for it).
+  ignoreDifferences:
+    - group: networking.k8s.io
+      kind: NetworkPolicy
+      jsonPointers:
+        - /spec/ingress
+        - /spec/egress

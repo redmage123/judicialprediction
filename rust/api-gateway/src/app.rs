@@ -1,13 +1,13 @@
-// JudicialPredict API Gateway — application core
+// JudicialPredict API Gateway — application core.
 //
 // All GraphQL types, handlers, and the `build_app` factory live here.
 // `src/lib.rs` re-exports `build_app`; `src/main.rs` just binds the
 // TCP listener and calls into the library.
 //
 // SECURITY: every request must supply an `X-Tenant-Id: <uuid>` header.
-// The gateway injects it into the GraphQL request data; resolvers call
-// `feature_store::set_tenant_context` before every DB query, ensuring
-// Postgres RLS evaluates the correct tenant isolation policy.
+// The gateway injects it into the GraphQL request data; resolvers attach it
+// as gRPC metadata on every call to the feature-store-server so Postgres RLS
+// evaluates the correct tenant isolation policy.
 
 use anyhow::Result;
 use async_graphql::{Context, EmptyMutation, EmptySubscription, Object, Schema, SimpleObject};
@@ -19,8 +19,11 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use sqlx::PgPool;
+use feature_store::judicialpredict::data_plane::feature_store::v1::{
+    feature_store_service_client::FeatureStoreServiceClient, GetFeatureRequest,
+};
 use std::sync::Arc;
+use tonic::transport::Channel;
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
@@ -38,7 +41,7 @@ struct TenantId(Uuid);
 /// A feature as returned by the GraphQL API.
 #[derive(SimpleObject)]
 struct FeatureDto {
-    /// Storage primary key (UUID).
+    /// Storage primary key (UUID, used as the stable feature_id in Sprint 1).
     id: String,
     /// Stable feature identifier, e.g. "judge.reversal_rate.circuit9".
     name: String,
@@ -52,17 +55,32 @@ struct FeatureDto {
     case_id: Option<String>,
 }
 
-impl From<feature_store::FeatureRow> for FeatureDto {
-    fn from(r: feature_store::FeatureRow) -> Self {
-        Self {
-            id: r.id.to_string(),
-            name: r.name,
-            value_json: r.value.to_string(),
-            tier: r.tier,
-            sensitivity: r.sensitivity,
-            case_id: r.case_id.map(|id| id.to_string()),
-        }
+// ---------------------------------------------------------------------------
+// Tier/sensitivity i32 → string helpers
+// ---------------------------------------------------------------------------
+
+/// Map the proto wire integer back to the SQL tier enum string.
+fn tier_to_str(i: i32) -> String {
+    match i {
+        1 => "TIER_A",
+        2 => "TIER_B",
+        3 => "TIER_C",
+        4 => "TIER_D",
+        _ => "TIER_UNSPECIFIED",
     }
+    .to_string()
+}
+
+/// Map the proto wire integer back to the SQL sensitivity enum string.
+fn sensitivity_to_str(i: i32) -> String {
+    match i {
+        1 => "PUBLIC",
+        2 => "QUASI_PUBLIC",
+        3 => "INFERRED",
+        4 => "PROTECTED",
+        _ => "SENSITIVITY_UNSPECIFIED",
+    }
+    .to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -81,7 +99,9 @@ impl Query {
     /// Look up a single feature by its storage UUID.
     ///
     /// Returns `null` if the feature does not exist or belongs to a
-    /// different tenant (RLS enforces isolation transparently).
+    /// different tenant (RLS enforces isolation transparently in feature-store).
+    ///
+    /// Returns a GraphQL error if the feature-store gRPC service is unavailable.
     ///
     /// Requires `X-Tenant-Id` header on the HTTP request.
     async fn feature(
@@ -89,25 +109,51 @@ impl Query {
         ctx: &Context<'_>,
         id: String,
     ) -> async_graphql::Result<Option<FeatureDto>> {
-        let pool = ctx.data::<PgPool>().map_err(|_| "missing pool")?;
         let TenantId(tenant_id) = *ctx.data::<TenantId>().map_err(|_| "missing tenant id")?;
 
-        let feature_id = Uuid::parse_str(&id)
-            .map_err(|_| async_graphql::Error::new("id must be a valid UUID"))?;
+        // Clone the client — tonic clients are cheap to clone (shared channel).
+        let mut client = ctx
+            .data::<FeatureStoreServiceClient<Channel>>()
+            .map_err(|_| "missing feature-store client")?
+            .clone();
 
-        let mut tx = feature_store::set_tenant_context(pool, tenant_id)
+        // Attach tenant-id to the outbound gRPC request metadata.
+        let mut request = tonic::Request::new(GetFeatureRequest {
+            // Sprint 1: feature_id is the DB UUID.
+            feature_id: id.clone(),
+            case_id: String::new(),
+            permitted_use: 0,
+        });
+        let tenant_val: tonic::metadata::MetadataValue<tonic::metadata::Ascii> = tenant_id
+            .to_string()
+            .parse()
+            .map_err(|_| "invalid tenant id format")?;
+        request.metadata_mut().insert("tenant-id", tenant_val);
+
+        let response = client
+            .get_feature(request)
             .await
-            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+            .map_err(|status| {
+                async_graphql::Error::new(format!(
+                    "feature-store unavailable: {} {}",
+                    status.code(),
+                    status.message()
+                ))
+            })?;
 
-        let row = feature_store::get_feature(&mut tx, feature_id, tenant_id)
-            .await
-            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
-
-        tx.commit()
-            .await
-            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
-
-        Ok(row.map(FeatureDto::from))
+        let feature = response.into_inner().feature;
+        Ok(feature.map(|f| FeatureDto {
+            id: f.feature_id,
+            name: f.name,
+            value_json: f.value_json,
+            tier: tier_to_str(f.tier),
+            sensitivity: sensitivity_to_str(f.sensitivity),
+            case_id: if f.case_id.is_empty() {
+                None
+            } else {
+                Some(f.case_id)
+            },
+        }))
     }
 }
 
@@ -120,7 +166,7 @@ type AppSchema = Schema<Query, EmptyMutation, EmptySubscription>;
 /// Serves the GraphQL endpoint.
 ///
 /// Extracts `X-Tenant-Id` from HTTP headers and injects it into the GraphQL
-/// request's data map so resolvers can call `set_tenant_context`.
+/// request's data map so resolvers can attach it as gRPC metadata.
 /// Returns HTTP 401 if the header is absent or not a valid UUID.
 async fn graphql_handler(
     State(schema): State<Arc<AppSchema>>,
@@ -149,12 +195,18 @@ async fn health_handler() -> impl IntoResponse {
 
 /// Build the axum `Router`, wiring the GraphQL schema and health endpoint.
 ///
-/// `database_url` must point at the Postgres instance as the `jp_app` role.
-pub async fn build_app(database_url: &str) -> Result<Router> {
-    let pool = PgPool::connect(database_url).await?;
+/// `feature_store_grpc_url` is the gRPC endpoint for the feature-store service,
+/// e.g. `http://127.0.0.1:4001`. The channel is created lazily so the service
+/// does not need to be up at startup time.
+pub async fn build_app(feature_store_grpc_url: &str) -> Result<Router> {
+    let channel = Channel::from_shared(feature_store_grpc_url.to_string())
+        .expect("invalid feature-store URL")
+        .connect_lazy();
+
+    let fs_client = FeatureStoreServiceClient::new(channel);
 
     let schema = Schema::build(Query, EmptyMutation, EmptySubscription)
-        .data(pool)
+        .data(fs_client)
         .finish();
 
     let app = Router::new()

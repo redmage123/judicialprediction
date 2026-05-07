@@ -1,8 +1,7 @@
-// JudicialPredict API Gateway — binary entry point
+// JudicialPredict API Gateway — binary entry point.
 //
-// Binds the TCP listener and delegates everything to the library crate.
-// The library (`src/lib.rs` → `src/app.rs`) owns all types and handlers
-// so integration tests can instantiate the router without spawning a process.
+// Reads FEATURE_STORE_GRPC_URL from the environment (default: http://127.0.0.1:4001)
+// and binds the HTTP/GraphQL server on 0.0.0.0:4000.
 
 use anyhow::Result;
 
@@ -10,12 +9,11 @@ use anyhow::Result;
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
-    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-        "postgres://jp_app:judicialpredict_dev_pwd@127.0.0.1:5454/judicialpredict_dev".to_string()
-    });
+    let feature_store_url = std::env::var("FEATURE_STORE_GRPC_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:4001".to_string());
 
-    tracing::info!("connecting to Postgres");
-    let app = api_gateway::build_app(&database_url).await?;
+    tracing::info!("api-gateway: feature-store gRPC at {feature_store_url}");
+    let app = api_gateway::build_app(&feature_store_url).await?;
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:4000").await?;
     tracing::info!("api-gateway listening on {}", listener.local_addr()?);

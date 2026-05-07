@@ -1,0 +1,9 @@
+apiVersion: v2
+name: feature-store
+description: >
+  JudicialPredict feature-store service — standalone gRPC server that exposes
+  FeatureStoreService on port 4001. Connects to Postgres with RLS enforced via
+  the jp_app non-superuser role.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

@@ -1,0 +1,23 @@
+# Dev environment overrides for the feature-store chart.
+# Merged on top of charts/feature-store/values.yaml by ArgoCD.
+
+replicaCount: 1
+
+image:
+  tag: "dev-latest"
+
+# In dev the secret is created manually; CI creates it via kubectl create secret.
+env:
+  databaseSecretName: "feature-store-db-credentials"
+  databaseSecretKey: "DATABASE_URL"
+  extra:
+    - name: RUST_LOG
+      value: "info"
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 250m
+    memory: 128Mi
