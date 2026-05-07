@@ -1,0 +1,52 @@
+JudicialPredict — Project Kickoff (Sprint 1 starts now)
+
+Jamie — owner-mandated full Agile delivery of JudicialPredict using the GigForge agent team. Spec v2.13. ~41 weeks Phase 1. Two-week sprints.
+
+READ FIRST (in order):
+  1. /opt/ai-elevate/gigforge/projects/judicialpredict/KICKOFF.md  — your instructions, full Agile mandate, sprint cadence, per-agent kanban sub-board structure, regular-report cadence, owner contact
+  2. /opt/ai-elevate/gigforge/projects/judicialpredict/judicialpredict-v2-spec.md  — v2.13 specification (124KB, ~2300 lines, the normative source)
+  3. /opt/ai-elevate/gigforge/projects/judicialpredict/judicialpredict-wireframes.md  — IA + state catalogue + a11y checklist + performance budgets + voice & tone
+
+ALREADY SET UP:
+  - Plane project "JudicialPredict" (identifier JP) — http://localhost:8801, workspace gigforge, project id 92ad0116-cbac-4975-ac87-4ea820c0be96
+  - 23 epics created (JP-1 through JP-23), each labelled with owning agent (agent:pm / agent:engineer / agent:dev-backend / etc.)
+  - Workflow states: Backlog → Ready → In Progress → In Review → In Testing → In Staging → In Production → Cancelled
+  - Per-agent labels: agent:pm, agent:engineer, agent:dev-backend, agent:dev-frontend, agent:dev-ai, agent:devops, agent:sre, agent:qa, agent:design, agent:ux-research, agent:legal-sme, agent:compliance
+  - Type labels: type:adr, type:bug, type:story, type:tech-debt, type:research
+  - Priority labels: priority:P0–P3
+  - Sprint 1 cycle: "Sprint 1 — Foundation + Methodology Rollout" (2026-05-07 → 2026-05-21)
+  - Plane API token: 23d5e107893fb874191ff9e03597e2c8f7ed3333395b4d13010d7770d8e960ca (X-Api-Key header)
+  - GigForge website portfolio entry live at http://localhost:4091/portfolio/judicialpredict
+  - RAG: spec + wireframes + kickoff ingested into gigforge/engineering collection
+  - Sync cron running every 30min: /opt/ai-elevate/gigforge/projects/judicialpredict/jp-sync.sh (RAG ingest of changed docs + Plane mirror + KG snapshot)
+  - Local repo at /home/bbrelin/judicialpredict (on Braun's workstation, not this server)
+
+YOUR FIRST ACTIONS (within next 60 minutes):
+
+1. Confirm receipt with a status reply.
+2. Run Sprint 1 planning. Decompose epics JP-1 (Platform), JP-2 (Methodology Rollout), JP-3 (Rust Gateway scaffold), JP-17 (UI/UX Research kickoff), JP-21 (Data ingestion scoping), JP-22 (Recruiting + team setup) into concrete sprint stories with Gherkin acceptance criteria.
+3. Spawn the engineer (gigforge-engineer / Chris Novak) with instructions to author ADR-001 (Polyglot Rust + Python + Django + Next.js boundary), ADR-002 (gRPC contracts as single source of truth), ADR-FP-001 (functional-core / imperative-shell paradigm boundaries — see spec §11.6.7), ADR-003 (Multi-tenant isolation strategy), ADR-004 (Compliance feature-tier enforcement at Rust type-system boundary). Store under /opt/ai-elevate/gigforge/projects/judicialpredict/adrs/.
+4. Spawn gigforge-design / Senior Product Designer for UX research kickoff (12-15 contextual interviews — schedule plan + persona doc draft).
+5. Spawn gigforge-devops / Casey for K8s + GitOps platform bootstrap (cluster topology, node pools, operator selection, ArgoCD scaffolding).
+6. Author Sprint 1 sprint board at /opt/ai-elevate/gigforge/projects/judicialpredict/sprint-boards/sprint-01-board.md following the pattern from /opt/ai-elevate/gigforge/inbox/programming/2026-03-28-legal-prediction-market/sprint-board.md.
+
+ONGOING CADENCE (your responsibility):
+  - Daily 17:00 Berlin: write /opt/ai-elevate/gigforge/projects/judicialpredict/reports/daily-YYYY-MM-DD.md and email digest to braun.brelin@ai-elevate.ai via /home/aielevate/send-alert.py.
+  - Weekly Friday 16:00 Berlin: write /opt/ai-elevate/gigforge/projects/judicialpredict/reports/weekly-YYYY-MM-DD.md and email + Telegram-route to Braun.
+  - Sprint review Friday week-2 of every sprint: /opt/ai-elevate/gigforge/projects/judicialpredict/reports/sprint-NN-review.md.
+  - Every state change in Plane: ensure assignee updates the issue (don't let stale states accumulate).
+  - Three Amigos session mid-sprint Wednesday: PM + Dev + QA on every story in the upcoming refinement.
+  - Mutation testing weekly (mutmut + cargo-mutants).
+  - Property-based tests on every functional-core crate (decision-arith, monte-carlo-sim, cost-engine, feature-store-types).
+  - Linear (or Jira) workspace pending — for now use Plane as the canonical board; revisit at sprint-3 retro.
+
+NON-NEGOTIABLES:
+  - No Tier-C protected-class features in predictive paths (compile-time enforcement via Rust ADTs).
+  - No voir-dire / jury-selection work (parked behind ethical-review gate).
+  - WCAG 2.2 AA from day one.
+  - Functional-core / imperative-shell paradigm per ADR-FP-001.
+  - TDD (red-green-refactor); BDD (Gherkin + Three Amigos); pair programming default.
+
+CONFIRM AND PROCEED. Sprint 1 is live.
+
+— Alex Reeves, Operations Director (acting on Braun's instruction)
