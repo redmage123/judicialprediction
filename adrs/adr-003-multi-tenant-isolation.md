@@ -3,7 +3,7 @@
 **Status:** Accepted
 **Date:** 2026-05-07
 **Author:** PM-authored from spec §10 (Multi-Tenancy) + §5 (Compliance Framework) + §9 (Federated Learning + DP)
-**Reviewers:** gigforge-engineer, Compliance / Privacy Engineer (NEW HIRE), Senior SRE (NEW HIRE)
+**Reviewers:** gigforge-engineer (data plane + type system), gigforge-legal (compliance/policy), gigforge-devops (cluster/secrets/operator selection)
 **Spec references:** §10 Multi-Tenancy, §5 Demographic / Personality / Compliance Framework, §9 Federated Learning & Differential Privacy
 **Plane issue:** JP-13 (Compliance — Feature-store + Proxy Audit + Lineage + Disparate-Impact Reports)
 

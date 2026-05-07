@@ -69,14 +69,15 @@
 
 | Item | Why | Sprint-2 disposition |
 |------|-----|---------------------|
-| K8s cluster bootstrap (JP-1 full) | Needs cloud-account provisioning + SRE hire; topology proposal landed but cluster doesn't exist yet | SRE recruit; cluster bootstrap is the first Sprint 2 story |
+| K8s cluster bootstrap (JP-1 full) | Needs cloud-account provisioning (real money + Operations approval); topology proposal landed but cluster doesn't exist yet | gigforge-devops bootstraps once cloud account is funded; first Sprint 2 story |
 | `monte-carlo-sim` proptest bodies | Engineer's CLI subprocess SIGTERMed at the 600s mark before reaching the 4th file's tests; file structure exists with stubs | First Sprint 2 catch-up story (~30 min) |
 | Engineer review/amend of PM-seeded ADRs | ADRs 002, FP-001, 003, 004 were PM-seeded due to early model issues. Engineer should validate and amend. | Sprint-2 review pass with the engineer |
-| First UX research interviews | Pilot firms not yet confirmed; recruiting plan ready but execution depends on pilot list | Pilot-firm shortlist + first 3 interviews in Sprint 2 |
-| Recruiting (JP-22) — actual hires | Job descriptions drafted; postings + hires need a longer cadence | Continuing through Sprint 2 + 3 |
+| First UX research interviews | Pilot firms not yet confirmed; interview plan ready but execution depends on pilot-firm scheduling | Pilot-firm shortlist + first 3 interviews in Sprint 2 |
 | ADR-005+ | None needed in Sprint 1 | Sprint 2 will surface architectural decisions naturally |
 
-Nothing on the critical path slipped; the gaps are scope items that legitimately need cycles longer than 1 day (recruiting, cloud provisioning, partner-firm scheduling).
+Nothing on the critical path slipped; the gaps are scope items that legitimately need cycles longer than 1 day (cloud provisioning, partner-firm scheduling, real-attorney legal-SME sign-off when rule encoding lands).
+
+**Note (v2.14 cleanup):** earlier framing in this report mentioned an "SRE recruit" and "Recruiting (JP-22) — actual hires" as slipped items. Those were inherited from the GigForge v1.0 consultancy spec. In reality the GigForge agent team executes all Sprint roles (per spec §16 v2.14). JP-22 is converted from "Recruiting + Team Setup" to "Agent Team Capacity Review" for Sprint 2. JP-41 (S2.18 — recruiting close) was cancelled with the same rationale.
 
 ---
 

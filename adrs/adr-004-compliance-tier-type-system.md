@@ -2,8 +2,8 @@
 
 **Status:** Accepted
 **Date:** 2026-05-07
-**Author:** PM-authored from spec §5 (Compliance Framework); engineer + Compliance Engineer to review
-**Reviewers:** gigforge-engineer, Compliance / Privacy Engineer (NEW HIRE), gigforge-legal, Legal SME
+**Author:** PM-authored from spec §5 (Compliance Framework); engineer + gigforge-legal to review
+**Reviewers:** gigforge-engineer (type-system enforcement), gigforge-legal (Tier-C policy + Title VII / disparate-impact framing), gigforge-legal-assoc-1 + gigforge-legal-assoc-2 (per-jurisdiction sign-off when rule encoding lands)
 **Spec references:** §5 Demographic / Personality / Compliance Framework, §5.5 Compliance Architecture, §11.6.5 SOLID (DIP)
 **Plane issue:** JP-13
 

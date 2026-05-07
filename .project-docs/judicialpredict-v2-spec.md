@@ -1,7 +1,9 @@
-# JudicialPredict v2.13 — Software Specification & Project Plan
+# JudicialPredict v2.14 — Software Specification & Project Plan
 
 **Document Type:** Software Specification & Project Plan
-**Version:** 2.13 (Re-scoped from GigForge v1.0 of 25 March 2026; expanded through v2.0 → v2.1 → v2.2 → v2.3 → v2.4 → v2.5 → v2.6 → v2.7 → v2.8 → v2.9 → v2.10 → v2.11 → v2.12 → v2.13)
+**Version:** 2.14 (Re-scoped from GigForge v1.0 of 25 March 2026; expanded through v2.0 → v2.1 → v2.2 → v2.3 → v2.4 → v2.5 → v2.6 → v2.7 → v2.8 → v2.9 → v2.10 → v2.11 → v2.12 → v2.13 → v2.14)
+
+> v2.14 is a cleanup pass, not a feature addition. The earlier "(NEW HIRE)" framing inherited from the GigForge v1.0 consultancy spec has been replaced in §16 with the actual gigforge agent assignments. The work itself is unchanged. The Phase-1 wall-clock projection is recalibrated to 8–16 weeks (vs the original 41) since agent capacity is sub-day per story; remaining gating dependencies are real-world-bound (cloud account, pilot-firm scheduling, Legal-SME sign-off).
 **Companion document:** `judicialpredict-wireframes.md` (low-fidelity wireframes + IA + state catalogue + accessibility checklist + performance budgets + voice & tone guide)
 **Date:** 7 May 2026
 **Status:** Draft for Client Review
@@ -1006,32 +1008,35 @@ This shifts frontend implementation milestones forward by ~3 weeks; total Phase 
 
 ## 16. Team Assignments
 
-| Name | Role | Responsibility |
-|------|------|----------------|
-| Alex Reeves | Operations Director | Overall delivery, client comms |
-| Jamie Okafor | Project Manager | Sprint planning, backlog, TDD |
-| Chris Novak | Lead Engineer / CTO | Architecture, ML pipeline, GBM + Bayesian + multi-task |
-| *(new in v2.4)* **Senior Rust + Distributed Systems Engineer** | **Rust data plane lead — gateway, feature store, ingestion, simulation, cost engine, real-time broker, decision-arithmetic core** | **Owns Rust services + cross-plane gRPC contracts** |
-| *(v2.1)* Graph / GNN Engineer | Heterogeneous KG, HGT/TGN, embeddings, network analytics | Owns §6 + §8.5 |
-| *(v2.1)* Causal Inference Specialist | DAGs, IV, propensity, RD, DiD | Owns the causal sub-layer |
-| *(v2.1)* Logic / Knowledge Engineer | Datalog, Z3, argumentation, OWL, temporal/deontic, process mining | Owns Layer 2 |
-| *(v2.2)* Compliance / Privacy Engineer | Feature-store policy, proxy audit, lineage, per-tenant toggles, disparate-impact | Owns §5 + compliance milestones; pairs with Rust Eng on type-system enforcement |
-| *(v2.2)* NLP / Personality Engineer | Personality LoRA, LIWC, judicial-temperament, topic modelling, self-consistency, tabular extraction | Owns Layer 3 + §13 |
-| *(v2.3)* Federated Learning / Privacy Researcher | Flower / Opacus, DP-SGD, secure aggregation, privacy accountant | Owns §9; pairs with Rust Eng on secure-aggregation transport |
-| *(v2.3)* Simulation / Decision Engineer | Monte Carlo trial sim, distributional cost engine, lead-attorney optimization, BDN | Owns §8.4 expansions; primary author of the Rust simulation + cost engines (paired with Rust Eng) |
-| Casey Muller | DevOps | K8s, CI/CD (Rust + Python), security, monitoring |
-| Riley Svensson | QA | Tests, calibration, coverage, compliance audits, adversarial, property-based (both planes) |
-| Jordan Whitaker | Customer Delivery | Pilot-firm onboarding, feedback loop |
-| *(v2.1)* Legal SME | Per-jurisdiction rule authoring | Federal + CA + NJ rule encoding sign-off |
-| *(v2.3)* Partner Integrations Engineer | Clio / MyCase / NetDocuments adapters, partner API | Owns §11 |
-| *(new in v2.6)* **Django / Back-Office Engineer** | **Internal admin app: tenant mgmt, rule-corpus editor, audit log, lineage, FL dashboard, proxy-audit, disparate-impact reports, partner-API token mgmt** | **Owns the Django app; can be a senior Python eng with Django background, ~0.7 FTE through Phase 1** |
-| *(new in v2.8)* **Senior SRE / Platform Engineer** | **Cluster + GitOps + observability + on-call rotation; owns §11.5 in full** | **Full-time through Phase 1; pairs with Casey on CI/build/security audit handoffs** |
-| *(new in v2.11)* **Senior Product Designer** | **Owns design system, IA, visual design, interaction design, data viz language; owns §12.5 in full + companion wireframes doc** | **Full-time through Phase 1; highest-impact UX hire** |
-| *(new in v2.11)* **UX Researcher** | **Partner interviews, contextual inquiry at law firms, persona development, ongoing usability testing** | **0.5 FTE Phase 1; could be senior PM with UX research depth instead** |
-| *(new in v2.11)* **Frontend Engineer (design-system focus)** | **Owns Storybook + customised shadcn/ui + design-token plumbing; pairs with Senior Product Designer on every component** | **Full-time Phase 1; existing frontend lead may shift to this mandate with another mid-level frontend hire for feature implementation** |
-| *(new in v2.11)* **Accessibility Consultant** | **WCAG 2.2 AA audit, screen-reader testing, periodic compliance review** | **0.25 FTE through Phase 1; quarterly audits in Phase 2** |
+> **v2.14 cleanup note:** earlier spec versions (v1.0 → v2.13) used a "NEW HIRE" framing inherited from the GigForge consultancy v1.0 spec, where outside hires would have staffed each role. This project is built by the existing **GigForge agent team** (Claude Sonnet for lead engineering / PM / QA / dev-frontend / dev-backend; local Gemma 4 for routine cron-driven work; specialist agents for design / DevOps / legal). No outside hires are required for the work itself — only for genuinely human-bound activities (pilot-firm scheduling, real legal-SME sign-off on jurisdiction-specific rule encoding, real cloud-account provisioning).
+>
+> The table below maps each spec-named role to the agent that actually executes it.
 
-Nine new roles vs v1.0. v2.4 adds the **Senior Rust + Distributed Systems Engineer** as the data-plane lead. The Simulation Engineer pairs with them on the Monte Carlo and cost engines.
+| Function | Agent (or human) | Notes |
+|----------|-----------------|-------|
+| Operations Director | Alex Reeves (real-world placeholder; in practice Braun directly) | Overall delivery + owner-side decisions |
+| Project Manager / Scrum Master | `gigforge-pm` (Jamie Okafor persona) | Sprint planning, backlog, TDD/BDD enforcement, daily + weekly reports |
+| Lead Engineer / CTO + Rust Data Plane | `gigforge-engineer` (Chris Novak persona) | Architecture, all Rust services (gateway, feature-store, ingestion, simulation, cost engine, decision-arith, event broker), gRPC contracts. The "Senior Rust + Distributed Systems Engineer" role from v2.4 is this same agent. |
+| Backend Engineer | `gigforge-dev-backend` | Python services other than ML, partner-API integrations, Django back-office app |
+| Frontend Engineer | `gigforge-dev-frontend` | Next.js workspace, Apollo client, design-system implementation against `gigforge-ux-designer`'s tokens |
+| AI / ML Engineer | `gigforge-dev-ai` | Subsumes the v2.1+ Graph/GNN, Causal Inference, Logic/Knowledge, NLP/Personality, Federated Learning, Simulation/Decision specialist roles. Sub-domains routed by task, not by agent. |
+| DevOps + SRE | `gigforge-devops` (Casey Muller persona) | CI/CD, security audits, build pipelines, K8s, GitOps, observability, on-call. The "Senior SRE / Platform Engineer" role from v2.8 is this same agent. |
+| QA + Accessibility | `gigforge-qa` (Riley Svensson persona) | Tests, calibration, coverage, compliance audits, adversarial, property-based. Subsumes the v2.11 Accessibility Consultant role — a11y is a QA discipline. |
+| Customer Delivery / CSM | `gigforge-csm` + `gigforge-cs-advocate` (Jordan Whitaker persona) | Pilot-firm onboarding, feedback loop |
+| Product Designer + UX Researcher | `gigforge-ux-designer` | Design system, IA, visual design, interaction design, data viz language, persona development, partner interviews. Subsumes both v2.11 roles. |
+| Compliance / Privacy | `gigforge-engineer` + `gigforge-legal` pairing | Type-system enforcement is engineering work; policy + proxy-audit interpretation is legal review |
+| Legal SME (Federal + CA + NJ) | `gigforge-legal` + `gigforge-legal-assoc-1` + `gigforge-legal-assoc-2` + the actual client (Drazen Komarica) for sign-off on jurisdiction-specific rule encoding | The agents draft + cross-check; a real-world attorney must sign off before rule-engine output ships to a tenant |
+
+### What "human time" actually buys us in Phase 1
+
+The 41-week Phase-1 timeline in §15 was sized assuming human hires. With the agent team, agent capacity is sub-day per story (Sprint 1 demonstrated 14 stories executed in day 1). The actual Phase-1 bottlenecks are:
+
+- **Cloud-account provisioning** for the EKS cluster (real money, real human approval).
+- **Pilot-firm scheduling** — partner interviews, beta access, contract signatures.
+- **Legal-SME sign-off** on every jurisdiction-specific rule encoding before it can be promoted to staging or prod.
+- **Code review and SOW gating decisions** that can't be auto-approved.
+
+Realistic re-projection: Phase 1 could land in **8–16 weeks** (not 41) if the above human-bound dependencies move at reasonable cadence. The §15 milestone numbering is preserved as a reference but the wall-clock should be re-calibrated against actual cloud + pilot-firm progress at the end of Sprint 2.
 
 ## 17. Deliverables
 

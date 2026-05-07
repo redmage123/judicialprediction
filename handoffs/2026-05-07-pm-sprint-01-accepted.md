@@ -16,8 +16,8 @@
 - **AI Engineers:** `gigforge-dev-ai` – prepare AI‑related contracts and future ML pipelines.
 - **DevOps / SRE:** Casey (`gigforge-devops`) – provision K8s cluster, GitOps (ArgoCD), CI/CD pipelines.
 - **QA Engineer:** `gigforge-qa` – set up testing framework, property‑based testing, mutation testing.
-- **Design / UX Research:** Senior Product Designer (to be hired) – lead UX research kickoff.
-- **Compliance / Legal SME:** `gigforge-compliance` – review ADR‑004 and Tier‑C constraints.
+- **Design / UX Research:** `gigforge-ux-designer` – design system, IA, persona development, partner interviews (subsumes the v2.11 Senior Product Designer + UX Researcher framing).
+- **Compliance / Legal SME:** `gigforge-legal` + `gigforge-legal-assoc-1` + `gigforge-legal-assoc-2` – review ADR‑004 and Tier‑C constraints; per-jurisdiction sign-off on rule encoding before staging promotion.
 
 ## First Concrete Agent Spawn
 The next actionable step is to spawn the **engineer** agent (`gigforge-engineer`, Chris Novak) to author the initial Architecture Decision Records (ADR‑001 … ADR‑004) under the path:

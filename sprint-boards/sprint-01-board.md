@@ -58,17 +58,17 @@ And the file must live at /opt/ai-elevate/gigforge/projects/judicialpredict/adrs
 **Acceptance criteria:** ADR enumerates designated functional-core (decision-arith, monte-carlo-sim, cost-engine, feature-store-types, logic-service rule-application, causal estimators), functional-leaning idioms, and imperative-where-state-is-genuine services per spec §11.6.7. Includes property-based-testing requirement on functional-core crates.
 
 ### S1.5 — ADR-003 Multi-tenant isolation strategy
-**Owner:** Chris Novak (gigforge-engineer) + Compliance Eng (NEW HIRE)
+**Owner:** Chris Novak (gigforge-engineer) + gigforge-engineer + gigforge-legal
 **Plane:** subset of JP-13
 **Acceptance criteria:** ADR documents Postgres RLS, per-tenant encryption keys, tenant-scoped pgvector namespaces, optional namespace-per-tenant for regulated tenants (Phase 2), and the federated-learning opt-in/opt-out path.
 
 ### S1.6 — ADR-004 Compliance feature-tier enforcement at type-system boundary
-**Owner:** Compliance Eng (NEW HIRE) + Rust Eng (NEW HIRE)
+**Owner:** gigforge-engineer + gigforge-legal
 **Plane:** subset of JP-13
 **Acceptance criteria:** ADR documents Tier-A/B/C/D classification, Rust ADTs for Tier/Sensitivity/PermittedUse, compile-time blocking of Tier-C predictive flow via the type system, runtime audit logging for the rare permitted Tier-C-for-element usage.
 
 ### S1.7 — K8s cluster bootstrap + node pool provisioning
-**Owner:** Senior SRE (NEW HIRE)
+**Owner:** gigforge-devops
 **Plane:** subset of JP-1
 **Acceptance criteria:**
 
@@ -93,7 +93,7 @@ And ArgoCD App-of-Apps must be deployed with /gitops/dev synced
 **Acceptance criteria:** GitHub Actions workflows for lint+format+test+image-build+Trivy+Syft+Cosign+gitops-PR; cargo nextest + sccache; pytest with hypothesis; cucumber-rs + pytest-bdd integration; ≥70% coverage gate; buf lint + buf breaking gates.
 
 ### S1.10 — Rust workspace + api-gateway crate skeleton
-**Owner:** Senior Rust Eng (NEW HIRE) + Chris Novak
+**Owner:** gigforge-engineer + Chris Novak
 **Plane:** subset of JP-3
 **Acceptance criteria:** rust/ Cargo workspace; api-gateway crate with axum + async-graphql + JWT middleware; first .proto contract for healthcheck / case-list; Rust ↔ Python gRPC roundtrip green in CI integration test.
 
@@ -103,7 +103,7 @@ And ArgoCD App-of-Apps must be deployed with /gitops/dev synced
 **Acceptance criteria:** Tier (A/B/C/D), Sensitivity (public/quasi-public/inferred/protected), PermittedUse newtype wrappers + ADTs; exhaustive-match enforcement so Tier-C cannot satisfy a non-Tier-C-permitted bound; proptest invariants asserting tier rules cannot be circumvented.
 
 ### S1.12 — UX research kickoff (12-15 contextual interviews + persona draft)
-**Owner:** UX Researcher (NEW HIRE) + Senior Product Designer (NEW HIRE)
+**Owner:** gigforge-ux-designer + gigforge-ux-designer
 **Plane:** subset of JP-17
 **Acceptance criteria:** interview schedule confirmed; 5 persona drafts (Partner / Associate / Paralegal / Ops / Compliance Officer); first interview conducted by end of Sprint 1.
 
@@ -117,7 +117,7 @@ And ArgoCD App-of-Apps must be deployed with /gitops/dev synced
 **Plane:** subset of JP-21
 **Acceptance criteria:** sample download from CourtListener, CAP, Cornell LII, CA Courts, NJ Judiciary; storage size estimate per source; adapter contract sketched; sample data in /opt/ai-elevate/gigforge/projects/judicialpredict/data/samples/.
 
-### S1.15 — Recruiting kickoff (5 NEW HIRES + 2 part-time)
+### S1.15 — Agent team capacity review (no external hires; map roles to existing gigforge agents)
 **Owner:** Jamie Okafor (gigforge-pm) + Alex Reeves (Operations Director)
 **Plane:** JP-22
 **Acceptance criteria:** job descriptions drafted for Senior Rust Eng, Compliance Eng, Senior SRE, Senior Product Designer, Django/Back-Office Eng, UX Researcher (0.5 FTE), A11y Consultant (0.25 FTE); first interviews scheduled.
@@ -135,7 +135,7 @@ And ArgoCD App-of-Apps must be deployed with /gitops/dev synced
 ## Open issues
 
 - **Owner blocker:** Gateway auth bridge broken — `openclaw agent --agent gigforge-pm ...` returns HTTP 401. PM dispatch is staged at `PENDING-PM-DISPATCH.md`. Sprint cannot start in earnest until repaired.
-- **Hire blocker:** 5 critical hires required before Sprint 2. Operations to escalate to Braun.
+- **Note (v2.14 cleanup):** earlier "5 critical hires" framing was inherited from the GigForge v1.0 consultancy spec. The GigForge agent team is the team; see spec §16 (v2.14) for the actual mapping.
 
 ## Communication
 
