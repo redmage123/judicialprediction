@@ -34,3 +34,6 @@ tracing = { version = "0.1" }
 tracing-subscriber = { version = "0.3" }
 anyhow = { version = "1" }
 uuid = { version = "1", features = ["v4"] }
+tonic = { version = "0.12" }
+prost = { version = "0.13" }
+tonic-build = { version = "0.12" }
