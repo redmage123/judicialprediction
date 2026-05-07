@@ -1,0 +1,19 @@
+[package]
+name = "partner-gateway"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "partner-gateway"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+axum = { workspace = true }
+async-graphql = { workspace = true }
+async-graphql-axum = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

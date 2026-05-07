@@ -1,0 +1,15 @@
+[package]
+name = "monte-carlo-sim"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "monte-carlo-sim"
+path = "src/main.rs"
+
+[dependencies]
+rayon = { workspace = true }
+ndarray = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

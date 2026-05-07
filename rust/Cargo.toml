@@ -1,0 +1,36 @@
+[workspace]
+members = [
+    "api-gateway",
+    "feature-store-types",
+    "feature-store",
+    "decision-arith",
+    "monte-carlo-sim",
+    "cost-engine",
+    "ingest-fetcher",
+    "feature-deriver",
+    "event-broker",
+    "partner-gateway",
+]
+resolver = "2"
+
+[profile.release]
+opt-level = 3
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8" }
+async-graphql = { version = "7" }
+async-graphql-axum = { version = "7" }
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "macros", "uuid"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }
+rayon = { version = "1" }
+ndarray = { version = "0.16" }
+flate2 = { version = "1" }
+redis = { version = "0.27", features = ["tokio-comp"] }
+tokio-tungstenite = { version = "0.26" }
+tracing = { version = "0.1" }
+tracing-subscriber = { version = "0.3" }
+anyhow = { version = "1" }
+uuid = { version = "1", features = ["v4"] }
