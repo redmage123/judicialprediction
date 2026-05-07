@@ -3,11 +3,17 @@ name = "api-gateway"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "api_gateway"
+path = "src/lib.rs"
+
 [[bin]]
 name = "api-gateway"
 path = "src/main.rs"
 
 [dependencies]
+feature-store = { path = "../feature-store" }
+sqlx = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 async-graphql = { workspace = true }
@@ -17,3 +23,9 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+tower = { version = "0.5" }
+bytes = "1"
