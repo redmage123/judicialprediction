@@ -1,0 +1,44 @@
+# Dev-environment value overrides for the api-gateway chart.
+# These are merged on top of charts/api-gateway/values.yaml by ArgoCD.
+
+replicaCount: 1
+
+image:
+  # ArgoCD Image Updater will manage this tag in Sprint 2.
+  # For now, point at the dev build from the local registry or GHCR.
+  tag: "dev-latest"
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 250m
+    memory: 128Mi
+
+# Looser probe timing for dev (slower startup on resource-constrained cluster).
+probes:
+  liveness:
+    initialDelaySeconds: 10
+    periodSeconds: 15
+    failureThreshold: 5
+    path: /healthz
+  readiness:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    failureThreshold: 5
+    path: /healthz
+
+env:
+  databaseSecretName: "api-gateway-db-credentials-dev"
+  databaseSecretKey: "DATABASE_URL"
+  extra:
+    - name: RUST_LOG
+      value: "debug,sqlx=warn"
+
+# NetworkPolicy is relaxed for dev — allow any namespace to call the gateway.
+networkPolicy:
+  enabled: true
+  tenantNamespaceSelector:
+    matchLabels:
+      judicialpredict/env: dev

@@ -1,0 +1,38 @@
+# Root App-of-Apps Application for the dev environment.
+# Apply this once manually to bootstrap ArgoCD:
+#   kubectl apply -f gitops/dev/applications.yaml
+#
+# After that, all child Applications in gitops/dev/apps/ are managed automatically.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: judicialpredict-dev-root
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: judicialpredict
+    judicialpredict/env: dev
+  # Finalizer ensures ArgoCD cleans up child resources when this Application is deleted.
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    # TODO: replace with the real private repo URL before applying to a cluster.
+    repoURL: https://github.com/openclaw/judicialpredict.git
+    targetRevision: main
+    # Points at the directory of child Application manifests.
+    path: gitops/dev/apps
+
+  destination:
+    server: https://kubernetes.default.svc
+    # The root App-of-Apps itself lives in the argocd namespace; child Applications
+    # are responsible for their own destination namespace.
+    namespace: argocd
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

@@ -1,0 +1,16 @@
+apiVersion: v2
+name: api-gateway
+description: JudicialPredict Rust API Gateway — GraphQL + REST entry point for the data plane.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - judicialpredict
+  - api-gateway
+  - graphql
+home: https://github.com/openclaw/judicialpredict
+sources:
+  - https://github.com/openclaw/judicialpredict/tree/main/rust/api-gateway
+maintainers:
+  - name: GigForge Engineering
+    email: engineer@gigforge.ai

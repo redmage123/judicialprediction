@@ -1,0 +1,57 @@
+{{- if .Values.networkPolicy.enabled -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "api-gateway.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "api-gateway.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "api-gateway.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+
+  ingress:
+    # Allow inbound traffic only from namespaces labelled as tenant-facing
+    # (e.g. the ingress-controller namespace, or per-tenant API namespaces).
+    # Sprint 2: replace selector with the real ingress-controller namespace label.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.tenantNamespaceSelector.matchLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.targetPort }}
+
+  egress:
+    # Allow DNS resolution (kube-dns / CoreDNS).
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+    # Allow outbound to the feature-store service within the same namespace.
+    # Sprint 2: replace with the exact label selector once feature-store chart is deployed.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: feature-store
+      ports:
+        - protocol: TCP
+          port: 4001
+
+    # Allow outbound to Postgres (CloudNativePG operator pod in the same namespace,
+    # or the docker-compose Postgres in dev via NodePort/ExternalName).
+    # Sprint 2: tighten to the CloudNativePG pod label.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: judicialpredict-postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+{{- end }}
