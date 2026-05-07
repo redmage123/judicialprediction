@@ -1,0 +1,8 @@
+[tool.uv.workspace]
+members = [
+    "ml-inference-svc",
+]
+
+[tool.uv]
+# Workspace-wide Python minimum — matches CloudNativePG/K8s base images.
+required-version = ">=0.5"
