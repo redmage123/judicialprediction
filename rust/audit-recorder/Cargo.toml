@@ -1,0 +1,18 @@
+[package]
+name = "audit-recorder"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sqlx    = { workspace = true }
+tokio   = { workspace = true }
+anyhow  = { workspace = true }
+uuid    = { workspace = true }
+serde   = { workspace = true }
+serde_json = { workspace = true }
+# SHA-256 for deterministic payload hashing (not in workspace — audit-only dep).
+sha2 = "0.10"
+hex  = "0.4"
+
+[dev-dependencies]
+tokio = { workspace = true }

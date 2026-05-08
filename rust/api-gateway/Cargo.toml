@@ -15,6 +15,8 @@ path = "src/main.rs"
 # feature-store is still a compile-time dep for its generated stubs + FeatureStoreServiceClient.
 # At runtime the api-gateway connects to feature-store-server over gRPC (no in-process Repo).
 feature-store = { path = "../feature-store" }
+rate-limit = { path = "../rate-limit" }
+audit-recorder = { path = "../audit-recorder" }
 tonic = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
@@ -27,6 +29,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
 jsonwebtoken = { workspace = true }
+dashmap = { workspace = true }
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }

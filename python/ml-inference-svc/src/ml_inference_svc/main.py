@@ -11,14 +11,16 @@ Any field outside the Tier-A/B allowlist is rejected with HTTP 400.
 """
 from __future__ import annotations
 
+import json
 import time
-from typing import Any
+from typing import Any, Optional
 
 import uvicorn
-from fastapi import Body, FastAPI, HTTPException
+from fastapi import Body, FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from ml_inference_svc import audit_recorder
 from ml_inference_svc.predict import ALLOWLIST_FEATURES, predict_case_outcome
 
 app = FastAPI(
@@ -62,13 +64,19 @@ class PredictResponse(BaseModel):
 
 
 @app.post("/predict", response_model=PredictResponse, tags=["ml"])
-async def predict(body: dict[str, Any] = Body(...)) -> PredictResponse:
+async def predict(
+    body: dict[str, Any] = Body(...),
+    x_tenant_id: Optional[str] = Header(default=None, alias="X-Tenant-Id"),
+) -> PredictResponse:
     """
     Predict case outcome.
 
     Accepts JSON with Tier-A/B feature fields only.
     Rejects any field outside the allowlist with HTTP 400 to guard against Tier-C inputs.
     Returns P(win) + 90 % conformal CI per the PredictCaseOutcome proto contract.
+
+    If X-Tenant-Id is provided, a fire-and-forget audit row is recorded in
+    audit_log via audit_recorder (S2.11 / JP-34).  No header → no audit row.
     """
     # Tier enforcement: any field not on the allowlist is rejected.
     forbidden = set(body.keys()) - ALLOWLIST_FEATURES
@@ -85,12 +93,30 @@ async def predict(body: dict[str, Any] = Body(...)) -> PredictResponse:
             detail=f"Missing required feature(s): {sorted(missing)}",
         )
 
+    started = time.perf_counter()
+    audit_status = audit_recorder.STATUS_OK
     try:
         p_win, ci_lower, ci_upper, model_version = predict_case_outcome(body)
     except FileNotFoundError as exc:
+        audit_status = audit_recorder.STATUS_ERR
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
+        audit_status = audit_recorder.STATUS_ERR
         raise HTTPException(status_code=500, detail=f"Inference error: {exc}") from exc
+    finally:
+        if x_tenant_id is not None:
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            payload_hash = audit_recorder.hash_payload(
+                json.dumps(body, sort_keys=True).encode("utf-8")
+            )
+            audit_recorder.record_fire_and_forget(
+                tenant_id=x_tenant_id,
+                actor="ml-inference-svc",
+                action="predict.invoke",
+                payload_hash=payload_hash,
+                latency_ms=latency_ms,
+                status=audit_status,
+            )
 
     return PredictResponse(
         p_win=p_win,

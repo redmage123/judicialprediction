@@ -195,7 +195,7 @@ async fn graphql_feature_rls_smoke() {
     // -----------------------------------------------------------------------
     // 2. Build the api-gateway with the test JWT secret.
     // -----------------------------------------------------------------------
-    let app = api_gateway::build_app(&fs_url, TEST_JWT_SECRET.to_vec())
+    let app = api_gateway::build_app(&fs_url, TEST_JWT_SECRET.to_vec(), Default::default())
         .await
         .expect("build_app");
 
@@ -267,7 +267,7 @@ async fn graphql_feature_rls_smoke() {
 async fn feature_store_grpc_unavailable_returns_error() {
     // Point api-gateway at a port with nothing listening.
     let dead_url = "http://127.0.0.1:49999";
-    let app = api_gateway::build_app(dead_url, TEST_JWT_SECRET.to_vec())
+    let app = api_gateway::build_app(dead_url, TEST_JWT_SECRET.to_vec(), Default::default())
         .await
         .expect("build_app");
 
@@ -297,7 +297,7 @@ async fn feature_store_grpc_unavailable_returns_error() {
 #[ignore = "requires docker-compose dev stack; run with --include-ignored"]
 async fn health_endpoint_ok() {
     // Feature-store doesn't need to be up for the health endpoint.
-    let app = api_gateway::build_app("http://127.0.0.1:49998", TEST_JWT_SECRET.to_vec())
+    let app = api_gateway::build_app("http://127.0.0.1:49998", TEST_JWT_SECRET.to_vec(), Default::default())
         .await
         .expect("build_app");
 
@@ -314,7 +314,7 @@ async fn health_endpoint_ok() {
 #[tokio::test]
 #[ignore = "requires docker-compose dev stack; run with --include-ignored"]
 async fn missing_tenant_header_is_unauthorized() {
-    let app = api_gateway::build_app("http://127.0.0.1:49997", TEST_JWT_SECRET.to_vec())
+    let app = api_gateway::build_app("http://127.0.0.1:49997", TEST_JWT_SECRET.to_vec(), Default::default())
         .await
         .expect("build_app");
 
@@ -336,7 +336,7 @@ async fn missing_tenant_header_is_unauthorized() {
 #[tokio::test]
 #[ignore = "requires docker-compose dev stack; run with --include-ignored"]
 async fn missing_or_expired_jwt_returns_401() {
-    let app = api_gateway::build_app("http://127.0.0.1:49996", TEST_JWT_SECRET.to_vec())
+    let app = api_gateway::build_app("http://127.0.0.1:49996", TEST_JWT_SECRET.to_vec(), Default::default())
         .await
         .expect("build_app");
 
@@ -352,4 +352,52 @@ async fn missing_or_expired_jwt_returns_401() {
     // c) Garbage token (invalid signature).
     let (status_c, _) = graphql(&app, "{ healthcheck }", "garbage.token.here").await;
     assert_eq!(status_c, StatusCode::UNAUTHORIZED, "invalid token → 401");
+}
+
+/// S2.3 rate-limit: per-tenant token bucket returns 429 after exhaustion.
+///
+/// Uses RPM=5 so only 6 requests are needed, keeping the test fast.
+/// Runs fully in-process — `{ healthcheck }` never reaches the feature-store
+/// or Postgres, so NO docker-compose stack is required.
+///
+/// Asserts:
+///   - Requests 1-5 return HTTP 200.
+///   - Request 6 returns HTTP 429 with a `Retry-After` header.
+#[tokio::test]
+async fn rate_limit_returns_429_after_exhaustion() {
+    let rate_cfg = api_gateway::RateLimitConfig { requests_per_min: 5, mutations_per_min: 10 };
+    // Feature-store URL is never called — gRPC channel is lazy.
+    let app =
+        api_gateway::build_app("http://127.0.0.1:49994", TEST_JWT_SECRET.to_vec(), rate_cfg)
+            .await
+            .expect("build_app");
+
+    let jwt = make_jwt(DEV_TENANT);
+
+    // First 5 requests must succeed (bucket starts at capacity = 5).
+    for i in 0..5_u32 {
+        let (status, _) = graphql(&app, "{ healthcheck }", &jwt).await;
+        assert_eq!(status, StatusCode::OK, "request {i} should succeed — bucket not yet exhausted");
+    }
+
+    // 6th request: bucket empty → must be rate-limited.
+    let body = r#"{"query": "{ healthcheck }"}"#.to_string();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/graphql")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {jwt}"))
+        .body(axum::body::Body::from(body))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "6th request must return 429 when bucket is exhausted"
+    );
+    assert!(
+        resp.headers().contains_key("retry-after"),
+        "429 response must include a Retry-After header (RFC 9110 §10.2.4)"
+    );
 }
