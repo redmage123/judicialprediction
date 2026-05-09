@@ -23,6 +23,48 @@ Subcommands:
 - `fetch <court>` — downloads to `/tmp/jp-ingest-<court>.tar.gz`. No DB.
 - `parse <path>` — parses a local tarball and prints `valid/skipped` counts. No DB.
 - `run <court>` — fetch + parse + upsert. The typical ingest path.
+- `run-rest <court> [--target N]` — REST API path (S3.6 fallback). Use when bulk-data is unreachable.
+
+## Live-ingest reality (S3.6 findings, 2026-05-09)
+
+CourtListener has **three rate-limit layers** stacked on the REST API. They
+all apply, the tightest wins:
+
+| Layer | Limit | Hint header / body |
+|---|---|---|
+| Per-minute | 5 / min on `/opinions/<id>/` and `/clusters/<id>/` | `429` body: `Rate limit exceeded: 5/min. Expected available in <N> seconds.` |
+| Per-hour | observed ~30/hr after sustained use | same |
+| Per-day | **125 / day on `/opinions/<id>/`** | `429` body: `Rate limit exceeded: 125/day. Expected available in 73641 seconds.` |
+
+The `/search/` endpoint has its own (more generous) limit and isn't subject
+to the 125/day cap. Use it for ID enumeration; only hit `/opinions/<id>/`
+for opinions you actually want to ingest.
+
+Practical implications:
+- **A single-day target of 1000+ opinions is impossible** at this quota.
+- The Sprint-3 ingest landed only 4 tax-court opinions before hitting the
+  daily cap. Each subsequent day, ingest can add up to 125 more.
+- The bulk-data tarball path (which would deliver 13k tax opinions in one
+  shot) is WAF-blocked at the Hetzner egress IP and remains broken even
+  with auth. See "WAF block" below.
+
+### Known incremental-upsert bug
+
+The current `run-rest` path collects all opinions in memory and upserts at
+the end. If the daily cap fires mid-fetch, the in-memory opinions are
+lost. **Sprint-4 follow-up: switch to per-opinion upsert** so a partial
+run still persists what it got.
+
+### WAF block on bulk-data
+
+`https://www.courtlistener.com/api/bulk-data/opinions/<court>.tar.gz` returns
+HTTP 403 from CloudFront for Hetzner Frankfurt egress IPs (`78.47.x.x`),
+even with an `Authorization: Token <api-token>` header. The block is IP-based.
+To unblock:
+1. Email Free Law Project (`https://free.law/contact/`) requesting Hetzner-IP
+   allowlist for non-profit / research access.
+2. OR run ingest from a non-datacenter IP (residential, AWS).
+3. OR subscribe to their paid commercial API.
 
 ## Production schedule
 
