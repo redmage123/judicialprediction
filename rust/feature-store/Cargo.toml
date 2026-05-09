@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 feature-store-types = { path = "../feature-store-types" }
+audit-recorder      = { path = "../audit-recorder" }
 sqlx = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -26,6 +27,14 @@ uuid = { workspace = true }
 tonic = { workspace = true }
 prost = { workspace = true }
 tokio-stream = { version = "0.1", features = ["net"] }
+# In-process override cache (sharded concurrent HashMap).
+dashmap = { workspace = true }
+# Admin HTTP endpoint (thin axum router, port 4002).
+axum = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tokio = { workspace = true }
 
 [build-dependencies]
 tonic-build = { workspace = true }

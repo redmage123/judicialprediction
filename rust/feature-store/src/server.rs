@@ -1,10 +1,20 @@
 // JudicialPredict feature-store — gRPC server implementation.
 //
 // Implements FeatureStoreService from protos/judicialpredict/data_plane/feature_store/v1/.
-// Each RPC extracts the `tenant-id` gRPC metadata header, sets the Postgres RLS
-// tenant context via set_tenant_context, then delegates to the in-process repo
-// functions (get_feature / list_features_for_case / ingest_feature).
+// Each RPC:
+//   1. Extracts `tenant-id` gRPC metadata → parses as UUID.
+//   2. Sets the Postgres RLS tenant context via set_tenant_context.
+//   3. Loads per-tenant overrides from OverridesCache (60-s TTL; DB fallback).
+//   4. Delegates to repo functions; applies override enforcement before returning.
+//
+// Override enforcement (S2.12):
+//   - disabled_features: any matching feature name → PERMISSION_DENIED.
+//   - tier_overrides → TIER_C: downgraded feature → PERMISSION_DENIED.
+//   GetFeature returns PERMISSION_DENIED for a blocked feature.
+//   ListFeatures emits a PERMISSION_DENIED stream item and terminates for a
+//   blocked feature (not a silent drop per the spec).
 
+use audit_recorder::AuditRecorder;
 use sqlx::PgPool;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
@@ -14,6 +24,7 @@ use crate::judicialpredict::data_plane::feature_store::v1::{
     GetFeatureResponse, IngestFeatureRequest, IngestFeatureResponse, ListFeaturesRequest,
     ListFeaturesResponse,
 };
+use crate::tenant_settings::{self, OverridesCache};
 
 // ---------------------------------------------------------------------------
 // Server struct
@@ -25,11 +36,19 @@ use crate::judicialpredict::data_plane::feature_store::v1::{
 /// Every request must supply a `tenant-id` metadata header containing a valid UUID.
 pub struct FeatureStoreServer {
     pool: PgPool,
+    /// 60-second in-process cache of per-tenant feature-tier overrides.
+    overrides_cache: OverridesCache,
+    /// Audit recorder used by the admin update_overrides path.
+    pub recorder: AuditRecorder,
 }
 
 impl FeatureStoreServer {
-    pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+    pub fn new(pool: PgPool, overrides_cache: OverridesCache, recorder: AuditRecorder) -> Self {
+        Self {
+            pool,
+            overrides_cache,
+            recorder,
+        }
     }
 }
 
@@ -38,6 +57,7 @@ impl FeatureStoreServer {
 // ---------------------------------------------------------------------------
 
 /// Extract and parse the `tenant-id` gRPC metadata header as a UUID.
+#[allow(clippy::result_large_err)]
 fn extract_tenant_id<T>(req: &Request<T>) -> Result<Uuid, Status> {
     let val = req
         .metadata()
@@ -93,6 +113,9 @@ fn row_to_proto(r: crate::FeatureRow) -> Feature {
 #[tonic::async_trait]
 impl FeatureStoreService for FeatureStoreServer {
     /// Retrieve a single feature by its ID (currently the DB UUID).
+    ///
+    /// Returns PERMISSION_DENIED if the feature name is blocked by the tenant's
+    /// override policy (disabled_features or tier_overrides → TIER_C).
     async fn get_feature(
         &self,
         request: Request<GetFeatureRequest>,
@@ -116,6 +139,19 @@ impl FeatureStoreService for FeatureStoreServer {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
+        // S2.12: enforce per-tenant overrides after the DB fetch.
+        if let Some(ref r) = row {
+            let overrides =
+                tenant_settings::get_overrides(&self.pool, tenant_id, &self.overrides_cache)
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?;
+            if let Some(reason) =
+                tenant_settings::check_feature_allowed(&overrides, &r.name)
+            {
+                return Err(Status::permission_denied(reason));
+            }
+        }
+
         let feature = row.map(row_to_proto);
         Ok(Response::new(GetFeatureResponse { feature }))
     }
@@ -124,7 +160,12 @@ impl FeatureStoreService for FeatureStoreServer {
     type ListFeaturesStream =
         tokio_stream::wrappers::ReceiverStream<Result<ListFeaturesResponse, Status>>;
 
-    /// Stream all features for a case, respecting tenant RLS isolation.
+    /// Stream all features for a case, respecting tenant RLS isolation and
+    /// per-tenant overrides.
+    ///
+    /// For each blocked feature, a PERMISSION_DENIED stream item is sent
+    /// (not a silent drop — per spec §3 override semantics).  The stream
+    /// terminates after the first error item.
     async fn list_features(
         &self,
         request: Request<ListFeaturesRequest>,
@@ -147,10 +188,24 @@ impl FeatureStoreService for FeatureStoreServer {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        // Buffer all rows into an mpsc channel; the stream drains it.
+        // S2.12: load overrides once for the entire batch.
+        let overrides =
+            tenant_settings::get_overrides(&self.pool, tenant_id, &self.overrides_cache)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+
+        // Buffer rows into an mpsc channel; blocked features emit a stream error.
         let cap = rows.len().max(1);
         let (tx_chan, rx) = tokio::sync::mpsc::channel(cap);
         for row in rows {
+            // Check override policy before sending.
+            if let Some(reason) = tenant_settings::check_feature_allowed(&overrides, &row.name) {
+                // Send a PERMISSION_DENIED item; client will abort the stream.
+                let _ = tx_chan
+                    .send(Err(Status::permission_denied(reason)))
+                    .await;
+                break;
+            }
             let msg = Ok(ListFeaturesResponse {
                 feature: Some(row_to_proto(row)),
             });
