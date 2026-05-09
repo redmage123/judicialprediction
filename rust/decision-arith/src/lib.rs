@@ -1,6 +1,10 @@
 // FUNCTIONAL-CORE
-// Pure functions: EV, CVaR, Nash, Rubinstein, prospect-theory utility.
+// Pure functions: EV, CVaR, Nash, Rubinstein, prospect-theory utility,
+// and the Layer 4 decision-action recommendation engine.
 // No I/O, no mutable global state, no unsafe.
+
+pub mod recommend;
+pub use recommend::{recommend, PredictionInput, Recommendation, RecommendationKind};
 
 /// Expected value of a discrete probability distribution.
 /// `outcomes`: slice of (probability, value) pairs; probabilities must sum to 1.
@@ -60,6 +64,7 @@ pub fn rubinstein_offer(_delta_a: f64, _delta_b: f64, _pie: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn ev_coin_flip() {
@@ -86,5 +91,67 @@ mod tests {
         let (a, b) = nash_bargaining(10.0, 20.0, 40.0);
         assert!((a - 30.0).abs() < 1e-10, "a={a}");
         assert!((b - 40.0).abs() < 1e-10, "b={b}");
+    }
+
+    // --- Property tests (mutations caught) ---
+
+    proptest! {
+        /// CVaR with an alpha so small that no outcome falls in the tail must return
+        /// exactly 0.0 (not NaN). This pins the `tail_p > 0.0` guard at line 33:
+        /// the mutation `> → >=` would produce 0.0 / 0.0 = NaN.
+        #[test]
+        fn prop_cvar_zero_alpha_returns_finite(
+            p1 in 0.01f64..=0.5,
+            v1 in -1e6f64..=1e6,
+        ) {
+            let outcomes = [(p1, v1), (1.0 - p1, -v1)];
+            // alpha = 1e-15: far below any realistic probability mass.
+            // tail_p will be 0.0; result must be 0.0, not NaN.
+            let result = cvar(&outcomes, 1e-15);
+            prop_assert!(result.is_finite(), "cvar(1e-15) must be finite, got {result}");
+            prop_assert_eq!(result, 0.0, "cvar(1e-15) must be 0.0 when no tail mass");
+        }
+
+        /// Scale invariance: EV(k*outcomes) == k * EV(outcomes) for k > 0.
+        #[test]
+        fn prop_ev_scale_invariant(
+            p in 0.01f64..=0.99,
+            win in 0.0f64..=1e6,
+            loss in -1e6f64..=0.0,
+            k in 0.01f64..=100.0,
+        ) {
+            let base = [(p, win), (1.0 - p, loss)];
+            let scaled = [(p, k * win), (1.0 - p, k * loss)];
+            let base_ev = expected_value(&base);
+            let scaled_ev = expected_value(&scaled);
+            prop_assert!((scaled_ev - k * base_ev).abs() < 1e-6 * (base_ev.abs() + 1.0),
+                "scale invariance failed: {scaled_ev} != {k} * {base_ev}");
+        }
+
+        /// Nash: both parties receive at least their disagreement payoff (individual rationality).
+        #[test]
+        fn prop_nash_individual_rationality(
+            d_a in -1e6f64..=1e6,
+            d_b in -1e6f64..=1e6,
+            surplus in 0.0f64..=1e6,
+        ) {
+            let (a, b) = nash_bargaining(d_a, d_b, surplus);
+            prop_assert!(a >= d_a - 1e-9, "party A below disagreement: {a} < {d_a}");
+            prop_assert!(b >= d_b - 1e-9, "party B below disagreement: {b} < {d_b}");
+        }
+
+        /// Nash: gains above disagreement are equal (symmetry).
+        #[test]
+        fn prop_nash_symmetric_gains(
+            d_a in -1e6f64..=1e6,
+            d_b in -1e6f64..=1e6,
+            surplus in 0.0f64..=1e6,
+        ) {
+            let (a, b) = nash_bargaining(d_a, d_b, surplus);
+            let gain_a = a - d_a;
+            let gain_b = b - d_b;
+            prop_assert!((gain_a - gain_b).abs() < 1e-9,
+                "asymmetric gains: gain_a={gain_a} gain_b={gain_b}");
+        }
     }
 }

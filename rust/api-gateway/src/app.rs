@@ -14,8 +14,9 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::Result;
-use async_graphql::{Context, EmptyMutation, EmptySubscription, Object, Schema, SimpleObject};
+use anyhow::{Context as _, Result};
+use async_graphql::{Context, EmptySubscription, Object, Schema, SimpleObject};
+use crate::graphql_predict::{MlInferenceClient, Mutation};
 use async_graphql_axum::{GraphQLRequest, GraphQLResponse};
 use audit_recorder::{AuditEvent, AuditRecorder, AuditStatus, hash_payload};
 use axum::{
@@ -95,7 +96,7 @@ fn sensitivity_to_str(i: i32) -> String {
 // GraphQL schema — Query root
 // ---------------------------------------------------------------------------
 
-struct Query;
+pub(crate) struct Query;
 
 #[Object]
 impl Query {
@@ -209,7 +210,7 @@ impl Query {
 // Application state — owns the GraphQL schema, JWT secret, and rate-limit store
 // ---------------------------------------------------------------------------
 
-type AppSchema = Schema<Query, EmptyMutation, EmptySubscription>;
+type AppSchema = Schema<Query, Mutation, EmptySubscription>;
 
 /// Shared application state injected into every axum handler via `State<Arc<AppState>>`.
 pub(crate) struct AppState {
@@ -258,6 +259,10 @@ async fn health_handler() -> impl IntoResponse {
 ///
 /// # Parameters
 /// - `feature_store_grpc_url` — gRPC endpoint for the feature-store service.
+/// - `ml_inference_url` — HTTP base URL for ml-inference-svc
+///   (e.g. `http://ml-inference-svc:8001`).  Set via `ML_INFERENCE_URL`.
+///   Sprint-4 follow-up: replace with gRPC once the Python svc exposes a
+///   gRPC server (protos/ml_plane/inference.proto).
 /// - `jwt_secret` — raw bytes of the HS256 signing secret.
 /// - `rate_config` — rate-limiting parameters (RPM caps per tenant).
 ///
@@ -272,6 +277,7 @@ async fn health_handler() -> impl IntoResponse {
 /// ```
 pub async fn build_app(
     feature_store_grpc_url: &str,
+    ml_inference_url: &str,
     jwt_secret: Vec<u8>,
     rate_config: RateLimitConfig,
 ) -> Result<Router> {
@@ -303,9 +309,24 @@ pub async fn build_app(
             }
         };
 
-    let schema = Schema::build(Query, EmptyMutation, EmptySubscription)
+    // HTTP client for ml-inference-svc POST /predict (Sprint-3 HTTP shortcut).
+    // Timeouts: 10 s connect (fail-fast if service is unreachable),
+    //           30 s total   (conformal CI can take a few seconds on cold model load).
+    let ml_http_client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .context("build ml-inference reqwest client")?;
+
+    let ml_client = MlInferenceClient {
+        client: ml_http_client,
+        base_url: ml_inference_url.trim_end_matches('/').to_string(),
+    };
+
+    let schema = Schema::build(Query, Mutation, EmptySubscription)
         .data(fs_client)
         .data(audit_recorder)
+        .data(ml_client)
         .finish();
 
     let rate_store: Arc<dyn RateLimitStore> =

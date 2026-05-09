@@ -9,4 +9,5 @@ pub use crate::rate_limit::RateLimitConfig;
 
 pub(crate) mod app;
 pub(crate) mod auth;
+pub(crate) mod graphql_predict;
 pub(crate) mod rate_limit;

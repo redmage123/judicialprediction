@@ -1,4 +1,66 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+This is the JudicialPredict workspace frontend — Next.js 15 + React 19 + Tailwind 4 + shadcn/ui + Apollo Client.
+
+## Dev Login (Sprint 3 — local only, NOT production-ready)
+
+> **Warning:** This is a development-only authentication gate with a single
+> hard-coded operator and a shared secret. Do not use in production.
+
+### Credentials
+
+| Field    | Value                |
+|----------|----------------------|
+| Email    | `dev@example.test`   |
+| Password | `dev-pass`           |
+| Tenant   | `00000000-0000-0000-0000-000000000001` |
+
+### Environment Variables
+
+Create `.env.local` in this directory:
+
+```bash
+# Must match the secret configured in api-gateway (both sides share the same value).
+JWT_DEV_SECRET=dev-only-NOT-A-REAL-SECRET-1234567890abcdef
+
+# Optional: override the api-gateway base URL (default: http://localhost:4000)
+GATEWAY_INTERNAL_URL=http://localhost:4000
+```
+
+If `JWT_DEV_SECRET` is unset the app falls back to the placeholder above and
+logs a console warning at boot.
+
+### Auth Flow
+
+1. Visit any protected route (e.g. `/case/new`) — middleware redirects to `/login?next=/case/new`.
+2. Submit dev credentials.
+3. Server signs a JWT (HS256, 8 h TTL) and sets an `httpOnly SameSite=Lax` cookie named `jp_session`.
+4. Middleware validates the cookie on each protected-route request.
+5. All GraphQL goes through the BFF proxy at `/api/graphql`, which attaches `Authorization: Bearer <jwt>` server-side.
+
+### JWT Claim Shape
+
+```json
+{
+  "sub":       "00000000-0000-0000-0000-000000000002",
+  "tenant_id": "00000000-0000-0000-0000-000000000001",
+  "email":     "dev@example.test",
+  "iss":       "judicialpredict-web",
+  "aud":       "judicialpredict-api",
+  "iat":       1234567890,
+  "exp":       1234596090
+}
+```
+
+### Clearing the Session
+
+`jp_session` is `httpOnly` — it cannot be cleared via `document.cookie`. Options:
+
+- Click **Sign out** in the app nav bar (calls `POST /api/auth/logout`).
+- DevTools → Application → Cookies → delete `jp_session` for `localhost`.
+
+### Sprint 4+ Follow-up
+
+Real SSO (SAML/OIDC), multi-tenant routing, password reset, and proper
+session storage are all deferred to **Sprint 4 — Authentication hardening**.
 
 ## Getting Started
 

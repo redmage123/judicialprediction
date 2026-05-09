@@ -7,8 +7,11 @@ set -uo pipefail
 PROJECT_DIR="/opt/ai-elevate/gigforge/projects/judicialpredict"
 RAG_KEY="rag_ak_aielevate_2026_secret"
 RAG_BASE="http://localhost:8020/api/v1"
-PLANE_TOKEN="23d5e107893fb874191ff9e03597e2c8f7ed3333395b4d13010d7770d8e960ca"
-PLANE_BASE="http://localhost:8801/api/v1/workspaces/gigforge/projects/92ad0116-cbac-4975-ac87-4ea820c0be96"
+# Source rotating Plane creds (auto-refreshed daily by /opt/ai-elevate/cron/plane-token-refresh.sh)
+# shellcheck source=/dev/null
+[ -r /opt/ai-elevate/credentials/plane.env ] && . /opt/ai-elevate/credentials/plane.env
+PLANE_TOKEN="${PLANE_GF_TOKEN:?PLANE_GF_TOKEN not set; check /opt/ai-elevate/credentials/plane.env}"
+PLANE_BASE="${PLANE_GF_URL:-http://localhost:8801}/api/v1/workspaces/gigforge/projects/92ad0116-cbac-4975-ac87-4ea820c0be96"
 LOG="/var/log/jp-sync.log"
 MARKER_DIR="/var/lib/jp-sync"
 mkdir -p "$MARKER_DIR"

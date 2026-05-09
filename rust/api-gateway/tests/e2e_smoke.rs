@@ -1,9 +1,11 @@
 // E2E smoke test: api-gateway → feature-store-server (gRPC) → Postgres with RLS.
 //
-// Requires:
+// Requires (for feature-store tests):
 //   - Docker Compose dev stack running (docker compose -f docker-compose.dev.yml up -d postgres)
 //   - DATABASE_URL set to jp_app DSN, OR defaults to the dev stack DSN
 //   - ADMIN_DATABASE_URL (optional) for test setup; falls back to the superuser DSN
+//
+// predict_mutation_happy_path requires only a wiremock server (no docker stack).
 //
 // All tests are marked #[ignore] so they don't run in CI by default.
 // Run explicitly with:
@@ -17,8 +19,11 @@ use axum::http::{Request, StatusCode};
 use feature_store::{
     judicialpredict::data_plane::feature_store::v1::feature_store_service_server::FeatureStoreServiceServer,
     server::FeatureStoreServer,
+    tenant_settings::OverridesCache,
 };
 use tower::ServiceExt as _;
+use wiremock::matchers::{header, method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 // ---------------------------------------------------------------------------
 // Test constants
@@ -130,7 +135,12 @@ async fn spawn_feature_store(pool: sqlx::PgPool) -> (String, tokio::task::JoinHa
     let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
 
     let handle = tokio::spawn(async move {
-        let server = FeatureStoreServer::new(pool);
+        // Test fixtures: empty overrides cache + a real audit-recorder bound
+        // to the same pool. The recorder writes through; tests don't assert on
+        // audit_log rows (S3.11 covers that).
+        let overrides_cache = OverridesCache::new();
+        let recorder = audit_recorder::AuditRecorder::new(pool.clone());
+        let server = FeatureStoreServer::new(pool, overrides_cache, recorder);
         tonic::transport::Server::builder()
             .add_service(FeatureStoreServiceServer::new(server))
             .serve_with_incoming(incoming)
@@ -195,9 +205,14 @@ async fn graphql_feature_rls_smoke() {
     // -----------------------------------------------------------------------
     // 2. Build the api-gateway with the test JWT secret.
     // -----------------------------------------------------------------------
-    let app = api_gateway::build_app(&fs_url, TEST_JWT_SECRET.to_vec(), Default::default())
-        .await
-        .expect("build_app");
+    let app = api_gateway::build_app(
+        &fs_url,
+        "http://127.0.0.1:49990", // ml-inference not used in this test
+        TEST_JWT_SECRET.to_vec(),
+        Default::default(),
+    )
+    .await
+    .expect("build_app");
 
     // -----------------------------------------------------------------------
     // 3. Insert a test feature as the dev tenant via the admin pool (bypasses RLS).
@@ -267,9 +282,14 @@ async fn graphql_feature_rls_smoke() {
 async fn feature_store_grpc_unavailable_returns_error() {
     // Point api-gateway at a port with nothing listening.
     let dead_url = "http://127.0.0.1:49999";
-    let app = api_gateway::build_app(dead_url, TEST_JWT_SECRET.to_vec(), Default::default())
-        .await
-        .expect("build_app");
+    let app = api_gateway::build_app(
+        dead_url,
+        "http://127.0.0.1:49990", // ml-inference not used in this test
+        TEST_JWT_SECRET.to_vec(),
+        Default::default(),
+    )
+    .await
+    .expect("build_app");
 
     let dev_jwt = make_jwt(DEV_TENANT);
     let gql = r#"{ feature(id: "00000000-0000-0000-0000-000000000099") { id name } }"#;
@@ -297,9 +317,14 @@ async fn feature_store_grpc_unavailable_returns_error() {
 #[ignore = "requires docker-compose dev stack; run with --include-ignored"]
 async fn health_endpoint_ok() {
     // Feature-store doesn't need to be up for the health endpoint.
-    let app = api_gateway::build_app("http://127.0.0.1:49998", TEST_JWT_SECRET.to_vec(), Default::default())
-        .await
-        .expect("build_app");
+    let app = api_gateway::build_app(
+        "http://127.0.0.1:49998",
+        "http://127.0.0.1:49990",
+        TEST_JWT_SECRET.to_vec(),
+        Default::default(),
+    )
+    .await
+    .expect("build_app");
 
     let req = Request::builder()
         .method("GET")
@@ -314,9 +339,14 @@ async fn health_endpoint_ok() {
 #[tokio::test]
 #[ignore = "requires docker-compose dev stack; run with --include-ignored"]
 async fn missing_tenant_header_is_unauthorized() {
-    let app = api_gateway::build_app("http://127.0.0.1:49997", TEST_JWT_SECRET.to_vec(), Default::default())
-        .await
-        .expect("build_app");
+    let app = api_gateway::build_app(
+        "http://127.0.0.1:49997",
+        "http://127.0.0.1:49990",
+        TEST_JWT_SECRET.to_vec(),
+        Default::default(),
+    )
+    .await
+    .expect("build_app");
 
     // `graphql` helper with an empty jwt string omits the Authorization header.
     let (status, _) = graphql(&app, "{ healthcheck }", "").await;
@@ -336,9 +366,14 @@ async fn missing_tenant_header_is_unauthorized() {
 #[tokio::test]
 #[ignore = "requires docker-compose dev stack; run with --include-ignored"]
 async fn missing_or_expired_jwt_returns_401() {
-    let app = api_gateway::build_app("http://127.0.0.1:49996", TEST_JWT_SECRET.to_vec(), Default::default())
-        .await
-        .expect("build_app");
+    let app = api_gateway::build_app(
+        "http://127.0.0.1:49996",
+        "http://127.0.0.1:49990",
+        TEST_JWT_SECRET.to_vec(),
+        Default::default(),
+    )
+    .await
+    .expect("build_app");
 
     // a) No Authorization header.
     let (status_a, _) = graphql(&app, "{ healthcheck }", "").await;
@@ -354,6 +389,145 @@ async fn missing_or_expired_jwt_returns_401() {
     assert_eq!(status_c, StatusCode::UNAUTHORIZED, "invalid token → 401");
 }
 
+/// S3.1 predict mutation happy path — uses a wiremock mock server; no docker stack required.
+///
+/// 1. Starts a wiremock server that expects exactly one POST /predict with the
+///    correct X-Tenant-Id header and returns a fixed prediction JSON.
+/// 2. Builds api-gateway pointing at the mock server for ML inference.
+/// 3. Issues a JWT for DEV_TENANT.
+/// 4. POSTs the `predictCaseOutcome` GraphQL mutation.
+/// 5. Asserts the response decodes to the expected PredictResult fields.
+/// 6. On mock server drop, wiremock verifies the expect(1) constraint was met
+///    (i.e., the request with X-Tenant-Id header was received exactly once).
+///
+/// Audit row assertion is in S3.11 — out of scope here.
+#[tokio::test]
+#[ignore = "boots a wiremock mock server; run with --include-ignored"]
+async fn predict_mutation_happy_path() {
+    // -----------------------------------------------------------------------
+    // 1. Start the mock ml-inference-svc.
+    // -----------------------------------------------------------------------
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/predict"))
+        // Verify the gateway threads the JWT tenant_id into X-Tenant-Id.
+        .and(header("X-Tenant-Id", DEV_TENANT))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "p_win":            0.72_f64,
+                "ci_lower":         0.61_f64,
+                "ci_upper":         0.83_f64,
+                "coverage":         0.90_f64,
+                "model_version":    "test-run-id-abc123",
+                "predicted_at_unix": 1_746_748_800_i64
+            })),
+        )
+        // Dropping the MockServer verifies this expectation automatically.
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    // -----------------------------------------------------------------------
+    // 2. Build api-gateway pointing at the mock server.
+    //    Feature-store URL is unused; gRPC channel is lazy.
+    // -----------------------------------------------------------------------
+    let app = api_gateway::build_app(
+        "http://127.0.0.1:49993",
+        &mock_server.uri(),
+        TEST_JWT_SECRET.to_vec(),
+        Default::default(),
+    )
+    .await
+    .expect("build_app");
+
+    // -----------------------------------------------------------------------
+    // 3. Mint a JWT for the dev tenant.
+    // -----------------------------------------------------------------------
+    let jwt = make_jwt(DEV_TENANT);
+
+    // -----------------------------------------------------------------------
+    // 4. POST the GraphQL mutation.
+    //    Note: async-graphql converts snake_case fields to camelCase in SDL.
+    // -----------------------------------------------------------------------
+    let gql_body = serde_json::json!({
+        "query": r#"
+            mutation {
+                predictCaseOutcome(input: {
+                    judgeSeverity:         0.7
+                    attorneyWinRate:       0.6
+                    ideologyDistance:      0.3
+                    materialityScore:      0.8
+                    proceduralMotionCount: 3.0
+                    caseType:              "civil"
+                    jurisdiction:          "Federal"
+                }) {
+                    pWin
+                    ciLower
+                    ciUpper
+                    coverage
+                    modelVersion
+                    predictedAtUnix
+                }
+            }
+        "#
+    })
+    .to_string();
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/graphql")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {jwt}"))
+        .body(Body::from(gql_body))
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+
+    // -----------------------------------------------------------------------
+    // 5. Assert the response decodes correctly.
+    // -----------------------------------------------------------------------
+    assert_eq!(resp.status(), StatusCode::OK, "GraphQL must return 200");
+
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body_bytes).expect("parse JSON");
+
+    // Must have no top-level errors.
+    assert!(
+        json["errors"].is_null(),
+        "response must have no errors; body={body_bytes:?}"
+    );
+
+    let result = &json["data"]["predictCaseOutcome"];
+    assert!(
+        (result["pWin"].as_f64().unwrap_or(0.0) - 0.72).abs() < 1e-4,
+        "pWin mismatch; body={body_bytes:?}"
+    );
+    assert!(
+        (result["ciLower"].as_f64().unwrap_or(0.0) - 0.61).abs() < 1e-4,
+        "ciLower mismatch"
+    );
+    assert!(
+        (result["ciUpper"].as_f64().unwrap_or(0.0) - 0.83).abs() < 1e-4,
+        "ciUpper mismatch"
+    );
+    assert_eq!(
+        result["modelVersion"].as_str().unwrap_or(""),
+        "test-run-id-abc123",
+        "modelVersion mismatch"
+    );
+    assert_eq!(
+        result["predictedAtUnix"].as_i64().unwrap_or(0),
+        1_746_748_800_i64,
+        "predictedAtUnix mismatch"
+    );
+
+    // 6. MockServer drop verifies expect(1) — the X-Tenant-Id header was received.
+    //    No explicit assertion needed; wiremock panics if the expectation is unmet.
+}
+
 /// S2.3 rate-limit: per-tenant token bucket returns 429 after exhaustion.
 ///
 /// Uses RPM=5 so only 6 requests are needed, keeping the test fast.
@@ -366,11 +540,15 @@ async fn missing_or_expired_jwt_returns_401() {
 #[tokio::test]
 async fn rate_limit_returns_429_after_exhaustion() {
     let rate_cfg = api_gateway::RateLimitConfig { requests_per_min: 5, mutations_per_min: 10 };
-    // Feature-store URL is never called — gRPC channel is lazy.
-    let app =
-        api_gateway::build_app("http://127.0.0.1:49994", TEST_JWT_SECRET.to_vec(), rate_cfg)
-            .await
-            .expect("build_app");
+    // Feature-store and ML inference URLs are never called — channels are lazy.
+    let app = api_gateway::build_app(
+        "http://127.0.0.1:49994",
+        "http://127.0.0.1:49990",
+        TEST_JWT_SECRET.to_vec(),
+        rate_cfg,
+    )
+    .await
+    .expect("build_app");
 
     let jwt = make_jwt(DEV_TENANT);
 
@@ -381,7 +559,7 @@ async fn rate_limit_returns_429_after_exhaustion() {
     }
 
     // 6th request: bucket empty → must be rate-limited.
-    let body = r#"{"query": "{ healthcheck }"}"#.to_string();
+    let body = format!(r#"{{"query": "{{ healthcheck }}"}}"#);
     let req = Request::builder()
         .method("POST")
         .uri("/graphql")

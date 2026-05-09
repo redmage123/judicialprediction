@@ -1,9 +1,13 @@
 "use client";
 
 /**
- * Auth context — parses JWT claims from cookie / localStorage.
- * NO signature verification (that is the gateway's responsibility).
- * Surfaces useTenant() hook for components that need tenant-scoped data.
+ * Auth context — surfaces decoded JWT claims to client components.
+ *
+ * The jp_session cookie is httpOnly so browser JS cannot read it directly.
+ * On mount the AuthProvider calls GET /api/auth/me (a server-side BFF
+ * endpoint) which reads the cookie, decodes the JWT, and returns the plain
+ * claims object.  NO signature verification happens client-side — that is
+ * always the gateway's responsibility.
  */
 
 import {
@@ -13,70 +17,52 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { decodeJwt } from "jose";
 
+/** JWT claim shape minted by /api/auth/login and verified by api-gateway. */
 export interface JpClaims {
-  sub: string;          // user id
-  tenantId: string;     // firm / tenant slug
+  sub: string;        // operator UUID
+  tenant_id: string;  // firm / tenant UUID
   email?: string;
-  roles?: string[];
   exp?: number;
   iat?: number;
+  iss?: string;
+  aud?: string | string[];
 }
 
 interface AuthState {
   claims: JpClaims | null;
-  /** Raw token string (for downstream use only — do not verify client-side). */
-  token: string | null;
   isLoading: boolean;
 }
 
 const AuthContext = createContext<AuthState>({
   claims: null,
-  token: null,
   isLoading: true,
 });
-
-function readTokenFromBrowser(): string | null {
-  if (typeof window === "undefined") return null;
-  const cookieMatch = document.cookie
-    .split("; ")
-    .find((row) => row.startsWith("jp_token="));
-  if (cookieMatch) return decodeURIComponent(cookieMatch.split("=")[1]);
-  return localStorage.getItem("jp_token");
-}
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AuthState>({
     claims: null,
-    token: null,
     isLoading: true,
   });
 
   useEffect(() => {
-    const token = readTokenFromBrowser();
-    if (!token) {
-      setState({ claims: null, token: null, isLoading: false });
-      return;
-    }
-
-    try {
-      // decodeJwt does base64 decode only — no signature check.
-      const payload = decodeJwt(token) as JpClaims;
-      setState({ claims: payload, token, isLoading: false });
-    } catch {
-      // Malformed token — treat as unauthenticated.
-      setState({ claims: null, token: null, isLoading: false });
-    }
+    fetch("/api/auth/me")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { claims: JpClaims | null } | null) => {
+        setState({ claims: data?.claims ?? null, isLoading: false });
+      })
+      .catch(() => {
+        setState({ claims: null, isLoading: false });
+      });
   }, []);
 
   return <AuthContext.Provider value={state}>{children}</AuthContext.Provider>;
 }
 
-/** Returns the current tenant slug (or null when unauthenticated). */
+/** Returns the current tenant UUID, or null when unauthenticated. */
 export function useTenant(): string | null {
   const { claims } = useContext(AuthContext);
-  return claims?.tenantId ?? null;
+  return claims?.tenant_id ?? null;
 }
 
 /** Full auth state for components that need more than just the tenant. */
