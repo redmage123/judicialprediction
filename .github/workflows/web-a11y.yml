@@ -1,0 +1,81 @@
+name: Web — Accessibility CI gate
+
+on:
+  pull_request:
+    paths:
+      - "web/**"
+  workflow_dispatch:
+
+# Cancel in-progress runs on the same branch/PR.
+concurrency:
+  group: web-a11y-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  a11y:
+    name: axe-core a11y gate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+
+    env:
+      # Must match api-gateway; set a clearly-fake dev value for CI.
+      JWT_DEV_SECRET: dev-only-NOT-A-REAL-SECRET-1234567890abcdef
+      # No real gateway in CI; the intake form renders fine without one.
+      GATEWAY_INTERNAL_URL: http://localhost:9999
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 22.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: web/package-lock.json
+
+      # -------------------------------------------------------------------------
+      # Step 1 — Install dependencies
+      # -------------------------------------------------------------------------
+      - name: Install npm dependencies
+        run: npm ci
+
+      # -------------------------------------------------------------------------
+      # Step 2 — Unit/component tests (includes per-page jest-axe assertions)
+      # These must pass before we bother building the site.
+      # -------------------------------------------------------------------------
+      - name: Run vitest suite (jsdom)
+        run: npx vitest run __tests__/auth.test.tsx __tests__/case-new.test.tsx __tests__/case-results.test.tsx __tests__/a11y.test.tsx __tests__/a11y-scan.test.ts
+
+      # -------------------------------------------------------------------------
+      # Step 3 — Build production bundle
+      # -------------------------------------------------------------------------
+      - name: Build production bundle
+        run: npm run build
+
+      # -------------------------------------------------------------------------
+      # Step 4 — Install Playwright Chromium browser
+      # -------------------------------------------------------------------------
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      # -------------------------------------------------------------------------
+      # Step 5 — End-to-end axe-core scan
+      # Routes: /login, /case/new
+      # Threshold: serious + critical violations only (minor/moderate Sprint 4)
+      # /case/[id] excluded — results view requires sessionStorage from intake.
+      # -------------------------------------------------------------------------
+      - name: Run e2e axe-core scan
+        run: node scripts/a11y-scan.mjs
+
+      # -------------------------------------------------------------------------
+      # Step 6 — Upload accessibility report artifact for inspection on failure
+      # -------------------------------------------------------------------------
+      - name: Upload a11y report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: a11y-report
+          path: web/.a11y-report.json
+          retention-days: 14

@@ -11,7 +11,8 @@
     "test:watch": "vitest",
     "storybook": "storybook dev -p 6006",
     "build-storybook": "storybook build",
-    "chromatic": "npx chromatic --project-token=$CHROMATIC_PROJECT_TOKEN"
+    "chromatic": "npx chromatic --project-token=$CHROMATIC_PROJECT_TOKEN",
+    "a11y:scan": "node scripts/a11y-scan.mjs"
   },
   "dependencies": {
     "@apollo/client": "^4.1.9",
@@ -35,6 +36,7 @@
     "tailwind-merge": "^3.5.0"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.11.3",
     "@axe-core/react": "^4.11.3",
     "@chromatic-com/storybook": "^5.1.2",
     "@eslint/eslintrc": "^3",

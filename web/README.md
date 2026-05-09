@@ -69,6 +69,7 @@ session storage are all deferred to **Sprint 4 — Authentication hardening**.
 | `/` | Server | Health-check card — calls `api-gateway /healthz` and displays status |
 | `/login` | Server + client island | Dev login form (see Dev Login section above) |
 | `/case/new` | Server + client island | Case intake form; accepts 7 Tier-A/B feature inputs, calls `predictCaseOutcome` mutation via Apollo, and routes to `/case/<uuid>` on success |
+| `/case/[id]` | Server + client island | Results view for a submitted case. Reads the prediction stashed in `sessionStorage` by the intake form, computes a settle/try/borderline recommendation via `lib/recommend.ts` (TypeScript port of `rust/decision-arith/src/recommend.rs`), and renders P(win), 90% CI, expected-value comparison, and 3 reasoning bullets. Empty state shown when session data is absent. See S3.3 / JP-44. |
 
 ### Dev credentials for manual smoke
 
@@ -78,6 +79,64 @@ Password: dev-pass
 ```
 
 Visit `/case/new` → middleware redirects to `/login` → submit dev creds → form is accessible.
+
+---
+
+## Accessibility CI
+
+### Gate summary
+
+Every PR that touches `web/**` triggers the `web-a11y` GitHub Actions workflow.
+The gate fails if any **serious** or **critical** WCAG 2.2 AA violation is found.
+`minor` and `moderate` violations are not yet blocking (Sprint 4 will widen the threshold).
+
+### Routes scanned
+
+| Route | Notes |
+|---|---|
+| `/login` | Scanned without authentication. |
+| `/case/new` | Scanned with a dev session cookie (minted via `/api/auth/login`). |
+| `/case/[id]` | **Not scanned in CI** — the results view requires `sessionStorage` data set by the intake form. Covered by per-page `jest-axe` assertions in `__tests__/case-results.test.tsx`. |
+
+### Two layers of a11y checking
+
+| Layer | Tool | When |
+|---|---|---|
+| Render-time markup | `jest-axe` (via vitest, jsdom) | Every `npm run test` run. Assertions in `__tests__/*.test.tsx`. |
+| Built site (real browser) | `axe-core` via Playwright | Every PR (`web-a11y` workflow, step 5). |
+
+### Debugging a failure
+
+1. Open the failing PR → **Actions** → `a11y` job → download the `a11y-report` artifact.
+2. Open `.a11y-report.json`. Each page entry lists `violations` with:
+   - `id` — the axe rule name (e.g. `color-contrast`, `image-alt`).
+   - `impact` — `serious` or `critical`.
+   - `nodes[].target` — CSS selector of the offending element.
+3. Fix the element in the component, re-push, and the gate will re-run.
+
+### Running locally
+
+```bash
+# Build the production bundle first
+npm run build
+
+# Install Playwright browser (once per machine)
+npx playwright install chromium
+
+# Run the scan (starts next start on port 3030 automatically)
+npm run a11y:scan
+# or
+JWT_DEV_SECRET=dev-only-NOT-A-REAL-SECRET-1234567890abcdef node scripts/a11y-scan.mjs
+```
+
+The report is written to `web/.a11y-report.json`.
+
+### Sprint 4 follow-ups
+
+- Widen the gate from `serious/critical` → all impacts (including `minor`/`moderate`).
+- Add Pa11y as a second axe engine for cross-checking color-contrast results.
+- Add Lighthouse accessibility score to the CI summary.
+- Evaluate color-contrast thresholds against the design token palette.
 
 ---
 
