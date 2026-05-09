@@ -9,11 +9,12 @@ Manual updates: run `cargo mutants -p <crate> --no-shuffle --timeout 1800` then 
 | Crate | Caught | Missed | Unviable | Total | Survival rate | Status |
 |-------|--------|--------|----------|-------|---------------|--------|
 | rate-limit | 13 | 0 | 1 | 14 | 0% survived | ✅ Baseline confirmed |
-| decision-arith | TBD | TBD | TBD | TBD | — | ⏳ First cron run |
-| monte-carlo-sim | TBD | TBD | TBD | TBD | — | ⏳ First cron run |
-| feature-deriver | TBD | TBD | TBD | TBD | — | ⏳ First cron run |
+| decision-arith | 56 | 7 | 1 | 64 | 11% survived | ⚠️ Documented survivors |
+| monte-carlo-sim | 19 | 8 | 0 | 27 | 30% survived | ⚠️ Documented survivors |
+| feature-deriver | 8 | 1 | 0 | 9 | 11% survived | ⚠️ Documented survivors |
+| **total** | **96** | **16** | **2** | **114** | **14% survived** | — |
 
-_First cron run: Monday 2026-05-11 at 06:00 UTC will populate the TBD rows._
+_First sweep date: rate-limit 2026-05-09 (S2.8); decision-arith / monte-carlo-sim / feature-deriver 2026-05-09 (S3.12)._
 
 ---
 
@@ -68,17 +69,55 @@ No surviving mutations. All mutable operators in the hot path are pinned by dedi
 
 ---
 
-## decision-arith — Baseline Detail
+## decision-arith — Baseline Detail (2026-05-09, S3.12)
 
-_TBD — will be populated by the first weekly cron run (Monday 2026-05-11 06:00 UTC)._
+**Run:** 64 mutants, 51 s wall-clock, timeout 300 s.
+**Outcomes:** 56 caught, 7 missed, 1 unviable.
 
-## monte-carlo-sim — Baseline Detail
+### Documented survivors (7)
 
-_TBD — will be populated by the first weekly cron run (Monday 2026-05-11 06:00 UTC)._
+| File:line | Mutation | Status | Rationale |
+|-----------|----------|--------|-----------|
+| `src/lib.rs:61:5` | `rubinstein_offer -> 1.0` | Documented | Function returns a single ratio; constant-replacement only fails on a future caller that asserts on the magnitude. Sprint-4 follow-up: add a property test that pins `rubinstein_offer(δ_a, δ_b) ∈ (0, 1)` for valid inputs. |
+| `src/lib.rs:61:5` | `rubinstein_offer -> -1.0` | Documented | Same as above; negative output would be invalid but no test currently asserts non-negativity. Sprint-4: pin `>= 0`. |
+| `src/recommend.rs:104:29` | `EV_settle > EV_try → >=` | Documented | Boundary case (exact equality) was not pinned; the existing `settle_when_ev_settle_dominates_and_low_ci` test uses strict-greater. Sprint-4: add an EV-tie test. |
+| `src/recommend.rs:104:56` | `ci_lower < 0.40 → <=` | Documented | Boundary at 0.40 not pinned (no test uses `ci_lower == 0.40`). Sprint-4: add boundary tests. |
+| `src/recommend.rs:106:34` | `&& → \|\|` in Try-rule | Documented | The Try rule combines two AND'd conditions; flipping to OR widens the rule but no test exercises only one of the conjuncts being true. Sprint-4: add a test where exactly one half is true. |
+| `src/recommend.rs:106:22` | `EV_try > EV_settle → >=` | Documented | Same boundary class as line 104:29. |
+| `src/recommend.rs:106:52` | `ci_lower > 0.55 → >=` | Documented | Same boundary class as line 104:56 but for the Try-rule threshold. |
 
-## feature-deriver — Baseline Detail
+**All 7 are boundary/equality and constant-substitution mutations.** None point at production-relevant gaps; they're tightening opportunities for Sprint 4.
 
-_TBD — will be populated by the first weekly cron run (Monday 2026-05-11 06:00 UTC)._
+## monte-carlo-sim — Baseline Detail (2026-05-09, S3.12)
+
+**Run:** 27 mutants, 27 s wall-clock, timeout 300 s.
+**Outcomes:** 19 caught, 8 missed, 0 unviable.
+
+### Documented survivors (8)
+
+Six are bit-twiddling mutations inside `splitmix64` PRNG (lines 21-23):
+
+| File:line | Mutation | Rationale |
+|-----------|----------|-----------|
+| `src/lib.rs:21:17` | `>> → <<` in splitmix64 | The mutated PRNG still produces a deterministic stream; tests pin behaviour against expected outputs derived from a seed, so the substitute stream is "wrong but consistent". Sprint-4: add a known-good vector test (sample N=10 outputs from a fixed seed against a reference implementation). |
+| `src/lib.rs:22:12` | `^ → \|` in splitmix64 | Same — output stream changes but tests don't assert against a reference vector. |
+| `src/lib.rs:22:12` | `^ → &` in splitmix64 | Same. |
+| `src/lib.rs:22:17` | `>> → <<` in splitmix64 | Same. |
+| `src/lib.rs:23:11` | `^ → \|` in splitmix64 | Same. |
+| `src/lib.rs:23:16` | `>> → <<` in splitmix64 | Same. |
+| `src/lib.rs:36:22` | `< → <=` in `simulate_trial` boundary | Boundary equality at the trial-loop terminator; no test uses an exact-equality `n_trials`. Sprint-4: pin loop boundary. |
+| `src/main.rs:5:5` | `replace main with ()` | Binary entrypoint — no test coverage on `main()` itself. **Acceptable.** Replacing with `()` would produce a no-op binary that nothing currently tests. |
+
+## feature-deriver — Baseline Detail (2026-05-09, S3.12)
+
+**Run:** 9 mutants, 12 s wall-clock, timeout 300 s.
+**Outcomes:** 8 caught, 1 missed, 0 unviable.
+
+### Documented survivors (1)
+
+| File:line | Mutation | Rationale |
+|-----------|----------|-----------|
+| `src/main.rs:7:5` | `replace main with ()` | Binary entrypoint — same as monte-carlo-sim. **Acceptable.** |
 
 ---
 

@@ -5,10 +5,22 @@
       "missed": 0,
       "unviable": 1
     },
-    "decision-arith": null,
-    "monte-carlo-sim": null,
-    "feature-deriver": null
+    "decision-arith": {
+      "caught": 56,
+      "missed": 7,
+      "unviable": 1
+    },
+    "monte-carlo-sim": {
+      "caught": 19,
+      "missed": 8,
+      "unviable": 0
+    },
+    "feature-deriver": {
+      "caught": 8,
+      "missed": 1,
+      "unviable": 0
+    }
   },
-  "generated_at": "2026-05-09T09:40:00Z",
-  "note": "decision-arith, monte-carlo-sim, feature-deriver baselines will be populated by the first weekly cron run (Monday 2026-05-11 06:00 UTC)"
+  "generated_at": "2026-05-09T19:30:00Z",
+  "note": "All four functional-core crates have first-sweep baselines. Surviving mutations are documented in CARGO_MUTANTS_BASELINE.md. Sprint-4 follow-ups: add boundary-equality tests for decision-arith, known-vector tests for monte-carlo-sim splitmix64."
 }
