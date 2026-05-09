@@ -9,5 +9,6 @@
 pub mod db;
 pub mod fetch;
 pub mod parse;
+pub mod rest;
 
 pub use parse::{parse_tarball, Opinion};
