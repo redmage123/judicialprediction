@@ -93,7 +93,7 @@ pub fn check_feature_allowed(overrides: &TenantOverrides, feature_name: &str) ->
 
 /// Collect all feature names that changed (added, removed, or value-changed)
 /// between `old` and `new` overrides.  Returns an empty Vec if identical.
-pub(crate) fn diff_overrides(old: &TenantOverrides, new: &TenantOverrides) -> Vec<String> {
+pub fn diff_overrides(old: &TenantOverrides, new: &TenantOverrides) -> Vec<String> {
     let mut changed: HashSet<String> = HashSet::new();
 
     // Names added to or removed from disabled_features.

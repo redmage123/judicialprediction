@@ -119,6 +119,29 @@ message ListFeaturesResponse {
   Feature feature = 1;
 }
 
+// Request to update (UPSERT) per-tenant feature-tier overrides.
+//
+// The server diffs the new JSON against the current stored overrides and writes
+// one audit_log row per changed key (action = "tenant_settings.override_change").
+// Idempotent: an identical re-save produces ZERO audit rows and returns changed_keys=0.
+//
+// Called by the Django admin (S3.10) and any future operator tooling.
+// tenant_id is extracted from the gRPC `tenant-id` metadata header (same convention
+// as all other FeatureStoreService RPCs); it is NOT taken from the request body.
+message UpdateTenantSettingsRequest {
+  // Serialised JSON of the new TenantOverrides.
+  // Shape: {"disabled_features": [...], "tier_overrides": {...}}
+  // The server diffs this against the current stored value.
+  string overrides_json = 1;
+}
+
+// Response from UpdateTenantSettings.
+message UpdateTenantSettingsResponse {
+  // Number of override keys that actually changed (= number of audit rows written).
+  // Zero means the call was a no-op (identical overrides already stored).
+  int32 changed_keys = 1;
+}
+
 // Request to ingest a derived feature into the feature store.
 message IngestFeatureRequest {
   // The feature to store. feature_id, case_id, tier, and sensitivity
@@ -159,4 +182,10 @@ service FeatureStoreService {
   // IngestFeature stores a derived feature. Idempotent on idempotency_key.
   // Called by the feature-deriver Rust service after derivation.
   rpc IngestFeature(IngestFeatureRequest) returns (IngestFeatureResponse);
+
+  // UpdateTenantSettings persists new per-tenant feature-tier overrides and
+  // writes one audit_log row per changed override key (S3.11 / JP-52).
+  // Idempotent: identical re-saves produce zero audit rows.
+  // Caller: Django admin (S3.10) via the Python feature-store gRPC client.
+  rpc UpdateTenantSettings(UpdateTenantSettingsRequest) returns (UpdateTenantSettingsResponse);
 }

@@ -22,7 +22,7 @@ use uuid::Uuid;
 use crate::judicialpredict::data_plane::feature_store::v1::{
     feature_store_service_server::FeatureStoreService, Feature, GetFeatureRequest,
     GetFeatureResponse, IngestFeatureRequest, IngestFeatureResponse, ListFeaturesRequest,
-    ListFeaturesResponse,
+    ListFeaturesResponse, UpdateTenantSettingsRequest, UpdateTenantSettingsResponse,
 };
 use crate::tenant_settings::{self, OverridesCache};
 
@@ -282,5 +282,60 @@ impl FeatureStoreService for FeatureStoreServer {
                 .unwrap_or(0),
             idempotency_key: req.idempotency_key,
         }))
+    }
+
+    /// Persist updated per-tenant feature-tier overrides (S3.11 / JP-52).
+    ///
+    /// Steps:
+    ///   1. Parse `overrides_json` into TenantOverrides.
+    ///   2. Delegate to `tenant_settings::update_overrides`, which:
+    ///      a. Diffs against the current stored overrides.
+    ///      b. UPSERTs the new JSON into `tenant_settings`.
+    ///      c. Invalidates the 60-s in-process cache.
+    ///      d. Writes one audit_log row per changed override key
+    ///         (action="tenant_settings.override_change"; all rows in a single
+    ///          mutation share the same payload_hash = SHA-256(new_json_string),
+    ///          because the hash fingerprints the atomic state written, not the
+    ///          individual keys. The changed key is implicit in the audit context).
+    ///   3. Returns `changed_keys` = number of audit rows written.
+    ///      Zero means the call was a no-op (identical overrides already stored).
+    ///
+    /// Idempotent: re-saving identical overrides produces ZERO audit rows and
+    /// returns `changed_keys = 0`.
+    ///
+    /// S3.10 follow-up: Django admin calls this RPC via the Python
+    /// feature-store gRPC client; no Django-side changes are in scope here.
+    async fn update_tenant_settings(
+        &self,
+        request: Request<UpdateTenantSettingsRequest>,
+    ) -> Result<Response<UpdateTenantSettingsResponse>, Status> {
+        let tenant_id = extract_tenant_id(&request)?;
+        let req = request.into_inner();
+
+        // Parse the new overrides from the caller-supplied JSON.
+        let new_overrides: tenant_settings::TenantOverrides =
+            serde_json::from_str(&req.overrides_json).map_err(|e| {
+                Status::invalid_argument(format!("overrides_json is not valid: {e}"))
+            })?;
+
+        // update_overrides: diffs, upserts, invalidates cache, fires per-key audit rows.
+        let old =
+            tenant_settings::get_overrides(&self.pool, tenant_id, &self.overrides_cache)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+
+        let changed_keys = tenant_settings::diff_overrides(&old, &new_overrides).len() as i32;
+
+        tenant_settings::update_overrides(
+            &self.pool,
+            tenant_id,
+            new_overrides,
+            &self.overrides_cache,
+            &self.recorder,
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(UpdateTenantSettingsResponse { changed_keys }))
     }
 }

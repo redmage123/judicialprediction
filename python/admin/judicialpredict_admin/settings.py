@@ -2,11 +2,28 @@
 JudicialPredict Admin Console — Django settings.
 
 Environment variables (see README.md for full list):
-    ADMIN_DATABASE_URL   Postgres DSN for the admin console (default: dev superuser)
-    DJANGO_SECRET_KEY    Secret key (required in production; has insecure dev default)
-    DEBUG                "true" / "false" (default: true)
-    ALLOWED_HOSTS        Comma-separated hostnames (default: localhost,127.0.0.1)
-    STATIC_ROOT          Collected static files directory (default: /static)
+    ADMIN_DATABASE_URL        jp_app DSN for tenant-scoped operators
+                              (dev default: Postgres superuser so migrations work)
+    ADMIN_SUPER_DATABASE_URL  jp_admin DSN for super-operators (BYPASSRLS)
+    DJANGO_SECRET_KEY         Secret key (required in production; has insecure dev default)
+    DEBUG                     "true" / "false" (default: true)
+    ALLOWED_HOSTS             Comma-separated hostnames (default: localhost,127.0.0.1)
+    STATIC_ROOT               Collected static files directory (default: /static)
+
+Database connection notes (ADR-003)
+-------------------------------------
+Two DATABASES aliases are configured:
+
+    default       Used for tenant-scoped operator requests AND for Django-managed
+                  table migrations (operators_operator, auth_*, django_* tables).
+                  The dev default uses the Postgres superuser so ``manage.py migrate``
+                  can CREATE TABLE operators_operator.  In production, run migrations
+                  as superuser, then set ADMIN_DATABASE_URL to the jp_app DSN.
+
+    admin_super   jp_admin (BYPASSRLS).  Used only when RLSMiddleware determines
+                  the request user has role='super'.
+                  TEST: {MIRROR: 'default'} tells Django's test runner to reuse the
+                  same test database — no duplicate DB creation in CI.
 """
 
 from pathlib import Path
@@ -44,6 +61,7 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "core",
+    "operators",
 ]
 
 MIDDLEWARE = [
@@ -52,8 +70,8 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
-    # RLS-aware middleware: sets app.current_tenant_id on the Postgres connection.
-    # Sprint-3: replace hard-coded dev tenant with per-operator RBAC resolution.
+    # RLS-aware middleware: resolves Operator record, sets DB alias + app.current_tenant_id.
+    # Must run after AuthenticationMiddleware so request.user is populated.
     "core.middleware.RLSMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
@@ -83,29 +101,49 @@ ASGI_APPLICATION = "judicialpredict_admin.asgi.application"
 # ---------------------------------------------------------------------------
 # Database
 #
-# The admin console connects as the Postgres SUPERUSER by default (dev only).
-# The superuser bypasses RLS so the operator can manage all tenants.
+# Two aliases (ADR-003):
 #
-# Sprint-3 TODO:
-#   1. Create a jp_admin Postgres role with BYPASSRLS (Rust migration).
-#   2. Set ADMIN_DATABASE_URL to a jp_admin DSN.
-#   3. The RLSMiddleware skeleton below will then scope queries per-operator.
+#   default       jp_app — subject to RLS.  Also used for all Django-managed
+#                 migrations.  Dev default is the Postgres superuser so
+#                 ``manage.py migrate`` can create operators_operator.
+#                 Production: set ADMIN_DATABASE_URL to the jp_app DSN after
+#                 running migrations as the migration user.
 #
-# Do NOT use the superuser DSN in production.
+#   admin_super   jp_admin — BYPASSRLS.  Used only for role='super' operators.
+#                 TEST: {MIRROR: 'default'} reuses the default test database
+#                 in Django's test runner (no duplicate DB creation).
+#
+# Do NOT use the superuser DSN in production for either alias.
 # ---------------------------------------------------------------------------
 
+_admin_super_db = env.db(
+    "ADMIN_SUPER_DATABASE_URL",
+    default=(
+        "postgres://jp_admin:judicialpredict_admin_pwd"
+        "@127.0.0.1:5454/judicialpredict_dev"
+    ),
+)
+# Reuse the same test DB as 'default' — avoids a second createdb in CI.
+_admin_super_db["TEST"] = {"MIRROR": "default"}
+
 DATABASES = {
+    # Prefer ADMIN_DATABASE_URL; fall back to superuser dev DSN.
     "default": env.db(
-        # Prefer ADMIN_DATABASE_URL; fall back to superuser dev DSN.
         "ADMIN_DATABASE_URL",
         default=(
             "postgres://judicialpredict:judicialpredict_dev_pwd"
             "@127.0.0.1:5454/judicialpredict_dev"
         ),
-    )
+    ),
+    # jp_admin (BYPASSRLS) — for role='super' operators only.
+    "admin_super": _admin_super_db,
 }
 
 DATABASE_ROUTERS = ["core.db_router.RLSRouter"]
+
+# ATOMIC_REQUESTS wraps each request in a transaction, enabling
+# set_config(is_local=True) in RLSMiddleware for transaction-scoped RLS vars.
+ATOMIC_REQUESTS = True
 
 # ---------------------------------------------------------------------------
 # Auth

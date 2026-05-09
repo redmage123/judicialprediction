@@ -1,82 +1,128 @@
 """
 RLS-aware request middleware for the JudicialPredict admin console.
 
-Sets the Postgres session variable ``app.current_tenant_id`` so that
-Row-Level Security policies can enforce per-tenant data isolation.
+Replaces the S2.15 scaffold (hard-coded dev tenant + Postgres superuser).
 
-Architecture note (ADR-003):
-    The Postgres RLS policies in the baseline schema use:
-        USING (id = current_setting('app.current_tenant_id', true)::uuid)
-    This middleware provides the seam between the Django request context
-    and the Postgres RLS layer.
+How it works (ADR-003)
+----------------------
+1.  Every authenticated request triggers ``process_view``.
+2.  The middleware looks up the ``Operator`` record whose email matches
+    ``request.user.email``.
+3.  Depending on ``operator.role``:
 
-Current scaffold limitations (Sprint-3 TODOs):
-    1. The dev operator is hard-coded to a single tenant UUID.
-       Real operators must be scoped via RBAC (see Sprint-3 epic).
-    2. The database connection currently uses a Postgres superuser which
-       bypasses RLS entirely — ``set_config`` is a no-op for superusers.
-       Sprint-3 will switch to a ``jp_admin`` role with BYPASSRLS,
-       where this middleware controls per-query row visibility.
-    3. ``set_config`` uses ``is_local=false`` (session-scope) here.
-       Sprint-3 should switch to ``is_local=true`` (transaction-scope)
-       once ``ATOMIC_REQUESTS = True`` is confirmed stable for the admin.
+    role='admin' or role='viewer'
+        - Uses the ``default`` DATABASES alias (jp_app, subject to RLS).
+        - Issues ``SET CONFIG app.current_tenant_id`` so the RLS policies in
+          Postgres scope all subsequent queries on this connection to
+          ``operator.tenant_id``.
+
+    role='super'
+        - Uses the ``admin_super`` DATABASES alias (jp_admin, BYPASSRLS).
+        - Does NOT set ``app.current_tenant_id``; jp_admin bypasses RLS and
+          sees all rows.
+
+4.  If no Operator record exists for the authenticated user, returns HTTP 403
+    with a clear message.
+
+Thread-local state
+------------------
+``_thread_local.db_alias`` is set before ``get_response`` is called so that
+the ``RLSRouter`` database router can pick the correct alias for every query
+in the request/response cycle.  It is reset at the end of ``__call__`` via a
+``finally`` block.
+
+Connection scope
+----------------
+``set_config(key, value, is_local=True)`` is transaction-scoped.  This requires
+``ATOMIC_REQUESTS = True`` (set in settings.py) so the transaction wraps the
+whole request — safe with psycopg3 + Django 5 on Postgres.
 """
 
-from django.db import connection
+import threading
 
-# Dev tenant UUID seeded by migration 20260507120001.
-_DEV_TENANT_ID = "00000000-0000-0000-0000-000000000001"
+from django.db import connections
+from django.http import HttpResponseForbidden
 
-# Banner text injected into every admin response page (Sprint-3 removes this).
-DEV_BANNER_MSG = (
-    "[DEV] RLS bypass active: connected as Postgres superuser. "
-    "Sprint-3 TODO: switch to jp_admin role with BYPASSRLS + per-operator scoping."
-)
+# Thread-local stores the chosen DB alias for the duration of this request.
+_thread_local = threading.local()
+
+# Sentinel used before process_view resolves the operator.
+_DEFAULT_ALIAS = "default"
+
+
+def get_current_db_alias() -> str:
+    """Return the DB alias set by ``RLSMiddleware`` for the current thread."""
+    return getattr(_thread_local, "db_alias", _DEFAULT_ALIAS)
 
 
 class RLSMiddleware:
     """
-    Set ``app.current_tenant_id`` on the Postgres connection for every request.
+    Per-request RBAC resolution and Postgres RLS scope setter.
 
-    Runs as a ``process_view`` hook so it executes after authentication
-    middleware has populated ``request.user``.  Unauthenticated requests
-    (login page, static files) are skipped.
-
-    .. note::
-        The current dev default connects as a Postgres superuser, so the
-        ``set_config`` call has no visible effect on query results — the
-        superuser bypasses all RLS policies.  The middleware is the correct
-        seam for Sprint-3 to wire up real operator scoping.
+    Must run AFTER ``django.contrib.auth.middleware.AuthenticationMiddleware``
+    so that ``request.user`` is populated.
     """
 
     def __init__(self, get_response):
         self.get_response = get_response
 
     def __call__(self, request):
-        return self.get_response(request)
+        # Ensure a clean slate for every request (thread pool reuse safety).
+        _thread_local.db_alias = _DEFAULT_ALIAS
+        try:
+            response = self.get_response(request)
+        finally:
+            _thread_local.db_alias = _DEFAULT_ALIAS
+        return response
 
-    def process_view(self, request, view_func, view_args, view_kwargs):
-        tenant_id = self._resolve_tenant(request)
-        if tenant_id is not None:
-            with connection.cursor() as cursor:
-                # is_local=false → session-scope (survives connection pool reuse).
-                # Sprint-3: change to is_local=true with ATOMIC_REQUESTS=True.
-                cursor.execute(
-                    "SELECT set_config('app.current_tenant_id', %s, false)",
-                    [tenant_id],
-                )
+    def process_view(self, request, view_func, view_args, view_kwargs):  # noqa: ARG002
+        if not request.user.is_authenticated:
+            return None  # login page / static files — skip
+
+        operator = _resolve_operator(request.user.email)
+        if operator is None:
+            return HttpResponseForbidden(
+                "No operator profile found for this account. "
+                "Ask an admin to provision one via the Operators panel."
+            )
+
+        if not operator.is_active:
+            return HttpResponseForbidden(
+                "Your operator account has been deactivated. Contact an admin."
+            )
+
+        if operator.is_super:
+            # Super operators route to jp_admin (BYPASSRLS); no set_config needed.
+            _thread_local.db_alias = "admin_super"
+        else:
+            # Tenant-scoped operators use jp_app; set RLS session variable.
+            _thread_local.db_alias = "default"
+            if operator.tenant_id is not None:
+                with connections["default"].cursor() as cursor:
+                    # is_local=True → transaction-scoped (requires ATOMIC_REQUESTS=True).
+                    cursor.execute(
+                        "SELECT set_config('app.current_tenant_id', %s, true)",
+                        [str(operator.tenant_id)],
+                    )
+
         return None  # continue normal request processing
 
-    @staticmethod
-    def _resolve_tenant(request) -> str | None:
-        """
-        Return the tenant UUID to apply for this request.
 
-        Sprint-3 implementation: look up ``request.user``'s operator record
-        in the RBAC table and return their scoped tenant UUID (or a sentinel
-        that maps to BYPASSRLS for super-operators).
-        """
-        if not request.user.is_authenticated:
-            return None
-        # Scaffold: all authenticated operators see the dev tenant.
-        return _DEV_TENANT_ID
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _resolve_operator(email: str):
+    """
+    Return the active ``Operator`` for *email*, or ``None`` if not found.
+
+    Always queries the ``default`` alias — the Operator table is always
+    accessible regardless of the current request's routing alias.
+    """
+    from operators.models import Operator  # local import avoids circular refs
+
+    try:
+        return Operator.objects.using("default").get(email=email, is_active=True)
+    except Operator.DoesNotExist:
+        return None
