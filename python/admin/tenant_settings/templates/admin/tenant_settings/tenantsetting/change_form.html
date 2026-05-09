@@ -1,0 +1,18 @@
+{% extends "admin/change_form.html" %}
+
+{% block content %}
+{% if sprint3_banner %}
+<div style="
+    background: #fff3cd;
+    border: 1px solid #ffc107;
+    border-radius: 4px;
+    padding: 10px 14px;
+    margin-bottom: 16px;
+    font-size: 0.9em;
+    color: #856404;
+">
+    <strong>Notice:</strong> {{ sprint3_banner }}
+</div>
+{% endif %}
+{{ block.super }}
+{% endblock %}

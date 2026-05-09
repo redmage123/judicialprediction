@@ -62,6 +62,7 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "core",
     "operators",
+    "tenant_settings",
 ]
 
 MIDDLEWARE = [
