@@ -62,6 +62,25 @@ logs a console warning at boot.
 Real SSO (SAML/OIDC), multi-tenant routing, password reset, and proper
 session storage are all deferred to **Sprint 4 — Authentication hardening**.
 
+## Pages
+
+| Route | Type | Description |
+|---|---|---|
+| `/` | Server | Health-check card — calls `api-gateway /healthz` and displays status |
+| `/login` | Server + client island | Dev login form (see Dev Login section above) |
+| `/case/new` | Server + client island | Case intake form; accepts 7 Tier-A/B feature inputs, calls `predictCaseOutcome` mutation via Apollo, and routes to `/case/<uuid>` on success |
+
+### Dev credentials for manual smoke
+
+```
+Email:    dev@example.test
+Password: dev-pass
+```
+
+Visit `/case/new` → middleware redirects to `/login` → submit dev creds → form is accessible.
+
+---
+
 ## Getting Started
 
 First, run the development server:
