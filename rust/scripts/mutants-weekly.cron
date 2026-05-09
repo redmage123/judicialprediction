@@ -1,0 +1,3 @@
+# JudicialPredict — weekly cargo-mutants survey
+# Install: crontab -l | { cat; cat rust/scripts/mutants-weekly.cron; } | crontab -
+0 6 * * 1 cd /opt/ai-elevate/gigforge/projects/judicialpredict && bash rust/scripts/mutants-weekly.sh >> /var/log/jp-mutants-weekly.log 2>&1

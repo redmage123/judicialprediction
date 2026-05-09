@@ -199,5 +199,85 @@ mod tests {
                 );
             }
         }
+
+        /// retry_after_ms matches the formula: ceil((cost - tokens) / rate * 1000).
+        ///
+        /// This pins all three arithmetic operators in the Deny path:
+        ///   deficit    = cost - tokens        (not + or /)
+        ///   wait_secs  = deficit / rate        (not % or *)
+        ///   retry_ms   = ceil(wait_secs * 1000) (not + or /)
+        ///
+        /// We set tokens_below_cost = tokens strictly below cost so a Deny is
+        /// guaranteed, and tokens > 0 so the `cost - tokens` vs `cost + tokens`
+        /// mutation produces a different deficit (and thus different retry_after_ms).
+        #[test]
+        fn prop_retry_after_ms_formula_correct(
+            capacity in 10u32..=1000,
+            refill_per_sec in 0.1f64..=100.0,
+            cost in 2u32..=500,
+            // tokens is in [1, cost-1] so: tokens>0 AND tokens<cost → guaranteed Deny
+            tokens_below in 1u32..=499u32,
+        ) {
+            let cost = cost.max(2);
+            let tokens_f = (tokens_below % (cost - 1) + 1) as f64; // in [1, cost-1]
+            let now = Instant::now();
+            let mut b = TokenBucket {
+                capacity,
+                refill_per_sec,
+                tokens: tokens_f,
+                last_refill: now, // same instant → no refill
+            };
+            match check(&mut b, now, cost) {
+                Decision::Deny { retry_after_ms } => {
+                    // `check` caps tokens at capacity during refill; since elapsed=0
+                    // and last_refill=now, the cap is the only thing that can change
+                    // our initial tokens_f.  Mirror that here so the expected value
+                    // matches what the implementation actually computed.
+                    let effective_tokens = tokens_f.min(capacity as f64);
+                    let deficit = cost as f64 - effective_tokens; // cost - effective_tokens (must be -)
+                    let wait_secs = deficit / refill_per_sec;    // deficit / rate (must be /)
+                    let expected_ms = (wait_secs * 1000.0).ceil() as u64; // * 1000 (must be *)
+                    prop_assert_eq!(
+                        retry_after_ms, expected_ms,
+                        "retry_after_ms={} != expected ceil({}*1000)={} (effective_tokens={}, cost={}, deficit={}, rate={})",
+                        retry_after_ms, wait_secs, expected_ms, effective_tokens, cost, deficit, refill_per_sec
+                    );
+                }
+                Decision::Allow => {
+                    prop_assert!(false,
+                        "expected Deny for cost={cost} tokens={tokens_f} (tokens < cost)");
+                }
+            }
+        }
+
+        /// Refill amount is proportional to elapsed time × refill_per_sec.
+        ///
+        /// Pins the `*` operator in `elapsed * refill_per_sec` (line 63).
+        /// The mutation `* → /` would make refill inversely proportional.
+        #[test]
+        fn prop_refill_proportional_to_elapsed(
+            capacity in 10u32..=10_000,
+            elapsed_ms in 1u64..=10_000,
+            refill_per_sec in 0.5f64..=50.0,
+        ) {
+            let cap_f = capacity as f64;
+            let now = Instant::now();
+            // Start at 0 tokens so the refill shows up clearly.
+            let mut b = TokenBucket {
+                capacity,
+                refill_per_sec,
+                tokens: 0.0,
+                last_refill: now,
+            };
+            let later = now + Duration::from_millis(elapsed_ms);
+            check(&mut b, later, 0); // cost=0: observe refill without consuming
+            let elapsed_secs = elapsed_ms as f64 / 1000.0;
+            let expected_tokens = (elapsed_secs * refill_per_sec).min(cap_f);
+            prop_assert!(
+                (b.tokens - expected_tokens).abs() < 1e-6,
+                "tokens={} expected {} (elapsed={}s rate={})",
+                b.tokens, expected_tokens, elapsed_secs, refill_per_sec
+            );
+        }
     }
 }

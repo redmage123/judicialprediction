@@ -1,0 +1,14 @@
+{
+  "crates": {
+    "rate-limit": {
+      "caught": 13,
+      "missed": 0,
+      "unviable": 1
+    },
+    "decision-arith": null,
+    "monte-carlo-sim": null,
+    "feature-deriver": null
+  },
+  "generated_at": "2026-05-09T09:40:00Z",
+  "note": "decision-arith, monte-carlo-sim, feature-deriver baselines will be populated by the first weekly cron run (Monday 2026-05-11 06:00 UTC)"
+}
