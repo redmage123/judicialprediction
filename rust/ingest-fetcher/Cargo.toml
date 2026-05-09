@@ -3,6 +3,10 @@ name = "ingest-fetcher"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "ingest_fetcher"
+path = "src/lib.rs"
+
 [[bin]]
 name = "ingest-fetcher"
 path = "src/main.rs"
@@ -13,6 +17,14 @@ reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 flate2 = { workspace = true }
+tar = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+sqlx = { workspace = true, features = ["chrono"] }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

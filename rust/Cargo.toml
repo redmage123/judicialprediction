@@ -42,3 +42,9 @@ tonic-build = { version = "0.12" }
 proptest = { version = "1", default-features = true }
 jsonwebtoken = { version = "9" }
 dashmap = { version = "6" }
+tar = { version = "0.4" }
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+hex = { version = "0.4" }
+sha2 = { version = "0.10" }
+tempfile = { version = "3" }

@@ -1,0 +1,2 @@
+{"id":1008,"court":"tax","case_name":"Corrupt Entry"
+INTENTIONAL JSON CORRUPTION — exercises parse_handles_malformed_json_gracefully.

@@ -1,0 +1,75 @@
+# CourtListener bulk-data ingest runbook
+
+The `ingest-fetcher` binary downloads a CourtListener bulk dump for a single
+court, parses it, and upserts opinions into `case_documents`.
+
+## Manual run
+
+```bash
+# Build
+cargo build -p ingest-fetcher --release
+
+# Fetch + parse + upsert in one shot (requires DATABASE_URL).
+DATABASE_URL=postgres://jp_app:secret@localhost:5432/jp \
+  ./target/release/ingest-fetcher run tax
+
+# Or break into steps for debugging:
+./target/release/ingest-fetcher fetch tax
+./target/release/ingest-fetcher parse /tmp/jp-ingest-tax.tar.gz
+```
+
+Subcommands:
+
+- `fetch <court>` — downloads to `/tmp/jp-ingest-<court>.tar.gz`. No DB.
+- `parse <path>` — parses a local tarball and prints `valid/skipped` counts. No DB.
+- `run <court>` — fetch + parse + upsert. The typical ingest path.
+
+## Production schedule
+
+```cron
+# Weekly Monday 04:00 UTC, court rotation by week-of-month:
+# w1 → tax, w2 → ny, w3 → scotus, w4 → cafc
+0 4 * * 1 /opt/jp/scripts/ingest-by-week.sh
+```
+
+The week-rotation script lives at `scripts/ingest-by-week.sh` (Sprint-3 follow-up
+— for now, run manually by choosing the court).
+
+## Expected timings
+
+| Court  | Compressed | Uncompressed | Opinions | Wall-clock target |
+|--------|-----------:|-------------:|---------:|------------------:|
+| tax    |     ~30 MB |      ~150 MB |    ~10 k | < 10 min          |
+| ny     |    ~120 MB |      ~600 MB |    ~40 k | < 25 min          |
+| scotus |    ~200 MB |        ~1 GB |    ~28 k | < 30 min          |
+
+## Failure modes
+
+- **Network: rate-limited / 5xx.** `reqwest::get` returns an error; the binary
+  exits non-zero. Re-run after backoff. CourtListener does not currently
+  rate-limit bulk dumps but reserves the right to.
+- **Partial tarball.** Treated as a parse error per malformed entry; the run
+  continues and reports `skipped` count. Re-run to pick up missed entries.
+- **Postgres disk budget.** A single court adds ≤ 1 GB to `case_documents`.
+  Monitor `pg_size` and alert at > 80 GB pre-vacuum.
+- **Idempotency.** `ON CONFLICT (opinion_id) DO UPDATE` lets re-runs land safely.
+
+## RLS posture
+
+`case_documents` has **no RLS**. Opinions are public records and the table is
+shared across all tenants. This is documented in the table comment and in
+`docs/architecture/tenant-settings.md`. Any future tenant-private case-document
+table belongs in a separate table with full RLS.
+
+## Sprint-3 follow-ups
+
+- Real-network smoke test: a CI job that fetches the smallest real dump
+  weekly and asserts the row count is in a sane range.
+- Multi-court fan-out: a single command that ingests N courts in parallel with
+  a shared Postgres connection pool.
+- S3 mirror: optionally upload each downloaded `.tar.gz` to s3://<bucket>/raw/
+  before parsing, so we have an immutable record of what we ingested.
+- Real chunked streaming on the fetch path (currently buffers full body in
+  memory; fine for 30 MB, not for 200 MB).
+- Per-row error-isolation upsert: today one failing row aborts the whole
+  upsert; switch to a per-row INSERT with isolated error counters.
