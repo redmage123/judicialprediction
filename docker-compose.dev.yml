@@ -127,6 +127,49 @@ services:
       retries: 5
       start_period: 10s
 
+  # ---------------------------------------------------------------------------
+  # Django admin console (S2.15 / JP-39)
+  # Production equivalent: Kubernetes Deployment (Sprint-3)
+  #
+  # Usage:
+  #   docker compose -f docker-compose.dev.yml up admin
+  #
+  # Reach the admin at http://localhost:8000/admin/
+  # Create a superuser:
+  #   docker compose -f docker-compose.dev.yml exec admin \
+  #     python manage.py createsuperuser
+  # ---------------------------------------------------------------------------
+  admin:
+    build:
+      context: python/admin
+      dockerfile: Dockerfile
+    container_name: judicialpredict_admin
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Connect as the Postgres superuser so the admin can see all tenants
+      # (bypasses RLS). Sprint-3: switch to jp_admin role with BYPASSRLS.
+      ADMIN_DATABASE_URL: >-
+        postgres://judicialpredict:judicialpredict_dev_pwd@postgres:5432/judicialpredict_dev
+      DJANGO_SECRET_KEY: dev-only-insecure-key-CHANGE-BEFORE-PRODUCTION-0000000000000000000
+      DEBUG: "true"
+      ALLOWED_HOSTS: "localhost,127.0.0.1,0.0.0.0"
+      STATIC_ROOT: /static
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - jp_admin_static:/static
+    networks:
+      - jp_dev_net
+    healthcheck:
+      test: ["CMD-SHELL", "python manage.py check --deploy 2>/dev/null || python manage.py check"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
 # =============================================================================
 # Volumes — all local-dev data persists across restarts.
 # Destroy with: docker compose -f docker-compose.dev.yml down -v
@@ -137,6 +180,7 @@ volumes:
   jp_neo4j_logs:
   jp_redis_data:
   jp_minio_data:
+  jp_admin_static:
 
 # =============================================================================
 # Network — isolated bridge; services address each other by container name.
