@@ -12,7 +12,7 @@
 //   RATE_LIMIT_RPM                       — max requests/min per tenant (default 60)
 //   RATE_LIMIT_GRAPHQL_MUTATIONS_PER_MIN — max mutations/min per tenant (default 10)
 //
-// Binds the HTTP/GraphQL server on 0.0.0.0:4000.
+// Binds the HTTP/GraphQL server on $GATEWAY_BIND (default: 0.0.0.0:4000).
 
 use anyhow::Result;
 use api_gateway::RateLimitConfig;
@@ -52,7 +52,9 @@ async fn main() -> Result<()> {
         api_gateway::build_app(&feature_store_url, &ml_inference_url, jwt_secret, rate_config)
             .await?;
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:4000").await?;
+    let bind_addr =
+        std::env::var("GATEWAY_BIND").unwrap_or_else(|_| "0.0.0.0:4000".to_string());
+    let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     tracing::info!("api-gateway listening on {}", listener.local_addr()?);
     axum::serve(listener, app).await?;
     Ok(())
