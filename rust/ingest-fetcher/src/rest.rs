@@ -98,54 +98,114 @@ fn build_client(token: &str) -> Result<reqwest::Client> {
         .context("build reqwest client")
 }
 
-/// Fetch up to `target_count` opinions for a given court via the REST API.
+/// Outcome of a single ingest run.
+#[derive(Debug, Default, Clone)]
+pub struct IngestStats {
+    pub stored: usize,
+    pub empty_text_skipped: u32,
+    pub already_in_db_skipped: u32,
+    pub http_errors: u32,
+    /// True when we hit the daily-quota tier (e.g. 125/day) and stopped early.
+    /// Caller should not retry today; tomorrow's run will continue.
+    pub daily_cap_hit: bool,
+}
+
+/// Fetch + upsert up to `target_count` opinions for a given court.
 ///
-/// Stage 1: enumerate `(case_metadata, opinion_id)` pairs via /search/.
-/// Stage 2: hydrate each opinion's full text via /opinions/<id>/, sleeping
-/// 13 s between calls to respect the 5/min limit.
+/// Each opinion is upserted to Postgres immediately after being fetched, so
+/// a daily-cap-induced exit mid-run still persists everything we got. Already-
+/// ingested opinion_ids are skipped before hitting `/opinions/<id>/` (saves
+/// quota — the search endpoint isn't bound by the 125/day cap).
 ///
-/// Empty plain_text opinions (typically scanned-PDF rows with no extracted
-/// text) are skipped without consuming budget.
-pub async fn fetch_opinions_via_rest(
+/// Returns IngestStats on graceful completion. Bubbles up real errors (network,
+/// DB connection failure) but treats per-opinion 4xx as `http_errors` and
+/// continues. A 429 with daily-cap body sets `daily_cap_hit=true` and stops
+/// the run cleanly so a long sleep doesn't tie up a cron slot.
+pub async fn fetch_and_upsert_via_rest(
+    pool: &sqlx::PgPool,
     token: &str,
     court: &str,
     target_count: usize,
-) -> Result<Vec<Opinion>> {
+) -> Result<IngestStats> {
     let client = build_client(token)?;
+    let already_ingested = load_existing_opinion_ids(pool, court).await?;
+    tracing::info!(
+        already_in_db = already_ingested.len(),
+        "loaded existing opinion_ids"
+    );
 
-    // Stage 1: enumerate IDs + case metadata via /search/.
-    let candidates = enumerate_via_search(&client, court, target_count).await?;
+    // Stage 1: enumerate IDs + case metadata via /search/. Search is not
+    // bound by the 125/day cap, so we can scan more candidates than we
+    // need and still find net-new opinions.
+    let scan_size = (target_count * 4).max(40);
+    let candidates = enumerate_via_search(&client, court, scan_size).await?;
     tracing::info!(candidates = candidates.len(), "stage 1 complete");
 
-    // Stage 2: hydrate plain_text per opinion.
-    let mut out: Vec<Opinion> = Vec::with_capacity(target_count);
-    let mut empty_text_skipped = 0u32;
-    let mut http_errors = 0u32;
-    for (i, cand) in candidates.iter().enumerate() {
-        if out.len() >= target_count {
+    // Stage 2: hydrate + upsert one-by-one. Returns early on daily cap.
+    let mut stats = IngestStats::default();
+    let mut hydrated_count = 0usize;
+    for cand in candidates.iter() {
+        if stats.stored >= target_count {
             break;
         }
-        if i > 0 {
+        if already_ingested.contains(&cand.opinion_id) {
+            stats.already_in_db_skipped += 1;
+            continue;
+        }
+        if hydrated_count > 0 {
             tokio::time::sleep(OPINION_DELAY).await;
         }
+        hydrated_count += 1;
         match hydrate_opinion(&client, cand).await {
-            Ok(Some(op)) => out.push(op),
-            Ok(None) => empty_text_skipped += 1,
+            Ok(Some(op)) => {
+                if let Err(e) = crate::db::upsert_opinions(pool, std::iter::once(op)).await {
+                    tracing::warn!(error = %e, opinion_id = cand.opinion_id, "upsert failed");
+                    stats.http_errors += 1;
+                } else {
+                    stats.stored += 1;
+                }
+            }
+            Ok(None) => stats.empty_text_skipped += 1,
             Err(e) => {
-                http_errors += 1;
+                let msg = format!("{e:?}");
+                stats.http_errors += 1;
                 tracing::warn!(error = %e, opinion_id = cand.opinion_id, "skipped (HTTP error)");
+                if msg.contains("/day") {
+                    tracing::warn!(
+                        "daily quota hit; ending run early (next run will continue)"
+                    );
+                    stats.daily_cap_hit = true;
+                    break;
+                }
             }
         }
         tracing::info!(
-            stored = out.len(),
+            stored = stats.stored,
             target = target_count,
-            empty_text_skipped,
-            http_errors,
+            empty_text_skipped = stats.empty_text_skipped,
+            already_in_db_skipped = stats.already_in_db_skipped,
+            http_errors = stats.http_errors,
             "progress"
         );
     }
 
-    Ok(out)
+    Ok(stats)
+}
+
+/// Pre-load opinion_ids already in case_documents for this court so we can
+/// skip them in the search scan without burning quota on /opinions/<id>/.
+async fn load_existing_opinion_ids(
+    pool: &sqlx::PgPool,
+    court: &str,
+) -> Result<std::collections::HashSet<i64>> {
+    let rows: Vec<(i64,)> = sqlx::query_as(
+        "SELECT opinion_id FROM case_documents WHERE court_id = $1",
+    )
+    .bind(court)
+    .fetch_all(pool)
+    .await
+    .context("load existing opinion_ids")?;
+    Ok(rows.into_iter().map(|(id,)| id).collect())
 }
 
 #[derive(Debug, Clone)]

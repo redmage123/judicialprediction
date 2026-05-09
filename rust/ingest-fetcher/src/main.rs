@@ -111,14 +111,19 @@ async fn main() -> Result<()> {
             let pool = sqlx::PgPool::connect(&dsn)
                 .await
                 .context("connect to Postgres")?;
-            let opinions = rest::fetch_opinions_via_rest(&token, &court, target).await?;
-            let count = opinions.len();
-            let stats = db::upsert_opinions(&pool, opinions).await?;
+            let stats = rest::fetch_and_upsert_via_rest(&pool, &token, &court, target).await?;
             println!(
-                "REST ingested: {count} opinions for court='{court}' \
-                 (touched={}, skipped={})",
-                stats.inserted, stats.skipped
+                "REST ingest for court='{court}' — stored={} target={} \
+                 daily_cap_hit={} already_in_db_skipped={} \
+                 empty_text_skipped={} http_errors={}",
+                stats.stored,
+                target,
+                stats.daily_cap_hit,
+                stats.already_in_db_skipped,
+                stats.empty_text_skipped,
+                stats.http_errors,
             );
+            // Exit cleanly if we just hit the daily cap — caller (cron) gets exit 0.
         }
     }
     Ok(())
