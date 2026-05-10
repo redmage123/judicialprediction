@@ -1,23 +1,31 @@
 /**
- * /case/[id] results view tests — S3.3 / updated S4.4 (JP-58).
+ * /case/[id] results view tests — S3.3 / updated S4.4 (JP-58) / S4.7 (JP-61).
  *
  * Covers:
  *  1. Happy path: renders P(win), CI, bullets, recommendation badge from prop.
  *  2. null prop → shows empty-state CTA back to /case/new.
  *  3. axe-core a11y gate for the empty state.
  *  4. axe-core a11y gate for the full results layout.
+ *  5. (S4.7) Re-run button is visible when caseResult is provided.
+ *  6. (S4.7) Re-run button calls the REPREDICT_CASE mutation when clicked.
+ *  7. (S4.7) History disclosure starts collapsed; clicking it shows the section.
  *
  * S4.4 changes:
  *  - ResultsView now takes caseResult: CaseResult | null (no more caseId string).
  *  - No sessionStorage seeding or reading.
  *  - Server-computed recommendation.rationaleBullets replaces client-side rec.bullets.
- *  - No Apollo MockedProvider needed — component is purely presentational.
+ *
+ * S4.7 changes:
+ *  - ResultsView is now a "use client" component hosting RepredictButton and
+ *    PredictionHistoryDisclosure islands that use useMutation / useQuery.
+ *  - @apollo/client hooks are mocked via vi.hoisted so tests don't need an
+ *    ApolloProvider context.
  *
  * Does NOT call api-gateway or any network endpoint.
  * Follows the vi.hoisted + clearAllMocks pattern from __tests__/auth.test.tsx.
  */
 
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { axe, toHaveNoViolations } from "jest-axe";
 
@@ -27,13 +35,33 @@ expect.extend(toHaveNoViolations);
 // Mocks
 // ---------------------------------------------------------------------------
 
-const { mockRouterPush } = vi.hoisted(() => ({
-  mockRouterPush: vi.fn(),
-}));
+const { mockRouterPush, mockRouterRefresh, mockMutate, mockUseMutation, mockUseQuery } =
+  vi.hoisted(() => {
+    const mockMutate = vi.fn().mockResolvedValue({ data: {} });
+    return {
+      mockRouterPush: vi.fn(),
+      mockRouterRefresh: vi.fn(),
+      mockMutate,
+      mockUseMutation: vi.fn(() => [mockMutate, { loading: false, data: null }]),
+      mockUseQuery: vi.fn(() => ({ data: null, loading: false, error: undefined })),
+    };
+  });
 
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: mockRouterPush }),
+  useRouter: () => ({ push: mockRouterPush, refresh: mockRouterRefresh }),
 }));
+
+// Mock @apollo/client hooks so the component renders without an ApolloProvider.
+// gql is imported from the actual library so DocumentNode constants in predict.ts
+// are constructed correctly (they're parsed at module load time).
+vi.mock("@apollo/client", async (importActual) => {
+  const actual = await importActual<typeof import("@apollo/client")>();
+  return {
+    ...actual,
+    useMutation: mockUseMutation,
+    useQuery: mockUseQuery,
+  };
+});
 
 vi.mock("next/link", () => ({
   default: ({
@@ -148,5 +176,52 @@ describe("ResultsView", () => {
 
     const results = await axe(container);
     expect(results).toHaveNoViolations();
+  });
+
+  // ── S4.7 tests ────────────────────────────────────────────────────────────
+
+  it("(S4.7) shows the Re-run button when caseResult is provided", async () => {
+    const { ResultsView } = await import("../app/case/[id]/results-view");
+    render(<ResultsView caseResult={VALID_CASE} />);
+
+    // The RepredictButton renders with aria-label "Re-run with latest model"
+    const btn = screen.getByRole("button", { name: /re-run with latest model/i });
+    expect(btn).toBeTruthy();
+    // The button must not be disabled in the default (non-loading) state.
+    expect((btn as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("(S4.7) clicking Re-run calls the REPREDICT_CASE mutation", async () => {
+    const { ResultsView } = await import("../app/case/[id]/results-view");
+    render(<ResultsView caseResult={VALID_CASE} />);
+
+    const btn = screen.getByRole("button", { name: /re-run with latest model/i });
+    fireEvent.click(btn);
+
+    // useMutation returns [mockMutate, {loading}]; clicking the button should
+    // invoke the mutate function exactly once.
+    expect(mockMutate).toHaveBeenCalledTimes(1);
+  });
+
+  it("(S4.7) prediction history disclosure starts collapsed; clicking expands it", async () => {
+    const { ResultsView } = await import("../app/case/[id]/results-view");
+    render(<ResultsView caseResult={VALID_CASE} />);
+
+    // The toggle button renders with aria-expanded="false" by default.
+    const toggle = screen.getByRole("button", { name: /show prediction history/i });
+    expect(toggle).toBeTruthy();
+    expect((toggle as HTMLButtonElement).getAttribute("aria-expanded")).toBe("false");
+
+    // No history region rendered yet.
+    expect(screen.queryByRole("list", { name: /past prediction runs/i })).toBeNull();
+
+    // Click to expand.
+    fireEvent.click(toggle);
+
+    // After click, aria-expanded flips and the region appears.
+    expect((toggle as HTMLButtonElement).getAttribute("aria-expanded")).toBe("true");
+    expect(
+      screen.getByRole("list", { name: /past prediction runs/i })
+    ).toBeTruthy();
   });
 });

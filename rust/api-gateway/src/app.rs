@@ -17,7 +17,7 @@ use std::time::Instant;
 use anyhow::{Context as _, Result};
 use async_graphql::{Context, EmptySubscription, Object, Schema, SimpleObject};
 use crate::graphql_predict::{
-    CaseConnection, MlInferenceClient, Mutation, compute_next_offset,
+    CaseConnection, MlInferenceClient, Mutation, PredictionHistoryEntry, compute_next_offset,
 };
 use sqlx::PgPool;
 use async_graphql_axum::{GraphQLRequest, GraphQLResponse};
@@ -515,6 +515,116 @@ impl Query {
             created_by:     created_by.map(|u| async_graphql::ID::from(u.to_string())),
             created_at,
         }))
+    }
+
+    /// Return the full prediction history for a case, ordered most-recent-first.
+    ///
+    /// Each entry corresponds to one `predictions` table row — either the
+    /// original `createCase` run (once S4.7 back-fills it) or a subsequent
+    /// `repredictCase` call.
+    ///
+    /// Tenant isolation is enforced by both `SET LOCAL app.current_tenant_id`
+    /// (RLS) and an explicit `WHERE ... AND tenant_id = $2` clause
+    /// (belt-and-suspenders, mirroring `listCases` and `repredictCase`).
+    ///
+    /// Returns `[]` when the case exists but has no history rows yet (e.g. a
+    /// case created before S4.7).  Returns a GraphQL error if the pool is
+    /// unavailable or the supplied `id` is not a valid UUID v4.
+    #[graphql(name = "casePredictions")]
+    async fn case_predictions(
+        &self,
+        ctx: &Context<'_>,
+        id: async_graphql::ID,
+    ) -> async_graphql::Result<Vec<PredictionHistoryEntry>> {
+        use crate::graphql_predict::PredictResult;
+        use sqlx::Row as _;
+
+        let TenantId(tenant_id) = *ctx
+            .data::<TenantId>()
+            .map_err(|_| async_graphql::Error::new("missing tenant id"))?;
+
+        let case_uuid = Uuid::parse_str(id.as_str())
+            .map_err(|_| async_graphql::Error::new("invalid case id: must be a UUID v4"))?;
+
+        let pool = ctx
+            .data::<Option<Arc<PgPool>>>()
+            .map_err(|_| async_graphql::Error::new("cases store unavailable"))?
+            .as_ref()
+            .ok_or_else(|| {
+                async_graphql::Error::new(
+                    "cases store not configured (DATABASE_URL missing)",
+                )
+            })?;
+
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("predictions tx begin: {e}")))?;
+
+        // SET LOCAL so the RLS policy is evaluated on this connection even if
+        // the pool connection was previously used with a different tenant.
+        sqlx::query(&format!(
+            "SET LOCAL app.current_tenant_id = '{tenant_id}'"
+        ))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| async_graphql::Error::new(format!("SET LOCAL failed: {e}")))?;
+
+        let rows = sqlx::query(
+            r#"
+            SELECT id,
+                   prediction,
+                   model_version,
+                   created_at::text AS created_at_s
+            FROM   predictions
+            WHERE  case_id   = $1
+              AND  tenant_id = $2
+            ORDER BY created_at DESC
+            "#,
+        )
+        .bind(case_uuid)
+        .bind(tenant_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| async_graphql::Error::new(format!("predictions query failed: {e}")))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("predictions tx commit: {e}")))?;
+
+        let mut entries = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let entry_id: Uuid = row
+                .try_get("id")
+                .map_err(|e| async_graphql::Error::new(format!("row.id: {e}")))?;
+            let prediction_val: serde_json::Value = row
+                .try_get("prediction")
+                .map_err(|e| async_graphql::Error::new(format!(
+                    "prediction {entry_id}: prediction NULL: {e}"
+                )))?;
+            let model_version: String = row
+                .try_get("model_version")
+                .map_err(|e| async_graphql::Error::new(format!("row.model_version: {e}")))?;
+            let created_at: String = row
+                .try_get("created_at_s")
+                .map_err(|e| async_graphql::Error::new(format!("row.created_at: {e}")))?;
+
+            let prediction: PredictResult =
+                serde_json::from_value(prediction_val).map_err(|e| {
+                    async_graphql::Error::new(format!(
+                        "prediction {entry_id}: parse error: {e}"
+                    ))
+                })?;
+
+            entries.push(PredictionHistoryEntry {
+                id:           async_graphql::ID::from(entry_id.to_string()),
+                prediction,
+                model_version,
+                created_at,
+            });
+        }
+
+        Ok(entries)
     }
 }
 

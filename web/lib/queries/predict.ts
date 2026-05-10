@@ -214,3 +214,86 @@ export interface ListCasesVars {
   limit?: number;
   offset?: number;
 }
+
+// ---------------------------------------------------------------------------
+// S4.7: repredictCase mutation + casePredictions query
+// ---------------------------------------------------------------------------
+
+/**
+ * S4.7: Re-run prediction on an existing case with the latest ML model.
+ * Returns the updated Case (new prediction, unchanged recommendation).
+ */
+export const REPREDICT_CASE = gql`
+  mutation RepredictCase($id: ID!) {
+    repredictCase(id: $id) {
+      id
+      tenantId
+      inputFeatures
+      prediction {
+        pWin
+        ciLower
+        ciUpper
+        coverage
+        modelVersion
+        predictedAtUnix
+      }
+      recommendation {
+        kind
+        rationaleBullets
+        expectedValueTry
+        expectedValueSettle
+      }
+      createdBy
+      createdAt
+    }
+  }
+`;
+
+/**
+ * S4.7: Fetch the full prediction history for a case, most-recent-first.
+ * No GraphQL is fired until the disclosure is expanded (skip: !open).
+ */
+export const GET_CASE_PREDICTIONS = gql`
+  query GetCasePredictions($id: ID!) {
+    casePredictions(id: $id) {
+      id
+      prediction {
+        pWin
+        ciLower
+        ciUpper
+        coverage
+        modelVersion
+        predictedAtUnix
+      }
+      modelVersion
+      createdAt
+    }
+  }
+`;
+
+/** One entry in a case's prediction history. */
+export interface PredictionHistoryEntry {
+  id: string;
+  /** Full prediction result for this run. */
+  prediction: PredictResult;
+  /** Denormalised model version for quick rendering without unwrapping prediction. */
+  modelVersion: string;
+  /** ISO-8601 UTC timestamp of this prediction run. */
+  createdAt: string;
+}
+
+export interface RepredictCaseData {
+  repredictCase: CaseResult;
+}
+
+export interface RepredictCaseVars {
+  id: string;
+}
+
+export interface GetCasePredictionsData {
+  casePredictions: PredictionHistoryEntry[];
+}
+
+export interface GetCasePredictionsVars {
+  id: string;
+}

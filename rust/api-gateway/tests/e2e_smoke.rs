@@ -898,6 +898,211 @@ async fn list_cases_paginates_and_isolates_tenants() {
         .ok();
 }
 
+/// S4.7 E2E smoke: `repredictCase` inserts a `predictions` row, updates
+/// `cases.prediction`, and fires a `case.repredict` audit event.
+///
+/// 1. Seeds a case row via admin pool (bypasses RLS; sets input_features,
+///    prediction, recommendation so S4.2-style columns are present).
+/// 2. Starts a wiremock stub for POST /predict returning a DIFFERENT model_version
+///    from the seed row — so we can distinguish old from new.
+/// 3. Calls `repredictCase(id: "…")` as DEV_TENANT.
+/// 4. Asserts the returned Case has the new `pWin` and `modelVersion`.
+/// 5. Verifies a row in `predictions` with the new model_version.
+/// 6. Verifies `cases.prediction` jsonb was updated (new p_win value).
+/// 7. Allows a moment for the fire-and-forget audit spawn, then checks for a
+///    `case.repredict` row in `audit_log`.
+/// 8. Cleans up (CASCADE on predictions removes the history row automatically).
+#[tokio::test]
+#[ignore = "requires docker-compose dev stack + wiremock; run with --include-ignored"]
+async fn repredict_creates_history_and_updates_case() {
+    // -----------------------------------------------------------------------
+    // 1. Seed a case row via admin pool.
+    // -----------------------------------------------------------------------
+    let admin_pool = sqlx::PgPool::connect(&admin_url())
+        .await
+        .expect("admin pool");
+
+    let tenant_a: uuid::Uuid = DEV_TENANT.parse().unwrap();
+
+    let seed_features = serde_json::json!({
+        "judge_severity": 0.5_f64, "attorney_win_rate": 0.5_f64,
+        "ideology_distance": 0.5_f64, "materiality_score": 0.5_f64,
+        "procedural_motion_count": 1.0_f64, "case_type": "civil", "jurisdiction": "Federal"
+    });
+    let seed_prediction = serde_json::json!({
+        "p_win": 0.50_f64, "ci_lower": 0.40_f64, "ci_upper": 0.60_f64,
+        "coverage": 0.90_f64, "model_version": "seed-run-v1", "predicted_at_unix": 1_746_700_000_i64
+    });
+    let seed_recommendation = serde_json::json!({
+        "kind": "Borderline",
+        "rationale_bullets": ["b1", "b2", "b3"],
+        "expected_value_try":    "5000.00",
+        "expected_value_settle": "40000.00"
+    });
+
+    let case_id: uuid::Uuid = sqlx::query_scalar(
+        r#"
+        INSERT INTO cases
+            (tenant_id, title, jurisdiction, input_features, prediction, recommendation)
+        VALUES ($1, 'Repredict E2E seed', 'Federal', $2, $3, $4)
+        RETURNING id
+        "#,
+    )
+    .bind(tenant_a)
+    .bind(&seed_features)
+    .bind(&seed_prediction)
+    .bind(&seed_recommendation)
+    .fetch_one(&admin_pool)
+    .await
+    .expect("insert seed case");
+
+    // -----------------------------------------------------------------------
+    // 2. Stub ml-inference-svc with a DIFFERENT model_version from the seed.
+    // -----------------------------------------------------------------------
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/predict"))
+        .and(header("X-Tenant-Id", DEV_TENANT))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "p_win":             0.78_f64,
+            "ci_lower":          0.65_f64,
+            "ci_upper":          0.89_f64,
+            "coverage":          0.90_f64,
+            "model_version":     "repredict-run-v2",
+            "predicted_at_unix": 1_746_799_800_i64
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    // -----------------------------------------------------------------------
+    // 3. Build api-gateway and call repredictCase.
+    // -----------------------------------------------------------------------
+    let app = api_gateway::build_app(
+        "http://127.0.0.1:49993",
+        &mock_server.uri(),
+        TEST_JWT_SECRET.to_vec(),
+        Default::default(),
+    )
+    .await
+    .expect("build_app");
+
+    let jwt = make_jwt(DEV_TENANT);
+    let case_id_str = case_id.to_string();
+
+    let gql_body = serde_json::json!({
+        "query": format!(r#"
+            mutation {{
+                repredictCase(id: "{}") {{
+                    id
+                    prediction {{ pWin modelVersion }}
+                    recommendation {{ kind }}
+                }}
+            }}
+        "#, case_id_str)
+    })
+    .to_string();
+
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/graphql")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {jwt}"))
+        .body(axum::body::Body::from(gql_body))
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+
+    // -----------------------------------------------------------------------
+    // 4. Assert the returned Case has the new pWin and modelVersion.
+    // -----------------------------------------------------------------------
+    assert_eq!(resp.status(), StatusCode::OK, "repredictCase must return HTTP 200");
+
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body_bytes).expect("parse JSON");
+
+    assert!(
+        json["errors"].is_null(),
+        "repredictCase must have no errors; body={body_bytes:?}"
+    );
+
+    let result = &json["data"]["repredictCase"];
+    let p_win = result["prediction"]["pWin"].as_f64().unwrap_or(0.0);
+    assert!(
+        (p_win - 0.78).abs() < 1e-4,
+        "pWin must match the new mock response; got {p_win}"
+    );
+    assert_eq!(
+        result["prediction"]["modelVersion"].as_str().unwrap_or(""),
+        "repredict-run-v2",
+        "modelVersion must be from the re-run, not the seed"
+    );
+    // Recommendation should still be the seeded one (not re-computed).
+    assert_eq!(
+        result["recommendation"]["kind"].as_str().unwrap_or(""),
+        "Borderline",
+        "recommendation must be preserved from createCase; not re-run in repredictCase"
+    );
+
+    // -----------------------------------------------------------------------
+    // 5. Verify a predictions row exists with the new model_version.
+    // -----------------------------------------------------------------------
+    let pred_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM predictions WHERE case_id = $1 AND model_version = 'repredict-run-v2'"
+    )
+    .bind(case_id)
+    .fetch_one(&admin_pool)
+    .await
+    .expect("predictions count check");
+
+    assert_eq!(pred_count, 1, "exactly one predictions row must exist for the re-run");
+
+    // -----------------------------------------------------------------------
+    // 6. Verify cases.prediction was updated (new p_win in the jsonb).
+    // -----------------------------------------------------------------------
+    let updated_p_win: f64 = sqlx::query_scalar(
+        "SELECT (prediction->>'p_win')::float8 FROM cases WHERE id = $1"
+    )
+    .bind(case_id)
+    .fetch_one(&admin_pool)
+    .await
+    .expect("updated p_win check");
+
+    assert!(
+        (updated_p_win - 0.78).abs() < 1e-4,
+        "cases.prediction must be updated to the new p_win; got {updated_p_win}"
+    );
+
+    // -----------------------------------------------------------------------
+    // 7. Verify audit row (fire-and-forget; allow brief propagation delay).
+    // -----------------------------------------------------------------------
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+    let audit_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_log WHERE tenant_id = $1 AND action = 'case.repredict'"
+    )
+    .bind(tenant_a)
+    .fetch_one(&admin_pool)
+    .await
+    .expect("audit count check");
+
+    assert!(audit_count >= 1, "at least one case.repredict audit event must exist");
+
+    // -----------------------------------------------------------------------
+    // 8. Cleanup — CASCADE removes predictions rows automatically.
+    // -----------------------------------------------------------------------
+    sqlx::query("DELETE FROM cases WHERE id = $1")
+        .bind(case_id)
+        .execute(&admin_pool)
+        .await
+        .expect("cleanup");
+
+    // MockServer drop verifies the expect(1) constraint — wiremock panics if unmet.
+}
+
 /// S2.3 rate-limit: per-tenant token bucket returns 429 after exhaustion.
 ///
 /// Uses RPM=5 so only 6 requests are needed, keeping the test fast.

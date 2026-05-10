@@ -1,12 +1,25 @@
-// S4.4 (JP-58): converted from a stateful client island (sessionStorage reader)
-// to a pure presentational component.  Data is fetched server-side in page.tsx
-// and passed here as a prop.  No sessionStorage, no useEffect, no useQuery.
+// S4.4 (JP-58): converted from a stateful client island to a purely
+// presentational component that receives server-fetched data as a prop.
 //
-// lib/recommend.ts is no longer called from this component — the server-computed
-// recommendation from createCase / case(id) is used directly.
-// See lib/recommend.ts deprecation notice.
+// S4.7 (JP-61): promoted to a client component to host two inline client
+// islands — RepredictButton and PredictionHistoryDisclosure — that require
+// useMutation / useQuery / useState.  The top-level component (ResultsView)
+// and its layout children remain stateless; only the two islands carry state.
+//
+// Design choice: keep all S4.7 UI in this single file (rather than splitting
+// into repredict-button.tsx and prediction-history.tsx) to stay within the
+// sprint scope constraint and minimise file proliferation.
+//
+// Sprint-5 follow-up: once the component grows beyond ~250 LOC consider
+// extracting RepredictButton and PredictionHistoryDisclosure to their own
+// files under web/app/case/[id]/.
 
+"use client";
+
+import { useState } from "react";
 import Link from "next/link";
+import { useMutation, useQuery } from "@apollo/client";
+import { useRouter } from "next/navigation";
 import {
   Card,
   CardContent,
@@ -16,6 +29,14 @@ import {
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import type { CaseResult } from "@/lib/queries/predict";
+import {
+  REPREDICT_CASE,
+  GET_CASE_PREDICTIONS,
+  type RepredictCaseData,
+  type RepredictCaseVars,
+  type GetCasePredictionsData,
+  type GetCasePredictionsVars,
+} from "@/lib/queries/predict";
 
 // ---------------------------------------------------------------------------
 // Formatting helpers
@@ -39,6 +60,104 @@ function badgeVariantForKind(
   if (kind === "Try") return "default";
   if (kind === "Settle") return "secondary";
   return "warning";
+}
+
+// ---------------------------------------------------------------------------
+// Client island: RepredictButton
+//
+// Calls the repredictCase mutation with the current case id.  On completion,
+// calls router.refresh() so the RSC parent re-fetches the page with the new
+// prediction (Next.js App Router soft-refresh pattern).
+//
+// Sprint-5 follow-up: accept operator-supplied expected_damages so
+// decision-arith can be re-run alongside the ML prediction.
+// ---------------------------------------------------------------------------
+
+interface RepredictButtonProps {
+  caseId: string;
+}
+
+function RepredictButton({ caseId }: RepredictButtonProps) {
+  const router = useRouter();
+  const [repredictCase, { loading }] = useMutation<
+    RepredictCaseData,
+    RepredictCaseVars
+  >(REPREDICT_CASE, {
+    variables: { id: caseId },
+    onCompleted: () => router.refresh(),
+  });
+
+  return (
+    <button
+      type="button"
+      onClick={() => repredictCase()}
+      disabled={loading}
+      aria-label="Re-run with latest model"
+      className="inline-flex items-center justify-center rounded-md border border-input bg-background px-4 py-2 text-sm font-medium shadow-sm hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50"
+    >
+      {loading ? "Running…" : "Re-run with latest model"}
+    </button>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Client island: PredictionHistoryDisclosure
+//
+// A collapsible section showing the full prediction history for a case.
+// The GET_CASE_PREDICTIONS query is skipped until the first open so the
+// common case (operator viewing current result only) incurs zero extra
+// GraphQL round-trips.  Subsequent toggles reuse the Apollo cache.
+// ---------------------------------------------------------------------------
+
+interface PredictionHistoryDisclosureProps {
+  caseId: string;
+}
+
+function PredictionHistoryDisclosure({ caseId }: PredictionHistoryDisclosureProps) {
+  const [open, setOpen] = useState(false);
+
+  const { data, loading } = useQuery<
+    GetCasePredictionsData,
+    GetCasePredictionsVars
+  >(GET_CASE_PREDICTIONS, {
+    variables: { id: caseId },
+    skip: !open,
+  });
+
+  const entries = data?.casePredictions ?? [];
+
+  return (
+    <section aria-label="Prediction history">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className="text-sm font-medium text-primary underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+      >
+        {open ? "Hide" : "Show"} prediction history
+        {entries.length > 0 && ` (${entries.length} run${entries.length !== 1 ? "s" : ""})`}
+      </button>
+
+      {open && (
+        <div className="mt-2 space-y-1" role="list" aria-label="Past prediction runs">
+          {loading && (
+            <p className="text-xs text-muted-foreground">Loading history…</p>
+          )}
+          {entries.map((entry) => (
+            <div
+              key={entry.id}
+              role="listitem"
+              className="flex gap-4 text-xs text-muted-foreground"
+            >
+              <span>{new Date(entry.createdAt).toLocaleDateString("en-US")}</span>
+              <span>P(win): {Math.round(entry.prediction.pWin * 100)}%</span>
+              <span className="font-mono">{entry.modelVersion}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -161,20 +280,36 @@ function ResultsLayout({ caseResult }: ResultsLayoutProps) {
         </CardContent>
       </Card>
 
-      {/* PDF memo download */}
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-        <a
-          href={`/api/case/${id}/memo.pdf`}
-          download
-          className="inline-flex items-center justify-center rounded-md border border-input bg-background px-4 py-2 text-sm font-medium shadow-sm hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-        >
-          Download memo (PDF)
-        </a>
-        <p className="text-xs text-muted-foreground">
-          PDF includes the audit trail and is signed by the gateway
-          model_version. Sprint-5 adds full statutory citations.
-        </p>
+      {/* Action bar: PDF download + re-run prediction */}
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
+        {/* PDF memo download (S4.6) */}
+        <div className="flex flex-col gap-1">
+          <a
+            href={`/api/case/${id}/memo.pdf`}
+            download
+            className="inline-flex items-center justify-center rounded-md border border-input bg-background px-4 py-2 text-sm font-medium shadow-sm hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+          >
+            Download memo (PDF)
+          </a>
+          <p className="text-xs text-muted-foreground">
+            PDF includes the audit trail and is signed by the gateway
+            model_version. Sprint-5 adds full statutory citations.
+          </p>
+        </div>
+
+        {/* Re-run prediction (S4.7) */}
+        <div className="flex flex-col gap-1">
+          <RepredictButton caseId={id} />
+          <p className="text-xs text-muted-foreground">
+            Fetches the latest champion model and updates this case.
+            Recommendation is preserved; Sprint-5 will re-run decision-arith
+            when you supply updated damages.
+          </p>
+        </div>
       </div>
+
+      {/* Prediction history disclosure (S4.7) */}
+      <PredictionHistoryDisclosure caseId={id} />
 
       {/* Demo limitations disclosure */}
       <p className="text-xs text-muted-foreground border-t pt-4">
