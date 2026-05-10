@@ -17,6 +17,7 @@ path = "src/main.rs"
 feature-store = { path = "../feature-store" }
 rate-limit = { path = "../rate-limit" }
 audit-recorder = { path = "../audit-recorder" }
+decision-arith = { path = "../decision-arith" }
 tonic = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
@@ -31,13 +32,15 @@ serde_json = { workspace = true }
 uuid = { workspace = true }
 jsonwebtoken = { workspace = true }
 dashmap = { workspace = true }
+# Added for S4.2/S4.3: direct DB access for createCase / listCases resolvers.
+sqlx = { workspace = true }
+rust_decimal = { workspace = true }
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 wiremock = "0.6"
 tower = { version = "0.5" }
 bytes = "1"
-sqlx = { workspace = true }
 tokio-stream = { version = "0.1", features = ["net"] }
 jsonwebtoken = { workspace = true }
 serde = { workspace = true }
