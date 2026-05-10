@@ -25,15 +25,7 @@ export const CREATE_CASE = gql`
     createCase(input: $input) {
       id
       tenantId
-      inputFeatures {
-        judgeSeverity
-        attorneyWinRate
-        ideologyDistance
-        materialityScore
-        proceduralMotionCount
-        caseType
-        jurisdiction
-      }
+      inputFeatures
       prediction {
         pWin
         ciLower
@@ -64,15 +56,7 @@ export const GET_CASE = gql`
     case(id: $id) {
       id
       tenantId
-      inputFeatures {
-        judgeSeverity
-        attorneyWinRate
-        ideologyDistance
-        materialityScore
-        proceduralMotionCount
-        caseType
-        jurisdiction
-      }
+      inputFeatures
       prediction {
         pWin
         ciLower
@@ -188,10 +172,7 @@ export const LIST_CASES = gql`
     listCases(limit: $limit, offset: $offset) {
       nodes {
         id
-        inputFeatures {
-          caseType
-          jurisdiction
-        }
+        inputFeatures
         prediction {
           pWin
         }

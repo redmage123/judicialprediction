@@ -41,7 +41,7 @@ async function fetchCases(offset: number): Promise<CaseConnection> {
       listCases(limit: $limit, offset: $offset) {
         nodes {
           id
-          inputFeatures { caseType jurisdiction }
+          inputFeatures
           prediction { pWin }
           recommendation { kind }
           createdAt

@@ -37,15 +37,7 @@ const GET_CASE_QUERY = `
     case(id: $id) {
       id
       tenantId
-      inputFeatures {
-        judgeSeverity
-        attorneyWinRate
-        ideologyDistance
-        materialityScore
-        proceduralMotionCount
-        caseType
-        jurisdiction
-      }
+      inputFeatures
       prediction {
         pWin
         ciLower
