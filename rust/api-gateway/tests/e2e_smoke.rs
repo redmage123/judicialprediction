@@ -528,6 +528,376 @@ async fn predict_mutation_happy_path() {
     //    No explicit assertion needed; wiremock panics if the expectation is unmet.
 }
 
+/// S4.2 E2E smoke: `createCase` persists a row to `cases` and fires an audit event.
+///
+/// 1. Starts a wiremock server that stubs POST /predict (no docker stack for ML).
+/// 2. Builds api-gateway with DATABASE_URL pointing at the dev postgres.
+/// 3. Sends the `createCase` mutation with a valid JWT for DEV_TENANT.
+/// 4. Asserts the GraphQL response has a valid UUID id, correct tenantId, and
+///    the expected pWin value from the mock ML response.
+/// 5. Queries `cases` via the admin pool to confirm the row was persisted.
+/// 6. Queries `audit_log` to confirm a `case.created` event was recorded.
+/// 7. Cleans up the inserted row.
+#[tokio::test]
+#[ignore = "requires docker-compose dev stack + wiremock; run with --include-ignored"]
+async fn create_case_persists_and_returns_with_audit() {
+    // -----------------------------------------------------------------------
+    // 1. Mock ml-inference-svc — no docker stack needed for this part.
+    // -----------------------------------------------------------------------
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/predict"))
+        .and(header("X-Tenant-Id", DEV_TENANT))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "p_win":             0.72_f64,
+            "ci_lower":          0.61_f64,
+            "ci_upper":          0.83_f64,
+            "coverage":          0.90_f64,
+            "model_version":     "test-run-id-e2e-create",
+            "predicted_at_unix": 1_746_748_800_i64
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    // -----------------------------------------------------------------------
+    // 2. Build api-gateway — DATABASE_URL must be set for the cases pool.
+    // -----------------------------------------------------------------------
+    let app = api_gateway::build_app(
+        "http://127.0.0.1:49993",
+        &mock_server.uri(),
+        TEST_JWT_SECRET.to_vec(),
+        Default::default(),
+    )
+    .await
+    .expect("build_app");
+
+    let jwt = make_jwt(DEV_TENANT);
+
+    // -----------------------------------------------------------------------
+    // 3. Send the createCase mutation.
+    // -----------------------------------------------------------------------
+    let gql_body = serde_json::json!({
+        "query": r#"
+            mutation {
+                createCase(input: {
+                    judgeSeverity:         0.7
+                    attorneyWinRate:       0.6
+                    ideologyDistance:      0.3
+                    materialityScore:      0.8
+                    proceduralMotionCount: 3.0
+                    caseType:              "civil"
+                    jurisdiction:          "Federal"
+                }) {
+                    id
+                    tenantId
+                    prediction { pWin }
+                    recommendation { kind expectedValueTry }
+                    createdAt
+                }
+            }
+        "#
+    })
+    .to_string();
+
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/graphql")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {jwt}"))
+        .body(axum::body::Body::from(gql_body))
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+
+    // -----------------------------------------------------------------------
+    // 4. Assert the GraphQL response.
+    // -----------------------------------------------------------------------
+    assert_eq!(resp.status(), StatusCode::OK, "createCase must return HTTP 200");
+
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body_bytes).expect("parse JSON");
+
+    assert!(
+        json["errors"].is_null(),
+        "createCase must have no errors; body={body_bytes:?}"
+    );
+
+    let case = &json["data"]["createCase"];
+    let case_id_str = case["id"].as_str().expect("id must be a string");
+    let case_id: uuid::Uuid = case_id_str.parse().expect("id must be a valid UUID");
+
+    assert_eq!(
+        case["tenantId"].as_str().unwrap_or(""),
+        DEV_TENANT,
+        "tenantId must equal the JWT tenant"
+    );
+
+    let p_win = case["prediction"]["pWin"].as_f64().unwrap_or(0.0);
+    assert!(
+        (p_win - 0.72).abs() < 1e-4,
+        "pWin must match mock response; got {p_win}"
+    );
+
+    // recommendation.expectedValueTry must be a string (Decimal precision guard).
+    assert!(
+        case["recommendation"]["expectedValueTry"].is_string(),
+        "expectedValueTry must be a JSON string, not a number"
+    );
+
+    // -----------------------------------------------------------------------
+    // 5. Verify the row exists in the DB.
+    // -----------------------------------------------------------------------
+    let admin_pool = sqlx::PgPool::connect(&admin_url())
+        .await
+        .expect("admin pool");
+
+    let row_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM cases WHERE id = $1")
+            .bind(case_id)
+            .fetch_one(&admin_pool)
+            .await
+            .expect("DB count check");
+
+    assert_eq!(row_count, 1, "one cases row must exist for the new case");
+
+    // -----------------------------------------------------------------------
+    // 6. Verify a case.created audit event was recorded.
+    // -----------------------------------------------------------------------
+    // Allow a brief moment for the fire-and-forget audit spawn to complete.
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+    let audit_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_log WHERE tenant_id = $1 AND action = 'case.created'",
+    )
+    .bind(uuid::Uuid::parse_str(DEV_TENANT).unwrap())
+    .fetch_one(&admin_pool)
+    .await
+    .expect("audit count check");
+
+    assert!(audit_count >= 1, "at least one case.created audit event must exist");
+
+    // -----------------------------------------------------------------------
+    // 7. Cleanup.
+    // -----------------------------------------------------------------------
+    sqlx::query("DELETE FROM cases WHERE id = $1")
+        .bind(case_id)
+        .execute(&admin_pool)
+        .await
+        .expect("cleanup");
+
+    // MockServer drop verifies expect(1) — wiremock panics if unmet.
+}
+
+/// S4.3 E2E smoke: `listCases` paginates correctly and tenant-isolates rows via RLS.
+///
+/// 1. Seeds 3 cases for tenant A (DEV_TENANT) and 1 case for tenant B
+///    (OTHER_TENANT) via the admin pool (bypasses RLS).
+/// 2. Calls `listCases` as tenant A (default limit=20, offset=0).
+///    Asserts ≥ 3 rows returned and tenant B's case UUID is never present.
+/// 3. Calls `listCases` with limit=2, offset=0.
+///    Asserts exactly 2 nodes are returned and `nextOffset = 2`.
+/// 4. Cleans up all seeded rows.
+#[tokio::test]
+#[ignore = "requires docker-compose dev stack; run with --include-ignored"]
+async fn list_cases_paginates_and_isolates_tenants() {
+    let admin_pool = sqlx::PgPool::connect(&admin_url())
+        .await
+        .expect("admin pool");
+
+    let tenant_a: uuid::Uuid = DEV_TENANT.parse().unwrap();
+    let tenant_b: uuid::Uuid = OTHER_TENANT.parse().unwrap();
+
+    // Reusable jsonb fixture values that satisfy the S4.2 column shapes.
+    let features_val = serde_json::json!({
+        "judge_severity": 0.5_f64,
+        "attorney_win_rate": 0.5_f64,
+        "ideology_distance": 0.5_f64,
+        "materiality_score": 0.5_f64,
+        "procedural_motion_count": 1.0_f64,
+        "case_type": "civil",
+        "jurisdiction": "Federal"
+    });
+    let prediction_val = serde_json::json!({
+        "p_win": 0.5_f64,
+        "ci_lower": 0.4_f64,
+        "ci_upper": 0.6_f64,
+        "coverage": 0.9_f64,
+        "model_version": "e2e-seed",
+        "predicted_at_unix": 1_746_748_800_i64
+    });
+    let recommendation_val = serde_json::json!({
+        "kind": "Borderline",
+        "rationale_bullets": ["b1", "b2", "b3"],
+        "expected_value_try":    "5000.00",
+        "expected_value_settle": "40000.00"
+    });
+
+    // -----------------------------------------------------------------------
+    // 1. Seed 3 cases for tenant A and 1 for tenant B via admin pool.
+    // -----------------------------------------------------------------------
+    let mut case_ids: Vec<uuid::Uuid> = Vec::new();
+
+    for _ in 0..3_u8 {
+        let id: uuid::Uuid = sqlx::query_scalar(
+            r#"
+            INSERT INTO cases
+                (tenant_id, title, jurisdiction, input_features, prediction, recommendation)
+            VALUES ($1, 'E2E seed', 'Federal', $2, $3, $4)
+            RETURNING id
+            "#,
+        )
+        .bind(tenant_a)
+        .bind(&features_val)
+        .bind(&prediction_val)
+        .bind(&recommendation_val)
+        .fetch_one(&admin_pool)
+        .await
+        .expect("insert tenant-A seed case");
+
+        case_ids.push(id);
+    }
+
+    let tenant_b_case_id: uuid::Uuid = sqlx::query_scalar(
+        r#"
+        INSERT INTO cases
+            (tenant_id, title, jurisdiction, input_features, prediction, recommendation)
+        VALUES ($1, 'E2E seed B', 'Federal', $2, $3, $4)
+        RETURNING id
+        "#,
+    )
+    .bind(tenant_b)
+    .bind(&features_val)
+    .bind(&prediction_val)
+    .bind(&recommendation_val)
+    .fetch_one(&admin_pool)
+    .await
+    .expect("insert tenant-B seed case");
+
+    // -----------------------------------------------------------------------
+    // 2. Build app (DATABASE_URL must be set for the cases pool).
+    //    Feature-store and ML inference URLs are never called in this test.
+    // -----------------------------------------------------------------------
+    let app = api_gateway::build_app(
+        "http://127.0.0.1:49993",
+        "http://127.0.0.1:49990",
+        TEST_JWT_SECRET.to_vec(),
+        Default::default(),
+    )
+    .await
+    .expect("build_app");
+
+    let jwt_a = make_jwt(DEV_TENANT);
+
+    // -----------------------------------------------------------------------
+    // 3. listCases as tenant A (defaults: limit=20, offset=0).
+    // -----------------------------------------------------------------------
+    let gql_all = serde_json::json!({
+        "query": "{ listCases { nodes { id } totalCount nextOffset } }"
+    })
+    .to_string();
+
+    let req_all = axum::http::Request::builder()
+        .method("POST")
+        .uri("/graphql")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {jwt_a}"))
+        .body(axum::body::Body::from(gql_all))
+        .unwrap();
+
+    let resp_all = app.clone().oneshot(req_all).await.unwrap();
+    let body_all = axum::body::to_bytes(resp_all.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json_all: serde_json::Value = serde_json::from_slice(&body_all).expect("parse JSON");
+
+    assert!(
+        json_all["errors"].is_null(),
+        "listCases must have no errors; body={body_all:?}"
+    );
+
+    let result_all = &json_all["data"]["listCases"];
+    let total = result_all["totalCount"].as_i64().unwrap_or(0);
+    assert!(
+        total >= 3,
+        "tenant A must see at least 3 cases (seeded); got totalCount={total}"
+    );
+
+    // Tenant B's case must NOT appear in any page returned to tenant A.
+    let tenant_b_str = tenant_b_case_id.to_string();
+    let returned_ids: Vec<&str> = result_all["nodes"]
+        .as_array()
+        .unwrap_or(&vec![])
+        .iter()
+        .filter_map(|n| n["id"].as_str())
+        .collect();
+
+    assert!(
+        !returned_ids.contains(&tenant_b_str.as_str()),
+        "tenant A must NOT see tenant B's case (RLS isolation check)"
+    );
+
+    // -----------------------------------------------------------------------
+    // 4. Pagination check: limit=2 → exactly 2 nodes + nextOffset = 2.
+    // -----------------------------------------------------------------------
+    let gql_limit2 = serde_json::json!({
+        "query": "{ listCases(limit: 2, offset: 0) { nodes { id } totalCount nextOffset } }"
+    })
+    .to_string();
+
+    let req_limit2 = axum::http::Request::builder()
+        .method("POST")
+        .uri("/graphql")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {jwt_a}"))
+        .body(axum::body::Body::from(gql_limit2))
+        .unwrap();
+
+    let resp_limit2 = app.clone().oneshot(req_limit2).await.unwrap();
+    let body_limit2 = axum::body::to_bytes(resp_limit2.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json_limit2: serde_json::Value =
+        serde_json::from_slice(&body_limit2).expect("parse JSON limit=2");
+
+    assert!(
+        json_limit2["errors"].is_null(),
+        "listCases(limit=2) must have no errors; body={body_limit2:?}"
+    );
+
+    let result_limit2 = &json_limit2["data"]["listCases"];
+    let nodes_limit2 = result_limit2["nodes"].as_array().unwrap();
+    assert_eq!(
+        nodes_limit2.len(),
+        2,
+        "limit=2 must return exactly 2 nodes"
+    );
+    assert_eq!(
+        result_limit2["nextOffset"].as_i64().unwrap_or(-1),
+        2,
+        "nextOffset must equal 2 after first page of 2 (total >= 3)"
+    );
+
+    // -----------------------------------------------------------------------
+    // 5. Cleanup all seeded rows.
+    // -----------------------------------------------------------------------
+    for id in &case_ids {
+        sqlx::query("DELETE FROM cases WHERE id = $1")
+            .bind(id)
+            .execute(&admin_pool)
+            .await
+            .ok();
+    }
+    sqlx::query("DELETE FROM cases WHERE id = $1")
+        .bind(tenant_b_case_id)
+        .execute(&admin_pool)
+        .await
+        .ok();
+}
+
 /// S2.3 rate-limit: per-tenant token bucket returns 429 after exhaustion.
 ///
 /// Uses RPM=5 so only 6 requests are needed, keeping the test fast.

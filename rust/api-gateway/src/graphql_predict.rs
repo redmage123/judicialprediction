@@ -161,6 +161,50 @@ pub struct Case {
 }
 
 // ---------------------------------------------------------------------------
+// Pagination helper — used by the listCases resolver and unit tests
+// ---------------------------------------------------------------------------
+
+/// Compute the `nextOffset` cursor for [`CaseConnection`].
+///
+/// Returns `Some(offset + nodes_len)` when more rows remain beyond the
+/// current page (i.e. `offset + nodes_len < total_count`), or `None` when
+/// this page exhausts the result set.
+pub(crate) fn compute_next_offset(
+    offset: i32,
+    nodes_len: usize,
+    total_count: i64,
+) -> Option<i32> {
+    let end = i64::from(offset) + nodes_len as i64;
+    if end < total_count {
+        Some(offset + nodes_len as i32)
+    } else {
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GraphQL output type: CaseConnection (S4.3 listCases result)
+// ---------------------------------------------------------------------------
+
+/// Paginated list of cases for the current tenant.
+///
+/// `next_offset` is `Some(offset + nodes.len())` when additional pages
+/// remain beyond this response; `None` when this page contains the final row.
+///
+/// async-graphql auto-converts snake_case field names to camelCase in the SDL:
+///   `total_count → totalCount`, `next_offset → nextOffset`.
+#[derive(SimpleObject, Serialize, Deserialize)]
+pub struct CaseConnection {
+    /// Cases on the current page, ordered `created_at DESC`.
+    pub nodes: Vec<Case>,
+    /// Total row count for this tenant across all pages.
+    pub total_count: i64,
+    /// Offset for the next page (`offset + nodes.len()`), or `None` if
+    /// this page contains the final row.
+    pub next_offset: Option<i32>,
+}
+
+// ---------------------------------------------------------------------------
 // GraphQL Mutation root
 // ---------------------------------------------------------------------------
 
@@ -706,5 +750,121 @@ mod tests {
         assert_eq!(decoded.rationale_bullets, dto.rationale_bullets);
         assert_eq!(decoded.expected_value_try,    dto.expected_value_try);
         assert_eq!(decoded.expected_value_settle, dto.expected_value_settle);
+    }
+
+    // ── CaseConnection helpers and tests (S4.3) ──────────────────────────────
+
+    /// Build a minimal `Case` fixture for CaseConnection round-trip tests.
+    fn make_test_case(id: &str) -> Case {
+        Case {
+            id:        ID::from(id),
+            tenant_id: ID::from("00000000-0000-0000-0000-000000000002"),
+            input_features: Json(PredictInput {
+                judge_severity:          0.7,
+                attorney_win_rate:       0.6,
+                ideology_distance:       0.3,
+                materiality_score:       0.8,
+                procedural_motion_count: 3.0,
+                case_type:               "civil".to_string(),
+                jurisdiction:            "Federal".to_string(),
+            }),
+            prediction: PredictResult {
+                p_win:             0.72,
+                ci_lower:          0.61,
+                ci_upper:          0.83,
+                coverage:          0.90,
+                model_version:     "test".to_string(),
+                predicted_at_unix: 1_746_748_800,
+            },
+            recommendation: RecommendationDto {
+                kind: "Try".to_string(),
+                rationale_bullets: vec![
+                    "bullet-1".to_string(),
+                    "bullet-2".to_string(),
+                    "bullet-3".to_string(),
+                ],
+                expected_value_try:    "70000.00".to_string(),
+                expected_value_settle: "40000.00".to_string(),
+            },
+            created_by: None,
+            created_at: "2026-05-10T12:00:00Z".to_string(),
+        }
+    }
+
+    /// `CaseConnection` round-trips through serde_json with correct field values
+    /// when `nodes` is non-empty and `next_offset` is `Some`.
+    #[test]
+    fn case_connection_serializes() {
+        let conn = CaseConnection {
+            nodes: vec![make_test_case("00000000-0000-0000-0000-000000000001")],
+            total_count: 5,
+            next_offset: Some(1),
+        };
+
+        let json_str = serde_json::to_string(&conn).expect("CaseConnection must serialize");
+        let decoded: CaseConnection =
+            serde_json::from_str(&json_str).expect("CaseConnection must deserialize");
+
+        assert_eq!(decoded.total_count, 5);
+        assert_eq!(decoded.next_offset, Some(1));
+        assert_eq!(decoded.nodes.len(), 1);
+    }
+
+    /// When `offset + nodes.len() == total_count`, `compute_next_offset` returns
+    /// `None`, which serializes as a JSON null in the response.
+    #[test]
+    fn case_connection_next_offset_at_end_is_none() {
+        // 3 total, offset = 1, 2 nodes → 1 + 2 = 3 == total → None.
+        assert_eq!(
+            compute_next_offset(1, 2, 3),
+            None,
+            "last page must produce None"
+        );
+
+        let conn = CaseConnection {
+            nodes: vec![
+                make_test_case("00000000-0000-0000-0000-000000000001"),
+                make_test_case("00000000-0000-0000-0000-000000000002"),
+            ],
+            total_count: 3,
+            next_offset: compute_next_offset(1, 2, 3),
+        };
+
+        let json_str = serde_json::to_string(&conn).expect("serialize");
+        let value: serde_json::Value = serde_json::from_str(&json_str).expect("parse");
+        assert!(
+            value["next_offset"].is_null(),
+            "next_offset must be null when page exhausts the result set; got: {:?}",
+            value["next_offset"]
+        );
+    }
+
+    /// When more rows remain beyond the current page, `compute_next_offset`
+    /// returns `Some(offset + nodes.len())`.
+    #[test]
+    fn case_connection_next_offset_mid_page() {
+        // 10 total, offset = 0, 3 nodes → 0 + 3 = 3 < 10 → Some(3).
+        assert_eq!(compute_next_offset(0, 3, 10), Some(3));
+        // 10 total, offset = 3, 3 nodes → 3 + 3 = 6 < 10 → Some(6).
+        assert_eq!(compute_next_offset(3, 3, 10), Some(6));
+        // Exact last page: offset = 8, 2 nodes → 8 + 2 = 10 == total → None.
+        assert_eq!(compute_next_offset(8, 2, 10), None);
+
+        let conn = CaseConnection {
+            nodes: vec![
+                make_test_case("00000000-0000-0000-0000-000000000001"),
+                make_test_case("00000000-0000-0000-0000-000000000002"),
+            ],
+            total_count: 10,
+            next_offset: compute_next_offset(0, 2, 10),
+        };
+
+        let json_str = serde_json::to_string(&conn).expect("serialize");
+        let value: serde_json::Value = serde_json::from_str(&json_str).expect("parse");
+        assert_eq!(
+            value["next_offset"].as_i64().unwrap_or(-1),
+            2,
+            "next_offset must equal offset + nodes.len() when more rows remain"
+        );
     }
 }
