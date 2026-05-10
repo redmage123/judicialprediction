@@ -63,6 +63,7 @@ INSTALLED_APPS = [
     "core",
     "operators",
     "tenant_settings",
+    "audit_log",
 ]
 
 MIDDLEWARE = [
