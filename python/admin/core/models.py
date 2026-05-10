@@ -61,6 +61,12 @@ class Case(models.Model):
     judge_name = models.TextField(blank=True, null=True)
     parties = models.JSONField(default=dict)
     claims = models.JSONField(default=list)
+    # S4.1 (JP-55): prediction persistence columns — nullable so pre-S4.2 rows stay valid.
+    # Shape validation is the api-gateway resolver's responsibility (S4.2), not Django's.
+    input_features = models.JSONField(null=True, blank=True)
+    prediction = models.JSONField(null=True, blank=True)
+    recommendation = models.JSONField(null=True, blank=True)
+    created_by = models.UUIDField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
