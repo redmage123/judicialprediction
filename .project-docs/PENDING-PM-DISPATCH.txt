@@ -15,7 +15,7 @@ ALREADY SET UP:
   - Type labels: type:adr, type:bug, type:story, type:tech-debt, type:research
   - Priority labels: priority:P0–P3
   - Sprint 1 cycle: "Sprint 1 — Foundation + Methodology Rollout" (2026-05-07 → 2026-05-21)
-  - Plane API token: 23d5e107893fb874191ff9e03597e2c8f7ed3333395b4d13010d7770d8e960ca (X-Api-Key header)
+  - Plane API token: <REDACTED — auto-rotated daily; source /opt/ai-elevate/credentials/plane.env> (X-Api-Key header)
   - GigForge website portfolio entry live at http://localhost:4091/portfolio/judicialpredict
   - RAG: spec + wireframes + kickoff ingested into gigforge/engineering collection
   - Sync cron running every 30min: /opt/ai-elevate/gigforge/projects/judicialpredict/jp-sync.sh (RAG ingest of changed docs + Plane mirror + KG snapshot)

@@ -5,7 +5,7 @@
 **Pre-existing issue:** The same 401 has been hitting other dispatch paths since at least 2026-05-05 (see `/var/log/openclaw/shared/scout-auto.log` — `gigforge-scout` cron has been failing the same way every 2h for 2+ days).
 
 **Fix required (before this dispatch can fire):**
-1. Repair the gateway auth bridge between `openclaw agent --agent ...` CLI and the local gateway at `127.0.0.1:18789`. The gateway expects `Authorization: Bearer b8f1afb652fe20adae78b3e2c2a31917f16d9738470733ea` per `~/.openclaw/openclaw.json:gateway.auth.token`, but the CLI is not sending it. Possible fixes:
+1. Repair the gateway auth bridge between `openclaw agent --agent ...` CLI and the local gateway at `127.0.0.1:18789`. The gateway expects `Authorization: Bearer <REDACTED-openclaw-gateway-auth-token>` per `~/.openclaw/openclaw.json:gateway.auth.token`, but the CLI is not sending it. Possible fixes:
    - Restart gateway with token explicitly set in env (`OPENCLAW_GATEWAY_AUTH_TOKEN`).
    - Reinstall openclaw CLI to a version that reads the gateway token from config correctly.
    - Patch the CLI to pass `Authorization: Bearer ${gateway.auth.token}` from openclaw.json.
