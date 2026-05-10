@@ -51,6 +51,14 @@ export function LoginForm({ nextUrl }: LoginFormProps) {
   }
 
   return (
+    <>
+      {/* Sprint-4 dev banner — remove in Sprint 5 when SAML/OIDC lands. */}
+      <div
+        role="status"
+        className="w-full max-w-sm rounded-md border border-yellow-400 bg-yellow-50 px-4 py-2 text-sm text-yellow-800"
+      >
+        Sprint 4: real password auth. Sprint 5: SAML/OIDC SSO.
+      </div>
     <Card className="w-full max-w-sm">
       <CardHeader>
         <CardTitle className="text-2xl font-bold tracking-tight">
@@ -109,5 +117,6 @@ export function LoginForm({ nextUrl }: LoginFormProps) {
         </form>
       </CardContent>
     </Card>
+    </>
   );
 }

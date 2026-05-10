@@ -1,13 +1,15 @@
 /**
- * Auth tests — S3.5
+ * Auth tests — S3.5 (updated S4.8)
  *
  * Covers:
  *  1. LoginForm renders required fields
- *  2. Happy path: successful login calls fetch + router.push
+ *  2. Happy path: login form POSTs to /api/auth/login (BFF proxy)
  *  3. Error path: 401 response shows inline error message
  *  4. Middleware: /case/new without cookie → 302 redirect to /login
  *  5. Middleware: /case/new with valid cookie → passes through
  *  6. a11y: login form passes axe-core gate
+ *  7. BFF proxy route: forwards to DJANGO_AUTH_URL/api/auth/login (S4.8)
+ *  8. Sprint-4 dev banner: renders the yellow info banner
  */
 
 import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
@@ -81,7 +83,9 @@ describe("LoginForm", () => {
     expect(screen.getByRole("button", { name: /sign in/i })).toBeTruthy();
   });
 
-  it("happy path: calls /api/auth/login and redirects on success", async () => {
+  it("happy path: form POSTs to /api/auth/login (BFF proxy) on submit", async () => {
+    // S4.8: the form still calls /api/auth/login — the BFF proxy forwards to
+    // Django internally.  From the form's perspective the endpoint is unchanged.
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue({
@@ -93,10 +97,10 @@ describe("LoginForm", () => {
     await renderForm();
 
     fireEvent.change(screen.getByLabelText(/email/i), {
-      target: { value: "dev@example.test" },
+      target: { value: "dev-tenant1@example.test" },
     });
     fireEvent.change(screen.getByLabelText(/password/i), {
-      target: { value: "dev-pass" },
+      target: { value: "tenant1-pw" },
     });
 
     await act(async () => {
@@ -115,12 +119,10 @@ describe("LoginForm", () => {
 
     // The fetch payload must contain the credentials.
     const fetchCall = vi.mocked(fetch).mock.calls[0];
-    expect(fetchCall[1]?.body).toContain("dev@example.test");
-    expect(fetchCall[1]?.body).toContain("dev-pass");
+    expect(fetchCall[1]?.body).toContain("dev-tenant1@example.test");
+    expect(fetchCall[1]?.body).toContain("tenant1-pw");
 
-    // Redirect-on-success is verified separately via E2E in S3.5 manual smoke
-    // and via the middleware test below; mocking router.push through
-    // dynamic-import + vi.mock proved flaky under vitest+jsdom.
+    // Redirect-on-success is verified via the middleware test and E2E smoke.
   });
 
   it("error path: shows inline error on 401 invalid_credentials", async () => {
@@ -211,5 +213,58 @@ describe("/login route — axe-core a11y gate", () => {
     const { container } = render(<LoginForm nextUrl="/" />);
     const results = await axe(container);
     expect(results).toHaveNoViolations();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// S4.8 — BFF proxy route + Sprint-4 dev banner
+// ---------------------------------------------------------------------------
+
+describe("S4.8 — BFF proxy and dev banner", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  async function renderForm() {
+    const { LoginForm } = await import("../app/login/login-form");
+    return render(<LoginForm nextUrl="/" />);
+  }
+
+  it("Sprint-4 dev banner is rendered in the login form", async () => {
+    await renderForm();
+    // The banner text is split across the requirement; match either half.
+    expect(screen.getByText(/sprint 4.*real password auth/i)).toBeTruthy();
+  });
+
+  it("BFF proxy login route forwards to DJANGO_AUTH_URL/api/auth/login", async () => {
+    // Import the route handler directly and mock global fetch.
+    // We verify the upstream URL that the BFF calls — this confirms the proxy
+    // wiring without requiring a live Django service.
+    const mockUpstream = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    );
+    vi.stubGlobal("fetch", mockUpstream);
+
+    // Use dynamic import so process.env is read at call time.
+    const mod = await import("../app/api/auth/login/route");
+    const req = new Request("http://localhost:3000/api/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "dev-tenant1@example.test", password: "tenant1-pw" }),
+    });
+
+    // NextRequest wraps the standard Request.
+    const { NextRequest } = await import("next/server");
+    await mod.POST(new NextRequest(req));
+
+    // The BFF must have called the Django endpoint.
+    expect(mockUpstream).toHaveBeenCalledWith(
+      expect.stringContaining("/api/auth/login"),
+      expect.objectContaining({ method: "POST" })
+    );
+    const upstreamUrl: string = mockUpstream.mock.calls[0][0] as string;
+    // Default DJANGO_AUTH_URL is http://localhost:8000 in test environment.
+    expect(upstreamUrl).toMatch(/localhost:8000\/api\/auth\/login/);
   });
 });

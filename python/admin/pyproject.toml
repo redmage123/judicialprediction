@@ -8,6 +8,10 @@ dependencies = [
     "django>=5.1,<6",
     "psycopg[binary]>=3.2,<4",
     "django-environ>=0.11",
+    # JWT signing for the login view (HS256, same secret as api-gateway).
+    "pyjwt>=2.8,<3",
+    # bcrypt hasher backend — required by BCryptSHA256PasswordHasher.
+    "bcrypt>=4.0,<5",
 ]
 
 [dependency-groups]

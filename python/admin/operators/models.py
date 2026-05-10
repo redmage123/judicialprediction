@@ -31,6 +31,8 @@ Sprint-4 follow-ups
 
 import uuid
 
+from django.contrib.auth.hashers import check_password as _check_password
+from django.contrib.auth.hashers import make_password as _make_password
 from django.db import models
 
 
@@ -47,6 +49,13 @@ class Operator(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     email = models.EmailField(unique=True, help_text="Must match the Django auth user email.")
+    # Bcrypt hash — set via set_password(); blank means no password provisioned.
+    password = models.CharField(
+        max_length=128,
+        blank=True,
+        default="",
+        help_text="Bcrypt hash.  Set via set_password(); blank = no login allowed.",
+    )
     # NULL for super operators (workspace-wide); required for admin/viewer.
     tenant_id = models.UUIDField(
         null=True,
@@ -84,3 +93,18 @@ class Operator(models.Model):
     @property
     def can_write(self) -> bool:
         return self.role in (self.ROLE_ADMIN, self.ROLE_SUPER)
+
+    # ------------------------------------------------------------------
+    # Password helpers — mirrors AbstractBaseUser API so callers are clear.
+    # The hash is stored on this model, NOT on Django's auth.User.
+    # ------------------------------------------------------------------
+
+    def set_password(self, raw_password: str) -> None:
+        """Hash *raw_password* via PASSWORD_HASHERS and store it."""
+        self.password = _make_password(raw_password)
+
+    def check_password(self, raw_password: str) -> bool:
+        """Return True if *raw_password* matches the stored hash."""
+        if not self.password:
+            return False
+        return _check_password(raw_password, self.password)

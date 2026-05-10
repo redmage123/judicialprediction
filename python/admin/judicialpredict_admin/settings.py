@@ -150,6 +150,20 @@ ATOMIC_REQUESTS = True
 # Auth
 # ---------------------------------------------------------------------------
 
+# OperatorAuthBackend authenticates against Operator.password (bcrypt).
+# ModelBackend is kept as fallback so Django's createsuperuser still works.
+AUTHENTICATION_BACKENDS = [
+    "operators.auth_backends.OperatorAuthBackend",
+    "django.contrib.auth.backends.ModelBackend",
+]
+
+# Bcrypt first — used by Operator.set_password() and check_password().
+# PBKDF2 kept as fallback so existing auth.User passwords still verify.
+PASSWORD_HASHERS = [
+    "django.contrib.auth.hashers.BCryptSHA256PasswordHasher",
+    "django.contrib.auth.hashers.PBKDF2PasswordHasher",
+]
+
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
     {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
