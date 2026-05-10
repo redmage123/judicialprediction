@@ -68,14 +68,24 @@ To unblock:
 
 ## Production schedule
 
+Daily cron at 04:00 UTC; court rotation by day-of-week (S4.11):
+
+| DOW    | Court  | Rationale                                                   |
+|--------|--------|-------------------------------------------------------------|
+| Mon    | tax    | tax has 13k opinions; biggest pool, hit it twice/week       |
+| Tue    | cafc   | US Federal Circuit (patent + IP cases — distinct posture)   |
+| Wed    | bia    | Board of Immigration Appeals                                |
+| Thu    | tax    | second tax day                                              |
+| Fri    | scotus | Supreme Court                                               |
+| Sat/Sun| tax    | absorb weekend slots into the largest pool                  |
+
 ```cron
-# Weekly Monday 04:00 UTC, court rotation by week-of-month:
-# w1 → tax, w2 → ny, w3 → scotus, w4 → cafc
-0 4 * * 1 /opt/jp/scripts/ingest-by-week.sh
+0 4 * * * /opt/ai-elevate/gigforge/projects/judicialpredict/scripts/courtlistener-daily.sh
 ```
 
-The week-rotation script lives at `scripts/ingest-by-week.sh` (Sprint-3 follow-up
-— for now, run manually by choosing the court).
+Override the auto-selected court for a manual run: `COURT=scotus ./scripts/courtlistener-daily.sh`.
+
+**Sprint-5 follow-up:** parallel multi-court if FLP allowlist drops the daily cap.
 
 ## Expected timings
 

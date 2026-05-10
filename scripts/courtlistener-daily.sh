@@ -12,7 +12,18 @@ set -uo pipefail
 
 JP=/opt/ai-elevate/gigforge/projects/judicialpredict
 LOG=/var/log/jp-courtlistener-daily.log
-COURT="${COURT:-tax}"
+
+# S4.11: rotate court by day-of-week to broaden jurisdictional coverage
+# without raising the daily-quota burn (still ~106 API calls per run).
+# DOW: 0=Sun 1=Mon 2=Tue 3=Wed 4=Thu 5=Fri 6=Sat.
+case "$(date -u +%w)" in
+    1|4) DEFAULT_COURT="tax" ;;     # Mon, Thu
+    2)   DEFAULT_COURT="cafc" ;;    # Tue (US Federal Circuit)
+    3)   DEFAULT_COURT="bia" ;;     # Wed (Bd. of Immigration Appeals)
+    5)   DEFAULT_COURT="scotus" ;;  # Fri
+    *)   DEFAULT_COURT="tax" ;;     # Sat, Sun → tax (lots of opinions; absorb the spillover)
+esac
+COURT="${COURT:-$DEFAULT_COURT}"
 TARGET="${TARGET:-100}"  # 100 hydrate + ~6 search pages = ~106 API calls, safe under the global 125/day cap
 
 # Source the API token from the credentials file (auto-rotation lives here).
