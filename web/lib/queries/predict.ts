@@ -177,3 +177,59 @@ export interface GetCaseData {
 export interface GetCaseVars {
   id: string;
 }
+
+// ---------------------------------------------------------------------------
+// S4.5: list query (fields kept minimal — only what the table view shows)
+// ---------------------------------------------------------------------------
+
+/** S4.5: paginated list of cases for the /cases page. */
+export const LIST_CASES = gql`
+  query ListCases($limit: Int, $offset: Int) {
+    listCases(limit: $limit, offset: $offset) {
+      nodes {
+        id
+        inputFeatures {
+          caseType
+          jurisdiction
+        }
+        prediction {
+          pWin
+        }
+        recommendation {
+          kind
+        }
+        createdAt
+        createdBy
+      }
+      totalCount
+      nextOffset
+    }
+  }
+`;
+
+/** Minimal case shape returned by the list query (no full prediction detail). */
+export interface CaseSummary {
+  id: string;
+  inputFeatures: Pick<PredictInput, "caseType" | "jurisdiction">;
+  prediction: Pick<PredictResult, "pWin">;
+  recommendation: Pick<RecommendationResult, "kind">;
+  createdAt: string;
+  createdBy: string | null;
+}
+
+/** Paginated connection returned by listCases. */
+export interface CaseConnection {
+  nodes: CaseSummary[];
+  totalCount: number;
+  /** Present when there is a next page; null when on the last page. */
+  nextOffset: number | null;
+}
+
+export interface ListCasesData {
+  listCases: CaseConnection;
+}
+
+export interface ListCasesVars {
+  limit?: number;
+  offset?: number;
+}

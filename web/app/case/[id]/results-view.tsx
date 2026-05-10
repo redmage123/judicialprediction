@@ -77,7 +77,7 @@ interface ResultsLayoutProps {
 }
 
 function ResultsLayout({ caseResult }: ResultsLayoutProps) {
-  const { prediction, recommendation } = caseResult;
+  const { id, prediction, recommendation } = caseResult;
 
   return (
     <main className="mx-auto max-w-3xl p-8 space-y-6">
@@ -160,6 +160,21 @@ function ResultsLayout({ caseResult }: ResultsLayoutProps) {
           </p>
         </CardContent>
       </Card>
+
+      {/* PDF memo download */}
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+        <a
+          href={`/api/case/${id}/memo.pdf`}
+          download
+          className="inline-flex items-center justify-center rounded-md border border-input bg-background px-4 py-2 text-sm font-medium shadow-sm hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+        >
+          Download memo (PDF)
+        </a>
+        <p className="text-xs text-muted-foreground">
+          PDF includes the audit trail and is signed by the gateway
+          model_version. Sprint-5 adds full statutory citations.
+        </p>
+      </div>
 
       {/* Demo limitations disclosure */}
       <p className="text-xs text-muted-foreground border-t pt-4">

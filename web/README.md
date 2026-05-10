@@ -70,6 +70,7 @@ session storage are all deferred to **Sprint 4 — Authentication hardening**.
 | `/login` | Server + client island | Dev login form (see Dev Login section above) |
 | `/case/new` | Server + client island | Case intake form; accepts 7 Tier-A/B feature inputs, calls `createCase` mutation via Apollo, persists the case server-side, and routes to `/case/<server-uuid>` on success. (S4.4: replaced `predictCaseOutcome` + sessionStorage path.) |
 | `/case/[id]` | **Full server component** | Results view for a persisted case. `page.tsx` fetches the case from api-gateway server-side (reads `jp_session` cookie, calls `case(id)` query), then passes it as a prop to the presentational `ResultsView`. No sessionStorage. Source of truth is the `cases` table in PostgreSQL. Empty state shown when case not found or wrong tenant. See S4.4 / JP-58. |
+| `/cases` | **Full server component** | Paginated list of all cases for the operator's tenant. Reads `?offset` query param (default 0, page size 20). Calls `listCases(limit, offset)` from api-gateway server-side (same direct-fetch + `jp_session` pattern as `/case/[id]`). Renders a table with date filed, case type, jurisdiction, P(win)%, recommendation badge, and a View link to `/case/[id]`. Pagination footer shows "Showing X–Y of N" with Previous/Next controls. Empty state with CTA to `/case/new`. See S4.5 / JP-59. |
 
 ### Dev credentials for manual smoke
 
@@ -79,6 +80,58 @@ Password: dev-pass
 ```
 
 Visit `/case/new` → middleware redirects to `/login` → submit dev creds → form is accessible.
+
+## Memo PDF (S4.6 / JP-60)
+
+### Strategy
+
+**Strategy B chosen for Sprint 4** — `@react-pdf/renderer` server-rendered PDF.
+
+| | Strategy A (Playwright) | Strategy B (@react-pdf/renderer) |
+|---|---|---|
+| Deploy size delta | +~100 MB (Chromium) | +~4 MB |
+| Layout source | Live /case/[id] HTML | Dedicated React-PDF tree |
+| Determinism | WYSIWYG | Yoga layout engine |
+| Sprint-4 fit | Poor (deploy weight) | **Chosen** |
+
+### Entry points
+
+| File | Purpose |
+|---|---|
+| `web/lib/memo/case-memo.tsx` | `CaseMemo` React-PDF component (Letter, 1 page) |
+| `web/app/api/case/[id]/memo.pdf/route.tsx` | `GET /api/case/:id/memo.pdf` — renders + returns PDF |
+| `web/app/case/[id]/results-view.tsx` | "Download memo (PDF)" anchor button |
+| `web/__tests__/case-memo.test.tsx` | 3 unit tests (Node env, @vitest-environment node) |
+
+### Usage
+
+The "Download memo (PDF)" button on `/case/:id` navigates to
+`/api/case/:id/memo.pdf`. The route reads the `jp_session` cookie, fetches
+the case from api-gateway, renders `CaseMemo` via `pdf().toBuffer()`, and
+returns the bytes with `content-type: application/pdf` and
+`content-disposition: attachment`.
+
+### Sprint-5 follow-ups
+
+- **Strategy A alternate**: Add `?print=1` branch to `/case/[id]/page.tsx`
+  with a print-styled variant; swap the API route for a Playwright headless
+  pass if pixel-perfect CSS parity with the live results view is required.
+- **Statutory citations**: Full legal-memo formatting with statute/case-law
+  footnotes (requires Sprint-5 legal-data pipeline).
+- **Multi-page memos**: Auto-paginate when reasoning bullets + statutory text
+  exceed one page.
+- **Operator email in footer**: Wire the user-profile query so the footer shows
+  the operator's email rather than the UUID.
+- **Expected damages in memo**: Display operator-supplied `expectedDamages`
+  once the Sprint-5 intake form accepts it.
+
+---
+
+### Sprint-5 follow-ups (from S4.5)
+
+- Client-side sort by P(win) and recommendation kind on the `/cases` table.
+- Filter by date range.
+- CSV export of the case list.
 
 ### Sprint-5 follow-ups (from S4.4)
 

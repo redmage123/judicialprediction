@@ -3,10 +3,10 @@ import { decodeJwt } from "jose";
 
 /**
  * Route patterns that require an authenticated session.
- * Sprint 3: /case/:path* is the only protected tree.
- * Sprint 4+ will add /dashboard, /admin, etc.
+ * Sprint 3: /case/:path*
+ * Sprint 4 (S4.5): /cases added.
  */
-const PROTECTED_PREFIXES = ["/case"];
+const PROTECTED_PREFIXES = ["/case", "/cases"];
 
 function isProtectedPath(pathname: string): boolean {
   return PROTECTED_PREFIXES.some(
@@ -61,5 +61,5 @@ export function middleware(request: NextRequest): NextResponse {
 }
 
 export const config = {
-  matcher: ["/case/:path*"],
+  matcher: ["/case/:path*", "/cases", "/cases/:path*"],
 };
