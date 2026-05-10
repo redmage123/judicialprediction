@@ -13,7 +13,7 @@ set -uo pipefail
 JP=/opt/ai-elevate/gigforge/projects/judicialpredict
 LOG=/var/log/jp-courtlistener-daily.log
 COURT="${COURT:-tax}"
-TARGET="${TARGET:-130}"  # slight overshoot so each day actually consumes the 125 quota
+TARGET="${TARGET:-100}"  # 100 hydrate + ~6 search pages = ~106 API calls, safe under the global 125/day cap
 
 # Source the API token from the credentials file (auto-rotation lives here).
 if [ ! -r /opt/ai-elevate/credentials/courtlistener.env ]; then

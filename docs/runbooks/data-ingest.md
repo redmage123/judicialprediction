@@ -34,7 +34,7 @@ all apply, the tightest wins:
 |---|---|---|
 | Per-minute | 5 / min on `/opinions/<id>/` and `/clusters/<id>/` | `429` body: `Rate limit exceeded: 5/min. Expected available in <N> seconds.` |
 | Per-hour | observed ~30/hr after sustained use | same |
-| Per-day | **125 / day on `/opinions/<id>/`** | `429` body: `Rate limit exceeded: 125/day. Expected available in 73641 seconds.` |
+| Per-day | **125 / day across the whole REST API** (search + opinions + clusters all share the budget) | `429` body: `Rate limit exceeded: 125/day. Expected available in 73641 seconds.` |
 
 The `/search/` endpoint has its own (more generous) limit and isn't subject
 to the 125/day cap. Use it for ID enumeration; only hit `/opinions/<id>/`
