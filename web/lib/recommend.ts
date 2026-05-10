@@ -1,3 +1,6 @@
+// Deprecated as of S4.4: results-view uses server-computed recommendation from createCase.
+// This file is kept for reference; Sprint 5 removes it.
+//
 // MIRROR of rust/decision-arith/src/recommend.rs. Sprint-3 wave-3 follow-up: replace with a
 // `recommend` GraphQL query so this duplication goes away. The Rust file is the source of truth.
 //

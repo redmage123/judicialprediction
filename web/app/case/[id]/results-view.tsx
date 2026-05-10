@@ -1,17 +1,11 @@
-"use client";
-
-// JP-44 (/case/[id] results view) — S3.3.
+// S4.4 (JP-58): converted from a stateful client island (sessionStorage reader)
+// to a pure presentational component.  Data is fetched server-side in page.tsx
+// and passed here as a prop.  No sessionStorage, no useEffect, no useQuery.
 //
-// Reads the prediction stashed in sessionStorage under "case:<uuid>" by the S3.2 intake form
-// (app/case/new/intake-form.tsx), computes a settle/try/borderline recommendation via
-// lib/recommend.ts (TypeScript mirror of rust/decision-arith/src/recommend.rs), and
-// renders the result using shadcn/ui Card + Badge components.
-//
-// Sprint-3 wave-3 follow-up: replace lib/recommend.ts with a `recommend` GraphQL query
-// that calls Rust decision-arith over the wire, so the math lives in one place.
-// The Rust file (rust/decision-arith/src/recommend.rs) is the source of truth for thresholds.
+// lib/recommend.ts is no longer called from this component — the server-computed
+// recommendation from createCase / case(id) is used directly.
+// See lib/recommend.ts deprecation notice.
 
-import { useEffect, useState } from "react";
 import Link from "next/link";
 import {
   Card,
@@ -21,42 +15,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { recommend, type Recommendation } from "@/lib/recommend";
-
-// Sprint-3 placeholder litigation cost — Sprint-4 will wire the real cost-engine.
-const DEMO_LITIGATION_COST = 50_000;
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-/**
- * Shape of the JSON stashed by the S3.2 intake form under `case:<uuid>` in sessionStorage.
- *
- * `expectedDamages` is set by the intake form from the user's damages input. If absent
- * (e.g. form was submitted before S3.2 landed), a conservative demo default is used.
- */
-interface StoredResult {
-  pWin: number;
-  ciLower: number;
-  ciUpper: number;
-  coverage: number;
-  modelVersion: string;
-  predictedAtUnix: number;
-  /** Optional: only present if the intake form stashed it (S3.2+). */
-  expectedDamages?: number;
-}
-
-function isStoredResult(v: unknown): v is StoredResult {
-  if (!v || typeof v !== "object") return false;
-  const o = v as Record<string, unknown>;
-  return (
-    typeof o.pWin === "number" &&
-    typeof o.ciLower === "number" &&
-    typeof o.ciUpper === "number" &&
-    typeof o.modelVersion === "string"
-  );
-}
+import type { CaseResult } from "@/lib/queries/predict";
 
 // ---------------------------------------------------------------------------
 // Formatting helpers
@@ -66,16 +25,16 @@ function fmtPercent(p: number): string {
   return `${Math.round(p * 100)}%`;
 }
 
-function fmtDollar(n: number): string {
+function fmtDollar(s: string): string {
   return new Intl.NumberFormat("en-US", {
     style: "currency",
     currency: "USD",
     maximumFractionDigits: 0,
-  }).format(n);
+  }).format(parseFloat(s));
 }
 
 function badgeVariantForKind(
-  kind: Recommendation["kind"]
+  kind: string
 ): "default" | "secondary" | "warning" {
   if (kind === "Try") return "default";
   if (kind === "Settle") return "secondary";
@@ -83,7 +42,7 @@ function badgeVariantForKind(
 }
 
 // ---------------------------------------------------------------------------
-// Empty state — missing or expired sessionStorage entry
+// Empty state — case not found or wrong tenant
 // ---------------------------------------------------------------------------
 
 function EmptyState() {
@@ -110,26 +69,15 @@ function EmptyState() {
 }
 
 // ---------------------------------------------------------------------------
-// Results layout — shown when sessionStorage contains valid prediction data
+// Results layout — rendered when a valid Case is available
 // ---------------------------------------------------------------------------
 
 interface ResultsLayoutProps {
-  stored: StoredResult;
+  caseResult: CaseResult;
 }
 
-function ResultsLayout({ stored }: ResultsLayoutProps) {
-  // expectedDamages: from intake form if present; $250,000 demo default otherwise.
-  const expectedDamages = stored.expectedDamages ?? 250_000;
-
-  const rec = recommend(
-    {
-      pWin: stored.pWin,
-      ciLower: stored.ciLower,
-      ciUpper: stored.ciUpper,
-      expectedDamages,
-    },
-    DEMO_LITIGATION_COST,
-  );
+function ResultsLayout({ caseResult }: ResultsLayoutProps) {
+  const { prediction, recommendation } = caseResult;
 
   return (
     <main className="mx-auto max-w-3xl p-8 space-y-6">
@@ -141,31 +89,33 @@ function ResultsLayout({ stored }: ResultsLayoutProps) {
           <CardTitle>Outcome Probability</CardTitle>
           <CardDescription>
             Model:{" "}
-            <span className="font-mono text-xs">{stored.modelVersion}</span>
+            <span className="font-mono text-xs">{prediction.modelVersion}</span>
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-1">
           <p
             className="text-5xl font-extrabold tabular-nums"
-            aria-label={`P win ${fmtPercent(stored.pWin)}`}
+            aria-label={`P win ${fmtPercent(prediction.pWin)}`}
           >
-            {fmtPercent(stored.pWin)}
+            {fmtPercent(prediction.pWin)}
           </p>
           <p className="text-sm text-muted-foreground">
             90% CI{" "}
             <span className="font-mono">
-              [{stored.ciLower.toFixed(2)}, {stored.ciUpper.toFixed(2)}]
+              [{prediction.ciLower.toFixed(2)}, {prediction.ciUpper.toFixed(2)}]
             </span>
           </p>
         </CardContent>
       </Card>
 
-      {/* Card #2 — Recommendation with 3 reasoning bullets */}
+      {/* Card #2 — Recommendation with server-computed reasoning bullets */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-3">
             Recommendation
-            <Badge variant={badgeVariantForKind(rec.kind)}>{rec.kind}</Badge>
+            <Badge variant={badgeVariantForKind(recommendation.kind)}>
+              {recommendation.kind}
+            </Badge>
           </CardTitle>
         </CardHeader>
         <CardContent>
@@ -173,7 +123,7 @@ function ResultsLayout({ stored }: ResultsLayoutProps) {
             className="space-y-2 list-disc list-inside text-sm"
             aria-label="Reasoning"
           >
-            {rec.bullets.map((bullet, i) => (
+            {recommendation.rationaleBullets.map((bullet, i) => (
               <li key={i}>{bullet}</li>
             ))}
           </ul>
@@ -192,7 +142,7 @@ function ResultsLayout({ stored }: ResultsLayoutProps) {
                 Expected value at trial
               </p>
               <p className="text-2xl font-bold tabular-nums">
-                {fmtDollar(rec.expectedValueTry)}
+                {fmtDollar(recommendation.expectedValueTry)}
               </p>
             </div>
             <div>
@@ -200,7 +150,7 @@ function ResultsLayout({ stored }: ResultsLayoutProps) {
                 Expected value at settlement
               </p>
               <p className="text-2xl font-bold tabular-nums">
-                {fmtDollar(rec.expectedValueSettle)}
+                {fmtDollar(recommendation.expectedValueSettle)}
               </p>
             </div>
           </div>
@@ -214,47 +164,22 @@ function ResultsLayout({ stored }: ResultsLayoutProps) {
       {/* Demo limitations disclosure */}
       <p className="text-xs text-muted-foreground border-t pt-4">
         <strong>Demo limitations:</strong> Settlement value uses a 40% damages
-        anchor for Sprint 3; cost-engine integration and real BATNA modelling
-        come in Sprint 4.
+        anchor; cost-engine integration and real BATNA modelling come in
+        Sprint 5.
       </p>
     </main>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Exported client island — server component page.tsx renders this directly
+// Exported component — page.tsx passes the server-fetched Case (or null)
 // ---------------------------------------------------------------------------
 
 interface ResultsViewProps {
-  caseId: string;
+  caseResult: CaseResult | null;
 }
 
-type ViewState = "loading" | "empty" | StoredResult;
-
-export function ResultsView({ caseId }: ResultsViewProps) {
-  const [state, setState] = useState<ViewState>("loading");
-
-  useEffect(() => {
-    const key = `case:${caseId}`;
-    try {
-      const raw = sessionStorage.getItem(key);
-      if (!raw) {
-        setState("empty");
-        return;
-      }
-      const parsed: unknown = JSON.parse(raw);
-      if (isStoredResult(parsed)) {
-        setState(parsed);
-      } else {
-        setState("empty");
-      }
-    } catch {
-      // Malformed JSON or missing sessionStorage access — show empty state.
-      setState("empty");
-    }
-  }, [caseId]);
-
-  if (state === "loading") return null;
-  if (state === "empty") return <EmptyState />;
-  return <ResultsLayout stored={state} />;
+export function ResultsView({ caseResult }: ResultsViewProps) {
+  if (!caseResult) return <EmptyState />;
+  return <ResultsLayout caseResult={caseResult} />;
 }

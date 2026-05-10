@@ -379,6 +379,143 @@ impl Query {
         let next_offset = compute_next_offset(offset, nodes.len(), total_count);
         Ok(CaseConnection { nodes, total_count, next_offset })
     }
+
+    /// Look up a single persisted case by UUID, scoped to the current tenant.
+    ///
+    /// Returns `null` if the case does not exist or belongs to a different
+    /// tenant — RLS and the explicit `tenant_id = $2` WHERE clause both
+    /// enforce isolation (belt-and-suspenders, mirroring listCases).
+    ///
+    /// Returns a GraphQL error if:
+    /// - The cases pool is unavailable (`DATABASE_URL` not set).
+    /// - The supplied `id` is not a valid UUID v4.
+    /// - A jsonb column is NULL (legacy row predating S4.1).
+    #[graphql(name = "case")]
+    async fn get_case(
+        &self,
+        ctx: &Context<'_>,
+        id: async_graphql::ID,
+    ) -> async_graphql::Result<Option<crate::graphql_predict::Case>> {
+        use async_graphql::Json;
+        use crate::graphql_predict::{Case, PredictInput, PredictResult, RecommendationDto};
+        use sqlx::Row as _;
+
+        let TenantId(tenant_id) = *ctx
+            .data::<TenantId>()
+            .map_err(|_| async_graphql::Error::new("missing tenant id"))?;
+
+        let case_uuid = Uuid::parse_str(id.as_str())
+            .map_err(|_| async_graphql::Error::new("invalid case id: must be a UUID v4"))?;
+
+        let pool = ctx
+            .data::<Option<Arc<PgPool>>>()
+            .map_err(|_| async_graphql::Error::new("cases store unavailable"))?
+            .as_ref()
+            .ok_or_else(|| {
+                async_graphql::Error::new(
+                    "cases store not configured (DATABASE_URL missing)",
+                )
+            })?;
+
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("cases tx begin: {e}")))?;
+
+        // SET LOCAL so the RLS policy is satisfied for jp_app role.
+        sqlx::query(&format!(
+            "SET LOCAL app.current_tenant_id = '{tenant_id}'"
+        ))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| async_graphql::Error::new(format!("SET LOCAL failed: {e}")))?;
+
+        let row_opt = sqlx::query(
+            r#"
+            SELECT id,
+                   tenant_id,
+                   input_features,
+                   prediction,
+                   recommendation,
+                   created_by,
+                   created_at::text AS created_at_s
+            FROM   cases
+            WHERE  id = $1
+              AND  tenant_id = $2
+            "#,
+        )
+        .bind(case_uuid)
+        .bind(tenant_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| async_graphql::Error::new(format!("case query failed: {e}")))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("cases tx commit: {e}")))?;
+
+        let Some(row) = row_opt else {
+            return Ok(None);
+        };
+
+        let row_id: Uuid = row
+            .try_get("id")
+            .map_err(|e| async_graphql::Error::new(format!("row.id: {e}")))?;
+        let tenant_id_col: Uuid = row
+            .try_get("tenant_id")
+            .map_err(|e| async_graphql::Error::new(format!("row.tenant_id: {e}")))?;
+        let created_by: Option<Uuid> = row
+            .try_get("created_by")
+            .map_err(|e| async_graphql::Error::new(format!("row.created_by: {e}")))?;
+        let created_at: String = row
+            .try_get("created_at_s")
+            .map_err(|e| async_graphql::Error::new(format!("row.created_at: {e}")))?;
+
+        let input_features_val: serde_json::Value = row
+            .try_get("input_features")
+            .map_err(|e| async_graphql::Error::new(format!(
+                "case {row_id}: input_features is NULL (legacy row): {e}"
+            )))?;
+        let prediction_val: serde_json::Value = row
+            .try_get("prediction")
+            .map_err(|e| async_graphql::Error::new(format!(
+                "case {row_id}: prediction is NULL (legacy row): {e}"
+            )))?;
+        let recommendation_val: serde_json::Value = row
+            .try_get("recommendation")
+            .map_err(|e| async_graphql::Error::new(format!(
+                "case {row_id}: recommendation is NULL (legacy row): {e}"
+            )))?;
+
+        let input_features: PredictInput =
+            serde_json::from_value(input_features_val).map_err(|e| {
+                async_graphql::Error::new(format!(
+                    "case {row_id}: input_features parse error: {e}"
+                ))
+            })?;
+        let prediction: PredictResult =
+            serde_json::from_value(prediction_val).map_err(|e| {
+                async_graphql::Error::new(format!(
+                    "case {row_id}: prediction parse error: {e}"
+                ))
+            })?;
+        let recommendation: RecommendationDto =
+            serde_json::from_value(recommendation_val).map_err(|e| {
+                async_graphql::Error::new(format!(
+                    "case {row_id}: recommendation parse error: {e}"
+                ))
+            })?;
+
+        Ok(Some(Case {
+            id:             async_graphql::ID::from(row_id.to_string()),
+            tenant_id:      async_graphql::ID::from(tenant_id_col.to_string()),
+            input_features: Json(input_features),
+            prediction,
+            recommendation,
+            created_by:     created_by.map(|u| async_graphql::ID::from(u.to_string())),
+            created_at,
+        }))
+    }
 }
 
 // ---------------------------------------------------------------------------

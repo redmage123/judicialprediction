@@ -1,13 +1,18 @@
 /**
- * case-new tests — S3.2
+ * case-new tests — S3.2 / updated S4.4 (JP-58)
  *
  * Covers:
  *  1. All 7 fields render with accessible labels
- *  2. Happy path: mutation resolves, router.push called with /case/<uuid>
+ *  2. Happy path: createCase resolves, router.push called with /case/<server-uuid>
  *  3. Validation: out-of-range value prevents submit and shows inline error
  *  4. GraphQL error path: inline alert, no redirect
  *  5. Network error path: generic alert, no redirect
  *  6. axe-core a11y gate on the form
+ *
+ * S4.4 changes:
+ *  - Mock now returns createCase (not predictCaseOutcome)
+ *  - Server UUID is used directly (no sessionStorage, no crypto.randomUUID)
+ *  - routeArg must equal /case/<server-uuid> exactly
  */
 
 import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
@@ -70,6 +75,40 @@ function fillAllFields() {
   // selects already have default values ("civil" / "us-federal"), so no fireEvent needed
 }
 
+// Fixed server UUID returned by the mocked createCase mutation.
+const SERVER_CASE_UUID = "11111111-2222-3333-4444-555555555555";
+
+// Minimal createCase response fixture.
+const MOCK_CASE_RESULT = {
+  id: SERVER_CASE_UUID,
+  tenantId: "00000000-0000-0000-0000-000000000001",
+  inputFeatures: {
+    judgeSeverity: 0.65,
+    attorneyWinRate: 0.72,
+    ideologyDistance: 0.41,
+    materialityScore: 0.88,
+    proceduralMotionCount: 3,
+    caseType: "civil",
+    jurisdiction: "us-federal",
+  },
+  prediction: {
+    pWin: 0.74,
+    ciLower: 0.62,
+    ciUpper: 0.86,
+    coverage: 0.95,
+    modelVersion: "tier-ab-v1.0",
+    predictedAtUnix: 1715000000,
+  },
+  recommendation: {
+    kind: "Try",
+    rationaleBullets: ["bullet 1", "bullet 2", "bullet 3"],
+    expectedValueTry: "24000.00",
+    expectedValueSettle: "100000.00",
+  },
+  createdBy: "00000000-0000-0000-0000-000000000002",
+  createdAt: "2026-05-10T12:00:00Z",
+};
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -90,21 +129,12 @@ describe("IntakeForm — field rendering", () => {
   });
 });
 
-describe("IntakeForm — happy path", () => {
+describe("IntakeForm — happy path (S4.4: createCase + server UUID)", () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it("calls the mutation and routes to /case/<uuid> on success", async () => {
+  it("calls createCase and routes to /case/<server-uuid> on success", async () => {
     mockMutate.mockResolvedValue({
-      data: {
-        predictCaseOutcome: {
-          pWin: 0.74,
-          ciLower: 0.62,
-          ciUpper: 0.86,
-          coverage: 0.95,
-          modelVersion: "tier-ab-v1.0",
-          predictedAtUnix: 1715000000,
-        },
-      },
+      data: { createCase: MOCK_CASE_RESULT },
       errors: undefined,
     });
 
@@ -119,8 +149,8 @@ describe("IntakeForm — happy path", () => {
       expect(mockMutate).toHaveBeenCalledOnce();
     });
 
-    const routeArg: string = mockRouterPush.mock.calls[0]?.[0] ?? "";
-    expect(routeArg).toMatch(/^\/case\/[0-9a-f-]{36}$/);
+    // The route must use the server UUID directly — no crypto.randomUUID().
+    expect(mockRouterPush).toHaveBeenCalledWith(`/case/${SERVER_CASE_UUID}`);
   });
 });
 

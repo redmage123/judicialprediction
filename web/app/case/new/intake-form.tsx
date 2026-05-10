@@ -1,10 +1,7 @@
 "use client";
 
-/**
- * Sprint-3 follow-up: persist cases server-side via api-gateway when the
- * createCase mutation lands (JP-??); sessionStorage is a temporary stand-in
- * so the /case/[id] results view (S3.3) can read the prediction data.
- */
+// Sprint-3 follow-up: replaced sessionStorage + client UUID with createCase mutation
+// that persists the case server-side and returns a real server UUID (S4.4 / JP-58).
 
 import { useState, type FormEvent, type ChangeEvent } from "react";
 import { useRouter } from "next/navigation";
@@ -21,10 +18,10 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 import {
-  PREDICT_CASE_OUTCOME,
+  CREATE_CASE,
   type PredictInput,
-  type PredictCaseOutcomeData,
-  type PredictCaseOutcomeVars,
+  type CreateCaseData,
+  type CreateCaseVars,
 } from "@/lib/queries/predict";
 import { CASE_TYPES, type CaseType } from "@/lib/case-types";
 import { JURISDICTIONS, type Jurisdiction } from "@/lib/jurisdictions";
@@ -99,10 +96,10 @@ export function IntakeForm() {
   >({});
   const [submitError, setSubmitError] = useState<string | null>(null);
 
-  const [predictCase, { loading }] = useMutation<
-    PredictCaseOutcomeData,
-    PredictCaseOutcomeVars
-  >(PREDICT_CASE_OUTCOME);
+  const [createCase, { loading }] = useMutation<
+    CreateCaseData,
+    CreateCaseVars
+  >(CREATE_CASE);
 
   function setNumericField(name: keyof FormState) {
     return (e: ChangeEvent<HTMLInputElement>) => {
@@ -144,7 +141,7 @@ export function IntakeForm() {
     };
 
     try {
-      const result = await predictCase({ variables: { input } });
+      const result = await createCase({ variables: { input } });
 
       if (result.error || !result.data) {
         setSubmitError(
@@ -153,12 +150,8 @@ export function IntakeForm() {
         return;
       }
 
-      // Stash result client-side until api-gateway persists cases (Sprint 4).
-      const id = crypto.randomUUID();
-      sessionStorage.setItem(
-        `case:${id}`,
-        JSON.stringify(result.data.predictCaseOutcome)
-      );
+      // S4.4: use the server-assigned UUID from the persisted Case row.
+      const { id } = result.data.createCase;
       router.push(`/case/${id}`);
     } catch {
       setSubmitError(

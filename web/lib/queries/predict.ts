@@ -3,7 +3,7 @@ import type { CaseType } from "@/lib/case-types";
 import type { Jurisdiction } from "@/lib/jurisdictions";
 
 // ---------------------------------------------------------------------------
-// GraphQL mutation
+// GraphQL mutations
 // ---------------------------------------------------------------------------
 
 export const PREDICT_CASE_OUTCOME = gql`
@@ -19,11 +19,85 @@ export const PREDICT_CASE_OUTCOME = gql`
   }
 `;
 
+/** S4.4: create + persist a case, returning the full Case with server UUID. */
+export const CREATE_CASE = gql`
+  mutation CreateCase($input: PredictInput!) {
+    createCase(input: $input) {
+      id
+      tenantId
+      inputFeatures {
+        judgeSeverity
+        attorneyWinRate
+        ideologyDistance
+        materialityScore
+        proceduralMotionCount
+        caseType
+        jurisdiction
+      }
+      prediction {
+        pWin
+        ciLower
+        ciUpper
+        coverage
+        modelVersion
+        predictedAtUnix
+      }
+      recommendation {
+        kind
+        rationaleBullets
+        expectedValueTry
+        expectedValueSettle
+      }
+      createdBy
+      createdAt
+    }
+  }
+`;
+
+// ---------------------------------------------------------------------------
+// GraphQL query
+// ---------------------------------------------------------------------------
+
+/** S4.4: load a single persisted case by server UUID, scoped to the caller's tenant. */
+export const GET_CASE = gql`
+  query GetCase($id: ID!) {
+    case(id: $id) {
+      id
+      tenantId
+      inputFeatures {
+        judgeSeverity
+        attorneyWinRate
+        ideologyDistance
+        materialityScore
+        proceduralMotionCount
+        caseType
+        jurisdiction
+      }
+      prediction {
+        pWin
+        ciLower
+        ciUpper
+        coverage
+        modelVersion
+        predictedAtUnix
+      }
+      recommendation {
+        kind
+        rationaleBullets
+        expectedValueTry
+        expectedValueSettle
+      }
+      createdBy
+      createdAt
+    }
+  }
+`;
+
 // ---------------------------------------------------------------------------
 // TypeScript types mirroring the GraphQL schema
 // ---------------------------------------------------------------------------
 
-/** Input to the predictCaseOutcome mutation (Tier-A/B features only). */
+/** Input to the predictCaseOutcome / createCase mutations (Tier-A/B features only). */
 export interface PredictInput {
   /** Severity score for the assigned judge [0, 1]. */
   judgeSeverity: number;
@@ -57,10 +131,49 @@ export interface PredictResult {
   predictedAtUnix: number;
 }
 
+/** Server-computed recommendation from decision-arith. */
+export interface RecommendationResult {
+  /** "Try" | "Settle" | "Borderline" */
+  kind: string;
+  /** Three deterministic reasoning bullets. */
+  rationaleBullets: string[];
+  /** Expected value of trial as a decimal string (e.g. "-20000.00"). */
+  expectedValueTry: string;
+  /** Expected value of settlement as a decimal string (e.g. "40000.00"). */
+  expectedValueSettle: string;
+}
+
+/** A persisted case returned by createCase or the case(id) query. */
+export interface CaseResult {
+  id: string;
+  tenantId: string;
+  inputFeatures: PredictInput;
+  prediction: PredictResult;
+  recommendation: RecommendationResult;
+  createdBy: string | null;
+  createdAt: string;
+}
+
 export interface PredictCaseOutcomeData {
   predictCaseOutcome: PredictResult;
 }
 
 export interface PredictCaseOutcomeVars {
   input: PredictInput;
+}
+
+export interface CreateCaseData {
+  createCase: CaseResult;
+}
+
+export interface CreateCaseVars {
+  input: PredictInput;
+}
+
+export interface GetCaseData {
+  case: CaseResult | null;
+}
+
+export interface GetCaseVars {
+  id: string;
 }

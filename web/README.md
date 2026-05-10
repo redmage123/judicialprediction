@@ -68,8 +68,8 @@ session storage are all deferred to **Sprint 4 — Authentication hardening**.
 |---|---|---|
 | `/` | Server | Health-check card — calls `api-gateway /healthz` and displays status |
 | `/login` | Server + client island | Dev login form (see Dev Login section above) |
-| `/case/new` | Server + client island | Case intake form; accepts 7 Tier-A/B feature inputs, calls `predictCaseOutcome` mutation via Apollo, and routes to `/case/<uuid>` on success |
-| `/case/[id]` | Server + client island | Results view for a submitted case. Reads the prediction stashed in `sessionStorage` by the intake form, computes a settle/try/borderline recommendation via `lib/recommend.ts` (TypeScript port of `rust/decision-arith/src/recommend.rs`), and renders P(win), 90% CI, expected-value comparison, and 3 reasoning bullets. Empty state shown when session data is absent. See S3.3 / JP-44. |
+| `/case/new` | Server + client island | Case intake form; accepts 7 Tier-A/B feature inputs, calls `createCase` mutation via Apollo, persists the case server-side, and routes to `/case/<server-uuid>` on success. (S4.4: replaced `predictCaseOutcome` + sessionStorage path.) |
+| `/case/[id]` | **Full server component** | Results view for a persisted case. `page.tsx` fetches the case from api-gateway server-side (reads `jp_session` cookie, calls `case(id)` query), then passes it as a prop to the presentational `ResultsView`. No sessionStorage. Source of truth is the `cases` table in PostgreSQL. Empty state shown when case not found or wrong tenant. See S4.4 / JP-58. |
 
 ### Dev credentials for manual smoke
 
@@ -79,6 +79,12 @@ Password: dev-pass
 ```
 
 Visit `/case/new` → middleware redirects to `/login` → submit dev creds → form is accessible.
+
+### Sprint-5 follow-ups (from S4.4)
+
+- Delete `lib/recommend.ts` — the client-side TypeScript port of `rust/decision-arith` is now dead code for the results view; the server-computed recommendation is used directly.
+- Accept `expectedDamages` in the `createCase` input once the cost-engine is wired (sprint §5.4).
+- Widen the a11y gate from `serious/critical` → all impacts.
 
 ---
 
