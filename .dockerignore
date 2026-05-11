@@ -1,0 +1,10 @@
+rust/target/
+rust/**/target/
+python/.venv/
+python/**/__pycache__/
+python/**/.pytest_cache/
+web/node_modules/
+web/.next/
+.git/
+.idea/
+.vscode/
