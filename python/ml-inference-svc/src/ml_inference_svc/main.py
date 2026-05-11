@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import time
+from contextlib import asynccontextmanager
 from typing import Any, Optional
 
 import uvicorn
@@ -21,12 +22,23 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from ml_inference_svc import audit_recorder
+from ml_inference_svc.grpc_server import build_grpc_server
 from ml_inference_svc.predict import ALLOWLIST_FEATURES, predict_case_outcome
+
+
+@asynccontextmanager
+async def _lifespan(application: FastAPI):  # noqa: ARG001
+    """Start gRPC server on startup; stop it gracefully on shutdown."""
+    grpc_server = await build_grpc_server()
+    yield
+    await grpc_server.stop(grace=5)
+
 
 app = FastAPI(
     title="JudicialPredict ML Inference Service",
     version="0.2.0",
     description="Python ML plane — case-outcome predictions, SHAP, conformal intervals.",
+    lifespan=_lifespan,
 )
 
 

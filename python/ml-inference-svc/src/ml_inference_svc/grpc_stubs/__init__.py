@@ -4,12 +4,37 @@
 # inference.proto      SHA256: 0e11b9f3c0fcb9aed3ffef49abcec3c6c64bda59e90ca1adde195860e705d615
 
 # Re-export generated modules at short names for ergonomic imports:
-#   from ml_inference_svc.grpc_stubs import inference_pb2, feature_store_pb2
+#   from ml_inference_svc.grpc_stubs import inference_pb2, inference_pb2_grpc
 from ml_inference_svc.grpc_stubs.judicialpredict.data_plane.feature_store.v1 import (
     feature_store_pb2,
 )
 from ml_inference_svc.grpc_stubs.judicialpredict.ml_plane.inference.v1 import (
     inference_pb2,
+    inference_pb2_grpc,
 )
 
-__all__ = ["feature_store_pb2", "inference_pb2"]
+# Re-export service classes and registration function for convenience.
+InferenceServiceStub = inference_pb2_grpc.InferenceServiceStub
+InferenceServiceServicer = inference_pb2_grpc.InferenceServiceServicer
+add_InferenceServiceServicer_to_server = inference_pb2_grpc.add_InferenceServiceServicer_to_server
+
+# Re-export request/response message classes.
+PredictCaseOutcomeRequest = inference_pb2.PredictCaseOutcomeRequest
+PredictCaseOutcomeResponse = inference_pb2.PredictCaseOutcomeResponse
+ConformalInterval = inference_pb2.ConformalInterval
+ShapValue = inference_pb2.ShapValue
+ModelVariant = inference_pb2.ModelVariant
+
+__all__ = [
+    "feature_store_pb2",
+    "inference_pb2",
+    "inference_pb2_grpc",
+    "InferenceServiceStub",
+    "InferenceServiceServicer",
+    "add_InferenceServiceServicer_to_server",
+    "PredictCaseOutcomeRequest",
+    "PredictCaseOutcomeResponse",
+    "ConformalInterval",
+    "ShapValue",
+    "ModelVariant",
+]

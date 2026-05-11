@@ -3,7 +3,7 @@
 import grpc
 import warnings
 
-from judicialpredict.ml_plane.inference.v1 import inference_pb2 as judicialpredict_dot_ml__plane_dot_inference_dot_v1_dot_inference__pb2
+from ml_inference_svc.grpc_stubs.judicialpredict.ml_plane.inference.v1 import inference_pb2 as judicialpredict_dot_ml__plane_dot_inference_dot_v1_dot_inference__pb2
 
 GRPC_GENERATED_VERSION = '1.80.0'
 GRPC_VERSION = grpc.__version__
