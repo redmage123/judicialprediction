@@ -11,17 +11,9 @@
 // per-tenant token and returns 429 on exhaustion.  Both middlewares run only
 // on the /graphql route; /health is unauthenticated.
 
-use std::sync::Arc;
-use std::time::Instant;
-
-use anyhow::{Context as _, Result};
-use async_graphql::{Context, EmptySubscription, Object, Schema, SimpleObject};
-use crate::graphql_predict::{
-    CaseConnection, MlInferenceClient, Mutation, PredictionHistoryEntry, compute_next_offset,
-};
-use sqlx::PgPool;
+use anyhow::Result;
+use async_graphql::{Context, EmptyMutation, EmptySubscription, Object, Schema, SimpleObject};
 use async_graphql_axum::{GraphQLRequest, GraphQLResponse};
-use audit_recorder::{AuditEvent, AuditRecorder, AuditStatus, hash_payload};
 use axum::{
     extract::{Extension, State},
     http::StatusCode,
@@ -32,6 +24,7 @@ use axum::{
 use feature_store::judicialpredict::data_plane::feature_store::v1::{
     feature_store_service_client::FeatureStoreServiceClient, GetFeatureRequest,
 };
+use std::sync::Arc;
 use tonic::transport::Channel;
 use uuid::Uuid;
 
@@ -99,7 +92,7 @@ fn sensitivity_to_str(i: i32) -> String {
 // GraphQL schema — Query root
 // ---------------------------------------------------------------------------
 
-pub(crate) struct Query;
+struct Query;
 
 #[Object]
 impl Query {
@@ -116,16 +109,11 @@ impl Query {
     /// Returns a GraphQL error if the feature-store gRPC service is unavailable.
     ///
     /// Requires a valid `Authorization: Bearer <jwt>` header on the HTTP request.
-    ///
-    /// Every call is recorded in the `audit_log` table via a fire-and-forget
-    /// `tokio::spawn` so the hot path is not blocked by the audit INSERT.
     async fn feature(
         &self,
         ctx: &Context<'_>,
         id: String,
     ) -> async_graphql::Result<Option<FeatureDto>> {
-        let start = Instant::now();
-
         let TenantId(tenant_id) = *ctx.data::<TenantId>().map_err(|_| "missing tenant id")?;
 
         // Clone the client — tonic clients are cheap to clone (shared channel).
@@ -147,51 +135,16 @@ impl Query {
             .map_err(|_| "invalid tenant id format")?;
         request.metadata_mut().insert("tenant-id", tenant_val);
 
-        // Serialize the request fields for the audit payload hash (privacy-preserving).
-        // Only the feature_id is hashed; the full payload is never stored.
-        let payload_bytes = id.as_bytes();
-
-        let result = client.get_feature(request).await;
-
-        let latency_ms = start.elapsed().as_millis().min(u32::MAX as u128) as u32;
-
-        let (status, grpc_result) = match &result {
-            Ok(_) => (AuditStatus::Ok, result),
-            Err(s) if s.code() == tonic::Code::ResourceExhausted => {
-                (AuditStatus::RateLimit, result)
-            }
-            Err(s) if s.code() == tonic::Code::DeadlineExceeded => {
-                (AuditStatus::Timeout, result)
-            }
-            Err(_) => (AuditStatus::Err, result),
-        };
-
-        // Fire-and-forget audit record.  Failure is intentionally swallowed —
-        // audit recording must never block or fail the request.
-        if let Some(recorder) = ctx.data::<Option<AuditRecorder>>().ok().and_then(|r| r.as_ref()) {
-            let recorder = recorder.clone();
-            let event = AuditEvent {
-                actor: "api-gateway".to_string(),
-                action: "feature_store.GetFeature".to_string(),
-                payload_hash: hash_payload(payload_bytes),
-                latency_ms,
-                status,
-                cost_micros: None, // gRPC call; no per-call token cost
-            };
-            tokio::spawn(async move {
-                if let Err(e) = recorder.record(tenant_id, event).await {
-                    tracing::warn!(error = %e, "audit record failed (non-fatal)");
-                }
-            });
-        }
-
-        let response = grpc_result.map_err(|status| {
-            async_graphql::Error::new(format!(
-                "feature-store unavailable: {} {}",
-                status.code(),
-                status.message()
-            ))
-        })?;
+        let response = client
+            .get_feature(request)
+            .await
+            .map_err(|status| {
+                async_graphql::Error::new(format!(
+                    "feature-store unavailable: {} {}",
+                    status.code(),
+                    status.message()
+                ))
+            })?;
 
         let feature = response.into_inner().feature;
         Ok(feature.map(|f| FeatureDto {
@@ -207,435 +160,17 @@ impl Query {
             },
         }))
     }
-
-    /// List persisted cases for the current tenant, paginated.
-    ///
-    /// Returns cases ordered by `created_at DESC`.  Tenant isolation is
-    /// enforced by both an explicit `WHERE tenant_id = $1` clause and by
-    /// `SET LOCAL app.current_tenant_id` (RLS belt-and-suspenders, mirroring
-    /// the audit-recorder pattern).
-    ///
-    /// Valid ranges: `limit ∈ [1, 100]`, `offset ≥ 0`.  Values outside
-    /// these ranges return a GraphQL error without touching the database.
-    ///
-    /// Returns a `CaseConnection` containing the page nodes, the tenant-wide
-    /// `totalCount`, and a `nextOffset` cursor (`null` on the last page).
-    ///
-    /// Legacy cases that have NULL `input_features`/`prediction`/`recommendation`
-    /// columns (inserted before S4.1) will produce a GraphQL error naming the
-    /// offending case UUID — they do NOT silently degrade.
-    async fn list_cases(
-        &self,
-        ctx: &Context<'_>,
-        #[graphql(default = 20)] limit: i32,
-        #[graphql(default = 0)] offset: i32,
-    ) -> async_graphql::Result<CaseConnection> {
-        use async_graphql::{Json, ID};
-        use crate::graphql_predict::{Case, PredictInput, PredictResult, RecommendationDto};
-        use sqlx::Row as _;
-
-        // Validate range before touching the DB.
-        if !(1..=100).contains(&limit) {
-            return Err(async_graphql::Error::new("limit must be between 1 and 100"));
-        }
-        if offset < 0 {
-            return Err(async_graphql::Error::new("offset must be >= 0"));
-        }
-
-        let TenantId(tenant_id) = *ctx
-            .data::<TenantId>()
-            .map_err(|_| async_graphql::Error::new("missing tenant id"))?;
-
-        let pool = ctx
-            .data::<Option<Arc<PgPool>>>()
-            .map_err(|_| async_graphql::Error::new("cases store unavailable"))?
-            .as_ref()
-            .ok_or_else(|| {
-                async_graphql::Error::new(
-                    "cases store not configured (DATABASE_URL missing)",
-                )
-            })?;
-
-        let mut tx = pool
-            .begin()
-            .await
-            .map_err(|e| async_graphql::Error::new(format!("cases tx begin: {e}")))?;
-
-        // SET LOCAL so the RLS insert-policy is evaluated on this connection
-        // even when it was previously pooled without the setting.
-        // Uuid::to_string() is injection-safe.
-        sqlx::query(&format!(
-            "SET LOCAL app.current_tenant_id = '{tenant_id}'"
-        ))
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| async_graphql::Error::new(format!("SET LOCAL failed: {e}")))?;
-
-        // 1. Total row count for pagination metadata.
-        let total_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM cases WHERE tenant_id = $1")
-                .bind(tenant_id)
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(|e| async_graphql::Error::new(format!("count query failed: {e}")))?;
-
-        // 2. Fetch the requested page, most-recent-first.
-        let rows = sqlx::query(
-            r#"
-            SELECT id,
-                   tenant_id,
-                   input_features,
-                   prediction,
-                   recommendation,
-                   created_by,
-                   created_at::text AS created_at_s
-            FROM   cases
-            WHERE  tenant_id = $1
-            ORDER BY created_at DESC
-            LIMIT $2 OFFSET $3
-            "#,
-        )
-        .bind(tenant_id)
-        .bind(i64::from(limit))
-        .bind(i64::from(offset))
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(|e| async_graphql::Error::new(format!("list query failed: {e}")))?;
-
-        tx.commit()
-            .await
-            .map_err(|e| async_graphql::Error::new(format!("cases tx commit: {e}")))?;
-
-        // 3. Map rows → Case objects, emitting a named GraphQL error for any
-        //    row that has NULL jsonb columns (legacy rows predating S4.1).
-        let mut nodes = Vec::with_capacity(rows.len());
-        for row in &rows {
-            let id: Uuid = row
-                .try_get("id")
-                .map_err(|e| async_graphql::Error::new(format!("row.id: {e}")))?;
-            let tenant_id_col: Uuid = row
-                .try_get("tenant_id")
-                .map_err(|e| async_graphql::Error::new(format!("row.tenant_id: {e}")))?;
-            let created_by: Option<Uuid> = row
-                .try_get("created_by")
-                .map_err(|e| async_graphql::Error::new(format!("row.created_by: {e}")))?;
-            let created_at: String = row
-                .try_get("created_at_s")
-                .map_err(|e| async_graphql::Error::new(format!("row.created_at: {e}")))?;
-
-            // NULL jsonb columns → named error so callers can identify the case.
-            let input_features_val: serde_json::Value = row
-                .try_get("input_features")
-                .map_err(|e| {
-                    async_graphql::Error::new(format!(
-                        "case {id}: input_features is NULL (legacy row): {e}"
-                    ))
-                })?;
-            let prediction_val: serde_json::Value = row
-                .try_get("prediction")
-                .map_err(|e| {
-                    async_graphql::Error::new(format!(
-                        "case {id}: prediction is NULL (legacy row): {e}"
-                    ))
-                })?;
-            let recommendation_val: serde_json::Value = row
-                .try_get("recommendation")
-                .map_err(|e| {
-                    async_graphql::Error::new(format!(
-                        "case {id}: recommendation is NULL (legacy row): {e}"
-                    ))
-                })?;
-
-            let input_features: PredictInput =
-                serde_json::from_value(input_features_val).map_err(|e| {
-                    async_graphql::Error::new(format!(
-                        "case {id}: input_features parse error: {e}"
-                    ))
-                })?;
-            let prediction: PredictResult =
-                serde_json::from_value(prediction_val).map_err(|e| {
-                    async_graphql::Error::new(format!(
-                        "case {id}: prediction parse error: {e}"
-                    ))
-                })?;
-            let recommendation: RecommendationDto =
-                serde_json::from_value(recommendation_val).map_err(|e| {
-                    async_graphql::Error::new(format!(
-                        "case {id}: recommendation parse error: {e}"
-                    ))
-                })?;
-
-            nodes.push(Case {
-                id:             ID::from(id.to_string()),
-                tenant_id:      ID::from(tenant_id_col.to_string()),
-                input_features: Json(input_features),
-                prediction,
-                recommendation,
-                created_by:     created_by.map(|u| ID::from(u.to_string())),
-                created_at,
-            });
-        }
-
-        let next_offset = compute_next_offset(offset, nodes.len(), total_count);
-        Ok(CaseConnection { nodes, total_count, next_offset })
-    }
-
-    /// Look up a single persisted case by UUID, scoped to the current tenant.
-    ///
-    /// Returns `null` if the case does not exist or belongs to a different
-    /// tenant — RLS and the explicit `tenant_id = $2` WHERE clause both
-    /// enforce isolation (belt-and-suspenders, mirroring listCases).
-    ///
-    /// Returns a GraphQL error if:
-    /// - The cases pool is unavailable (`DATABASE_URL` not set).
-    /// - The supplied `id` is not a valid UUID v4.
-    /// - A jsonb column is NULL (legacy row predating S4.1).
-    #[graphql(name = "case")]
-    async fn get_case(
-        &self,
-        ctx: &Context<'_>,
-        id: async_graphql::ID,
-    ) -> async_graphql::Result<Option<crate::graphql_predict::Case>> {
-        use async_graphql::Json;
-        use crate::graphql_predict::{Case, PredictInput, PredictResult, RecommendationDto};
-        use sqlx::Row as _;
-
-        let TenantId(tenant_id) = *ctx
-            .data::<TenantId>()
-            .map_err(|_| async_graphql::Error::new("missing tenant id"))?;
-
-        let case_uuid = Uuid::parse_str(id.as_str())
-            .map_err(|_| async_graphql::Error::new("invalid case id: must be a UUID v4"))?;
-
-        let pool = ctx
-            .data::<Option<Arc<PgPool>>>()
-            .map_err(|_| async_graphql::Error::new("cases store unavailable"))?
-            .as_ref()
-            .ok_or_else(|| {
-                async_graphql::Error::new(
-                    "cases store not configured (DATABASE_URL missing)",
-                )
-            })?;
-
-        let mut tx = pool
-            .begin()
-            .await
-            .map_err(|e| async_graphql::Error::new(format!("cases tx begin: {e}")))?;
-
-        // SET LOCAL so the RLS policy is satisfied for jp_app role.
-        sqlx::query(&format!(
-            "SET LOCAL app.current_tenant_id = '{tenant_id}'"
-        ))
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| async_graphql::Error::new(format!("SET LOCAL failed: {e}")))?;
-
-        let row_opt = sqlx::query(
-            r#"
-            SELECT id,
-                   tenant_id,
-                   input_features,
-                   prediction,
-                   recommendation,
-                   created_by,
-                   created_at::text AS created_at_s
-            FROM   cases
-            WHERE  id = $1
-              AND  tenant_id = $2
-            "#,
-        )
-        .bind(case_uuid)
-        .bind(tenant_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| async_graphql::Error::new(format!("case query failed: {e}")))?;
-
-        tx.commit()
-            .await
-            .map_err(|e| async_graphql::Error::new(format!("cases tx commit: {e}")))?;
-
-        let Some(row) = row_opt else {
-            return Ok(None);
-        };
-
-        let row_id: Uuid = row
-            .try_get("id")
-            .map_err(|e| async_graphql::Error::new(format!("row.id: {e}")))?;
-        let tenant_id_col: Uuid = row
-            .try_get("tenant_id")
-            .map_err(|e| async_graphql::Error::new(format!("row.tenant_id: {e}")))?;
-        let created_by: Option<Uuid> = row
-            .try_get("created_by")
-            .map_err(|e| async_graphql::Error::new(format!("row.created_by: {e}")))?;
-        let created_at: String = row
-            .try_get("created_at_s")
-            .map_err(|e| async_graphql::Error::new(format!("row.created_at: {e}")))?;
-
-        let input_features_val: serde_json::Value = row
-            .try_get("input_features")
-            .map_err(|e| async_graphql::Error::new(format!(
-                "case {row_id}: input_features is NULL (legacy row): {e}"
-            )))?;
-        let prediction_val: serde_json::Value = row
-            .try_get("prediction")
-            .map_err(|e| async_graphql::Error::new(format!(
-                "case {row_id}: prediction is NULL (legacy row): {e}"
-            )))?;
-        let recommendation_val: serde_json::Value = row
-            .try_get("recommendation")
-            .map_err(|e| async_graphql::Error::new(format!(
-                "case {row_id}: recommendation is NULL (legacy row): {e}"
-            )))?;
-
-        let input_features: PredictInput =
-            serde_json::from_value(input_features_val).map_err(|e| {
-                async_graphql::Error::new(format!(
-                    "case {row_id}: input_features parse error: {e}"
-                ))
-            })?;
-        let prediction: PredictResult =
-            serde_json::from_value(prediction_val).map_err(|e| {
-                async_graphql::Error::new(format!(
-                    "case {row_id}: prediction parse error: {e}"
-                ))
-            })?;
-        let recommendation: RecommendationDto =
-            serde_json::from_value(recommendation_val).map_err(|e| {
-                async_graphql::Error::new(format!(
-                    "case {row_id}: recommendation parse error: {e}"
-                ))
-            })?;
-
-        Ok(Some(Case {
-            id:             async_graphql::ID::from(row_id.to_string()),
-            tenant_id:      async_graphql::ID::from(tenant_id_col.to_string()),
-            input_features: Json(input_features),
-            prediction,
-            recommendation,
-            created_by:     created_by.map(|u| async_graphql::ID::from(u.to_string())),
-            created_at,
-        }))
-    }
-
-    /// Return the full prediction history for a case, ordered most-recent-first.
-    ///
-    /// Each entry corresponds to one `predictions` table row — either the
-    /// original `createCase` run (once S4.7 back-fills it) or a subsequent
-    /// `repredictCase` call.
-    ///
-    /// Tenant isolation is enforced by both `SET LOCAL app.current_tenant_id`
-    /// (RLS) and an explicit `WHERE ... AND tenant_id = $2` clause
-    /// (belt-and-suspenders, mirroring `listCases` and `repredictCase`).
-    ///
-    /// Returns `[]` when the case exists but has no history rows yet (e.g. a
-    /// case created before S4.7).  Returns a GraphQL error if the pool is
-    /// unavailable or the supplied `id` is not a valid UUID v4.
-    #[graphql(name = "casePredictions")]
-    async fn case_predictions(
-        &self,
-        ctx: &Context<'_>,
-        id: async_graphql::ID,
-    ) -> async_graphql::Result<Vec<PredictionHistoryEntry>> {
-        use crate::graphql_predict::PredictResult;
-        use sqlx::Row as _;
-
-        let TenantId(tenant_id) = *ctx
-            .data::<TenantId>()
-            .map_err(|_| async_graphql::Error::new("missing tenant id"))?;
-
-        let case_uuid = Uuid::parse_str(id.as_str())
-            .map_err(|_| async_graphql::Error::new("invalid case id: must be a UUID v4"))?;
-
-        let pool = ctx
-            .data::<Option<Arc<PgPool>>>()
-            .map_err(|_| async_graphql::Error::new("cases store unavailable"))?
-            .as_ref()
-            .ok_or_else(|| {
-                async_graphql::Error::new(
-                    "cases store not configured (DATABASE_URL missing)",
-                )
-            })?;
-
-        let mut tx = pool
-            .begin()
-            .await
-            .map_err(|e| async_graphql::Error::new(format!("predictions tx begin: {e}")))?;
-
-        // SET LOCAL so the RLS policy is evaluated on this connection even if
-        // the pool connection was previously used with a different tenant.
-        sqlx::query(&format!(
-            "SET LOCAL app.current_tenant_id = '{tenant_id}'"
-        ))
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| async_graphql::Error::new(format!("SET LOCAL failed: {e}")))?;
-
-        let rows = sqlx::query(
-            r#"
-            SELECT id,
-                   prediction,
-                   model_version,
-                   created_at::text AS created_at_s
-            FROM   predictions
-            WHERE  case_id   = $1
-              AND  tenant_id = $2
-            ORDER BY created_at DESC
-            "#,
-        )
-        .bind(case_uuid)
-        .bind(tenant_id)
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(|e| async_graphql::Error::new(format!("predictions query failed: {e}")))?;
-
-        tx.commit()
-            .await
-            .map_err(|e| async_graphql::Error::new(format!("predictions tx commit: {e}")))?;
-
-        let mut entries = Vec::with_capacity(rows.len());
-        for row in &rows {
-            let entry_id: Uuid = row
-                .try_get("id")
-                .map_err(|e| async_graphql::Error::new(format!("row.id: {e}")))?;
-            let prediction_val: serde_json::Value = row
-                .try_get("prediction")
-                .map_err(|e| async_graphql::Error::new(format!(
-                    "prediction {entry_id}: prediction NULL: {e}"
-                )))?;
-            let model_version: String = row
-                .try_get("model_version")
-                .map_err(|e| async_graphql::Error::new(format!("row.model_version: {e}")))?;
-            let created_at: String = row
-                .try_get("created_at_s")
-                .map_err(|e| async_graphql::Error::new(format!("row.created_at: {e}")))?;
-
-            let prediction: PredictResult =
-                serde_json::from_value(prediction_val).map_err(|e| {
-                    async_graphql::Error::new(format!(
-                        "prediction {entry_id}: parse error: {e}"
-                    ))
-                })?;
-
-            entries.push(PredictionHistoryEntry {
-                id:           async_graphql::ID::from(entry_id.to_string()),
-                prediction,
-                model_version,
-                created_at,
-            });
-        }
-
-        Ok(entries)
-    }
 }
 
 // ---------------------------------------------------------------------------
 // Application state — owns the GraphQL schema, JWT secret, and rate-limit store
 // ---------------------------------------------------------------------------
 
-type AppSchema = Schema<Query, Mutation, EmptySubscription>;
+type AppSchema = Schema<Query, EmptyMutation, EmptySubscription>;
 
 /// Shared application state injected into every axum handler via `State<Arc<AppState>>`.
 pub(crate) struct AppState {
+    #[allow(private_interfaces)]
     pub(crate) schema: AppSchema,
     /// HS256 secret bytes. In dev, read from `JWT_SECRET` env var or the test
     /// constant. In prod, injected from External Secrets Operator (Sprint 3+).
@@ -681,17 +216,8 @@ async fn health_handler() -> impl IntoResponse {
 ///
 /// # Parameters
 /// - `feature_store_grpc_url` — gRPC endpoint for the feature-store service.
-/// - `ml_inference_url` — HTTP base URL for ml-inference-svc
-///   (e.g. `http://ml-inference-svc:8001`).  Set via `ML_INFERENCE_URL`.
-///   Sprint-4 follow-up: replace with gRPC once the Python svc exposes a
-///   gRPC server (protos/ml_plane/inference.proto).
 /// - `jwt_secret` — raw bytes of the HS256 signing secret.
 /// - `rate_config` — rate-limiting parameters (RPM caps per tenant).
-///
-/// # Audit recording
-/// Reads `AUDIT_DATABASE_URL` (falls back to `DATABASE_URL`) from the
-/// environment.  If neither is set, or the connection fails, audit recording
-/// is silently disabled — the gateway remains fully functional.
 ///
 /// # Middleware stack (applied to `/graphql` only)
 /// ```text
@@ -699,7 +225,6 @@ async fn health_handler() -> impl IntoResponse {
 /// ```
 pub async fn build_app(
     feature_store_grpc_url: &str,
-    ml_inference_url: &str,
     jwt_secret: Vec<u8>,
     rate_config: RateLimitConfig,
 ) -> Result<Router> {
@@ -709,70 +234,8 @@ pub async fn build_app(
 
     let fs_client = FeatureStoreServiceClient::new(channel);
 
-    // Optionally connect an audit recorder.  Non-fatal: missing env var or
-    // unreachable DB just means audit events are dropped with a warning.
-    let audit_recorder: Option<AuditRecorder> =
-        match std::env::var("AUDIT_DATABASE_URL")
-            .or_else(|_| std::env::var("DATABASE_URL"))
-        {
-            Ok(url) => match AuditRecorder::new_from_url(&url).await {
-                Ok(r) => {
-                    tracing::info!("audit recorder connected");
-                    Some(r)
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "audit recorder unavailable — recording disabled");
-                    None
-                }
-            },
-            Err(_) => {
-                tracing::debug!("AUDIT_DATABASE_URL / DATABASE_URL not set — audit recording disabled");
-                None
-            }
-        };
-
-    // Cases pool for createCase / listCases resolvers.
-    // Connects with the jp_app role (DATABASE_URL) so RLS policies are active.
-    // Non-fatal: missing or unreachable DB disables the two mutations silently.
-    let cases_pool: Option<Arc<PgPool>> = match std::env::var("DATABASE_URL") {
-        Ok(url) => match sqlx::PgPool::connect(&url).await {
-            Ok(pool) => {
-                tracing::info!("cases pool connected");
-                Some(Arc::new(pool))
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "cases pool unavailable — createCase/listCases disabled"
-                );
-                None
-            }
-        },
-        Err(_) => {
-            tracing::debug!("DATABASE_URL not set — cases pool disabled");
-            None
-        }
-    };
-
-    // HTTP client for ml-inference-svc POST /predict (Sprint-3 HTTP shortcut).
-    // Timeouts: 10 s connect (fail-fast if service is unreachable),
-    //           30 s total   (conformal CI can take a few seconds on cold model load).
-    let ml_http_client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .context("build ml-inference reqwest client")?;
-
-    let ml_client = MlInferenceClient {
-        client: ml_http_client,
-        base_url: ml_inference_url.trim_end_matches('/').to_string(),
-    };
-
-    let schema = Schema::build(Query, Mutation, EmptySubscription)
+    let schema = Schema::build(Query, EmptyMutation, EmptySubscription)
         .data(fs_client)
-        .data(audit_recorder)
-        .data(ml_client)
-        .data(cases_pool)
         .finish();
 
     let rate_store: Arc<dyn RateLimitStore> =

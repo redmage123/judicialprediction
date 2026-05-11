@@ -1,18 +1,18 @@
-// JudicialPredict API Gateway — predictCaseOutcome GraphQL mutation (S3.1 / JP-42).
+// JudicialPredict API Gateway — ML inference GraphQL resolvers (S3.1 / JP-42).
 //
-// Sprint-3 design choice: calls ml-inference-svc over plain HTTP (POST /predict)
-// rather than gRPC.  This keeps Sprint-3 scope tight while the Python service
-// only exposes an HTTP FastAPI endpoint.
+// JP-71 (S5.4): replaced the Sprint-3 reqwest HTTP shortcut with a proper
+// tonic gRPC client for InferenceService.PredictCaseOutcome.  v2.14 spec §7
+// mandates gRPC for all cross-plane calls; HTTP to ml-inference-svc is now
+// retired from the gateway.
 //
-// Sprint-4 follow-up (JP-42-gRPC): add a gRPC server to ml-inference-svc and
-// replace MlInferenceClient + reqwest with a tonic stub for
-// InferenceService.PredictCaseOutcome defined in
-// protos/ml_plane/inference.proto.  v2.14 spec §7 mandates gRPC for cross-plane
-// calls; HTTP is a pragmatic Sprint-3 shortcut only.
+// Feature values are encoded as "key:value" strings in PredictCaseOutcomeRequest
+// .feature_ids per the JP-70 Python server contract (grpc_server.py).  JP-72
+// (Sprint-5) will wire real feature-store lookups via case_id once the
+// feature-store gRPC service exposes feature retrieval.
 //
 // This file is NOT the decision-action layer (S3.4).  The mutation here returns
-// PredictResult to the API caller; downstream wiring to the decision-action layer
-// happens in S3.3 (results-view rendering).
+// PredictResult to the API caller; downstream wiring to the decision-action
+// layer happens in results-view rendering (S3.3 / S4.4).
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -28,20 +28,119 @@ use crate::app::TenantId;
 use crate::auth::Claims;
 
 // ---------------------------------------------------------------------------
-// HTTP client state — injected into the GraphQL schema by build_app
+// gRPC client state — injected into the GraphQL schema by build_app (JP-71)
 // ---------------------------------------------------------------------------
 
-/// Shared reqwest client + ML inference base URL, owned once at startup and
-/// injected into the schema data map so resolvers never allocate a new client.
+/// Tonic gRPC client for InferenceService.PredictCaseOutcome.
 ///
-/// Clone is cheap: reqwest::Client is Arc-backed.
+/// Wraps the generated `InferenceServiceClient<Channel>` from the compiled
+/// inference.proto stubs.  Clone is cheap — tonic channels are Arc-backed and
+/// designed to be cloned per-call.
+///
+/// The client is injected once at startup via `build_app` and stored in the
+/// async-graphql schema data map so resolvers never allocate a new connection.
+///
+/// Connection address is set via `ML_INFERENCE_GRPC_URL`
+/// (default: `http://127.0.0.1:51051`).  The channel uses `connect_lazy` so
+/// a transient ml-inference outage at gateway startup does not crash the
+/// process.
 #[derive(Clone)]
 pub(crate) struct MlInferenceClient {
-    pub(crate) client: reqwest::Client,
-    /// Base URL for the ML inference service, e.g. "http://ml-inference-svc:8001".
-    /// Set via the `ML_INFERENCE_URL` env var (default: "http://localhost:8001").
-    /// Never has a trailing slash (trimmed at construction time).
-    pub(crate) base_url: String,
+    pub(crate) inner: crate::ml_inference_proto::inference_service_client::InferenceServiceClient<
+        tonic::transport::Channel,
+    >,
+}
+
+// ---------------------------------------------------------------------------
+// Internal call helper — gRPC fan-out and status → GraphQL error mapping
+// ---------------------------------------------------------------------------
+
+/// Outcome of a `call_ml` invocation.  `Ok` contains an already-constructed
+/// `PredictResult` so call-sites need no further proto conversion.
+enum MlCallOutcome {
+    Ok(PredictResult),
+    /// The RPC deadline was exceeded (tonic `DeadlineExceeded`).
+    Timeout,
+    /// The server returned `INVALID_ARGUMENT` — e.g. a Tier-C feature was
+    /// supplied, or a required feature was missing.
+    BadRequest(String),
+    /// Any other gRPC error (service unavailable, transport failure, etc.).
+    Unavailable,
+}
+
+/// Build a `PredictCaseOutcomeRequest`, send it to ml-inference-svc over gRPC,
+/// and convert the response to `PredictResult`.
+///
+/// Feature values are encoded as `"key:value"` strings in `feature_ids` per
+/// the JP-70 Python server contract (`grpc_server.py`).  The `x-tenant-id`
+/// metadata header is set from `tenant_id` so the ML service's own
+/// `audit_recorder` fires with the correct tenant context.
+async fn call_ml(
+    ml: &MlInferenceClient,
+    tenant_id: &uuid::Uuid,
+    features: &PredictInput,
+) -> MlCallOutcome {
+    use crate::ml_inference_proto::PredictCaseOutcomeRequest;
+
+    // Encode feature values as "key:value" strings matching JP-70's gRPC server
+    // contract (grpc_server.py).  Numeric values use Rust's default Display
+    // representation which matches Python's float parsing.
+    let feature_ids = vec![
+        format!("judge_severity:{}", features.judge_severity),
+        format!("attorney_win_rate:{}", features.attorney_win_rate),
+        format!("ideology_distance:{}", features.ideology_distance),
+        format!("materiality_score:{}", features.materiality_score),
+        format!("procedural_motion_count:{}", features.procedural_motion_count),
+        format!("case_type:{}", features.case_type),
+        format!("jurisdiction:{}", features.jurisdiction),
+    ];
+
+    let mut req = tonic::Request::new(PredictCaseOutcomeRequest {
+        // case_id is empty: feature values are supplied directly via feature_ids.
+        // JP-72 will wire the real case UUID once the feature-store retrieval path
+        // is enabled for gRPC.
+        case_id: String::new(),
+        feature_ids,
+        // MODEL_VARIANT_UNSPECIFIED (0) → server uses production default.
+        model_variant: 0,
+        // 0.0 → server uses its configured default coverage (90%).
+        conformal_coverage: 0.0,
+        trace_id: String::new(),
+    });
+
+    // Attach x-tenant-id metadata so the ML service's audit_recorder fires
+    // with the correct tenant context.
+    req.metadata_mut().insert(
+        "x-tenant-id",
+        tenant_id
+            .to_string()
+            .parse()
+            .expect("UUID is always valid ASCII metadata"),
+    );
+
+    let mut client = ml.inner.clone();
+    match client.predict_case_outcome(req).await {
+        Ok(resp) => {
+            let r = resp.into_inner();
+            let ci = r.conformal_interval.as_ref();
+            MlCallOutcome::Ok(PredictResult {
+                p_win: r.p_win as f32,
+                ci_lower: ci.map_or(0.0_f64, |c| c.lower) as f32,
+                ci_upper: ci.map_or(1.0_f64, |c| c.upper) as f32,
+                coverage: ci.map_or(0.9_f64, |c| c.coverage) as f32,
+                // mlflow_run_id is the stable model identifier (champion run).
+                model_version: r.mlflow_run_id,
+                predicted_at_unix: r.predicted_at_unix,
+            })
+        }
+        Err(status) => match status.code() {
+            tonic::Code::DeadlineExceeded => MlCallOutcome::Timeout,
+            tonic::Code::InvalidArgument => {
+                MlCallOutcome::BadRequest(status.message().to_string())
+            }
+            _ => MlCallOutcome::Unavailable,
+        },
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -65,20 +164,6 @@ pub struct PredictInput {
     pub procedural_motion_count: f32,
     pub case_type: String,
     pub jurisdiction: String,
-}
-
-// ---------------------------------------------------------------------------
-// Internal wire type — deserialized from ml-inference-svc JSON response
-// ---------------------------------------------------------------------------
-
-#[derive(Deserialize)]
-struct MlInferenceResponse {
-    p_win: f32,
-    ci_lower: f32,
-    ci_upper: f32,
-    coverage: f32,
-    model_version: String,
-    predicted_at_unix: i64,
 }
 
 // ---------------------------------------------------------------------------
@@ -241,23 +326,20 @@ impl Mutation {
     ///
     /// Accepts Tier-A/B features only (see `PredictInput`).  Tier-C party
     /// features are excluded at the type level and also rejected by the ML
-    /// service.
+    /// service (INVALID_ARGUMENT gRPC status).
     ///
-    /// Forwards the call to ml-inference-svc via HTTP POST /predict
-    /// (Sprint-3 shortcut; gRPC in Sprint-4 per v2.14 spec §7).
-    ///
-    /// Threads `tenant_id` from the JWT into the X-Tenant-Id header so the
-    /// Python audit_recorder fires on the ML side as well as here.
+    /// Calls ml-inference-svc via gRPC (`InferenceService.PredictCaseOutcome`).
+    /// JP-71 replaces the Sprint-3 HTTP shortcut per v2.14 spec §7.
     ///
     /// Always writes one gateway-side audit row (fire-and-forget, non-blocking).
     ///
-    /// On non-2xx responses the resolver returns a GraphQL error with a
-    /// closed-code extension field `"code"`:
-    ///   - `MlInferenceTimeout`     — connect or request timed out
-    ///   - `MlInferenceUnavailable` — 5xx or transport error
-    ///   - `MlInferenceClientError` — 4xx (bad input)
+    /// On failure the resolver returns a GraphQL error with a closed-code
+    /// extension field `"code"`:
+    ///   - `MlInferenceTimeout`     — gRPC deadline exceeded
+    ///   - `MlInferenceBadRequest`  — INVALID_ARGUMENT (Tier-C or missing feature)
+    ///   - `MlInferenceUnavailable` — any other gRPC error
     ///
-    /// Raw HTTP error details are never exposed to callers.
+    /// Raw error details are logged but never forwarded to callers.
     async fn predict_case_outcome(
         &self,
         ctx: &Context<'_>,
@@ -278,81 +360,36 @@ impl Mutation {
         let input_json = serde_json::to_vec(&input)
             .map_err(|e| async_graphql::Error::new(e.to_string()))?;
 
-        let predict_url = format!("{}/predict", ml.base_url);
-
-        let http_result = ml
-            .client
-            .post(&predict_url)
-            // Thread tenant id to the ML service so its own audit_recorder fires.
-            .header("X-Tenant-Id", tenant_id.to_string())
-            .header("Content-Type", "application/json")
-            .body(input_json.clone())
-            .send()
-            .await;
-
+        // ── gRPC call ────────────────────────────────────────────────────────
+        let outcome = call_ml(ml, &tenant_id, &input).await;
         let latency_ms = start.elapsed().as_millis().min(u32::MAX as u128) as u32;
 
-        // Map HTTP/transport outcomes to (audit status, GraphQL result).
-        // Raw error details are logged but never forwarded to the caller.
-        let (audit_status, gql_result) = match http_result {
-            Err(e) if e.is_timeout() => {
-                tracing::warn!(url = %predict_url, "ml-inference-svc timed out");
+        // Map gRPC outcomes to (audit status, GraphQL result).
+        let (audit_status, gql_result) = match outcome {
+            MlCallOutcome::Ok(prediction) => (AuditStatus::Ok, Ok(prediction)),
+            MlCallOutcome::Timeout => {
+                tracing::warn!("ml-inference-svc timed out (predictCaseOutcome)");
                 (
                     AuditStatus::Timeout,
                     Err(async_graphql::Error::new("ml inference timed out")
                         .extend_with(|_, ext| ext.set("code", "MlInferenceTimeout"))),
                 )
             }
-            Err(e) => {
-                tracing::warn!(error = %e, url = %predict_url, "ml-inference-svc connection error");
+            MlCallOutcome::BadRequest(msg) => {
+                tracing::warn!(detail = %msg, "ml-inference-svc rejected request (predictCaseOutcome)");
+                (
+                    AuditStatus::Err,
+                    Err(async_graphql::Error::new("ml inference rejected request")
+                        .extend_with(|_, ext| ext.set("code", "MlInferenceBadRequest"))),
+                )
+            }
+            MlCallOutcome::Unavailable => {
+                tracing::warn!("ml-inference-svc unavailable (predictCaseOutcome)");
                 (
                     AuditStatus::Err,
                     Err(async_graphql::Error::new("ml inference unavailable")
                         .extend_with(|_, ext| ext.set("code", "MlInferenceUnavailable"))),
                 )
-            }
-            Ok(resp) => {
-                let status = resp.status();
-                if status.is_success() {
-                    match resp.json::<MlInferenceResponse>().await {
-                        Ok(r) => (
-                            AuditStatus::Ok,
-                            Ok(PredictResult {
-                                p_win: r.p_win,
-                                ci_lower: r.ci_lower,
-                                ci_upper: r.ci_upper,
-                                coverage: r.coverage,
-                                model_version: r.model_version,
-                                predicted_at_unix: r.predicted_at_unix,
-                            }),
-                        ),
-                        Err(e) => {
-                            tracing::warn!(error = %e, "ml-inference-svc response parse error");
-                            (
-                                AuditStatus::Err,
-                                Err(async_graphql::Error::new(
-                                    "ml inference response parse error",
-                                )
-                                .extend_with(|_, ext| ext.set("code", "MlInferenceUnavailable"))),
-                            )
-                        }
-                    }
-                } else if status.is_client_error() {
-                    tracing::warn!(http_status = %status, "ml-inference-svc rejected request (4xx)");
-                    (
-                        AuditStatus::Err,
-                        Err(async_graphql::Error::new("ml inference rejected the request")
-                            .extend_with(|_, ext| ext.set("code", "MlInferenceClientError"))),
-                    )
-                } else {
-                    // 5xx or other unexpected status.
-                    tracing::warn!(http_status = %status, "ml-inference-svc returned server error");
-                    (
-                        AuditStatus::Err,
-                        Err(async_graphql::Error::new("ml inference unavailable")
-                            .extend_with(|_, ext| ext.set("code", "MlInferenceUnavailable"))),
-                    )
-                }
             }
         };
 
@@ -423,64 +460,31 @@ impl Mutation {
         let input_json = serde_json::to_vec(&input)
             .map_err(|e| async_graphql::Error::new(e.to_string()))?;
 
-        // ── 3. Call ml-inference-svc (same path as predict_case_outcome) ─────
+        // ── 3. Call ml-inference-svc via gRPC (JP-71) ────────────────────────
         let ml = ctx
             .data::<MlInferenceClient>()
             .map_err(|_| async_graphql::Error::new("ml inference client unavailable"))?;
 
-        let predict_url = format!("{}/predict", ml.base_url);
-
-        let http_result = ml
-            .client
-            .post(&predict_url)
-            .header("X-Tenant-Id", tenant_id.to_string())
-            .header("Content-Type", "application/json")
-            .body(input_json.clone())
-            .send()
-            .await;
-
+        let outcome = call_ml(ml, &tenant_id, &input).await;
         let latency_ms = start.elapsed().as_millis().min(u32::MAX as u128) as u32;
 
-        let ml_resp = match http_result {
-            Err(e) if e.is_timeout() => {
-                tracing::warn!(url = %predict_url, "ml-inference-svc timed out (createCase)");
+        let prediction = match outcome {
+            MlCallOutcome::Ok(p) => p,
+            MlCallOutcome::Timeout => {
+                tracing::warn!("ml-inference-svc timed out (createCase)");
                 return Err(async_graphql::Error::new("ml inference timed out")
                     .extend_with(|_, ext| ext.set("code", "MlInferenceTimeout")));
             }
-            Err(e) => {
-                tracing::warn!(error = %e, url = %predict_url, "ml-inference-svc error (createCase)");
+            MlCallOutcome::BadRequest(msg) => {
+                tracing::warn!(detail = %msg, "ml-inference-svc rejected request (createCase)");
+                return Err(async_graphql::Error::new("ml inference rejected request")
+                    .extend_with(|_, ext| ext.set("code", "MlInferenceBadRequest")));
+            }
+            MlCallOutcome::Unavailable => {
+                tracing::warn!("ml-inference-svc unavailable (createCase)");
                 return Err(async_graphql::Error::new("ml inference unavailable")
                     .extend_with(|_, ext| ext.set("code", "MlInferenceUnavailable")));
             }
-            Ok(resp) => {
-                let status = resp.status();
-                if status.is_success() {
-                    resp.json::<MlInferenceResponse>().await.map_err(|e| {
-                        tracing::warn!(error = %e, "ml response parse error (createCase)");
-                        async_graphql::Error::new("ml inference response parse error")
-                            .extend_with(|_, ext| ext.set("code", "MlInferenceUnavailable"))
-                    })?
-                } else if status.is_client_error() {
-                    tracing::warn!(http_status = %status, "ml-inference-svc 4xx (createCase)");
-                    return Err(
-                        async_graphql::Error::new("ml inference rejected the request")
-                            .extend_with(|_, ext| ext.set("code", "MlInferenceClientError")),
-                    );
-                } else {
-                    tracing::warn!(http_status = %status, "ml-inference-svc 5xx (createCase)");
-                    return Err(async_graphql::Error::new("ml inference unavailable")
-                        .extend_with(|_, ext| ext.set("code", "MlInferenceUnavailable")));
-                }
-            }
-        };
-
-        let prediction = PredictResult {
-            p_win:             ml_resp.p_win,
-            ci_lower:          ml_resp.ci_lower,
-            ci_upper:          ml_resp.ci_upper,
-            coverage:          ml_resp.coverage,
-            model_version:     ml_resp.model_version,
-            predicted_at_unix: ml_resp.predicted_at_unix,
         };
 
         // ── 4. Compute recommendation via decision-arith ─────────────────────
@@ -736,63 +740,31 @@ impl Mutation {
             .data::<MlInferenceClient>()
             .map_err(|_| async_graphql::Error::new("ml inference client unavailable"))?;
 
-        let predict_url = format!("{}/predict", ml.base_url);
-
-        let http_result = ml
-            .client
-            .post(&predict_url)
-            .header("X-Tenant-Id", tenant_id.to_string())
-            .header("Content-Type", "application/json")
-            .body(input_json.clone())
-            .send()
-            .await;
-
+        // gRPC call to ml-inference-svc (JP-71). On failure the in-flight DB
+        // transaction is rolled back before returning the GraphQL error.
+        let outcome = call_ml(ml, &tenant_id, &input).await;
         let latency_ms = start.elapsed().as_millis().min(u32::MAX as u128) as u32;
 
-        let ml_resp = match http_result {
-            Err(e) if e.is_timeout() => {
+        let new_prediction = match outcome {
+            MlCallOutcome::Ok(p) => p,
+            MlCallOutcome::Timeout => {
                 let _ = tx.rollback().await;
-                tracing::warn!(url = %predict_url, "ml-inference-svc timed out (repredictCase)");
+                tracing::warn!("ml-inference-svc timed out (repredictCase)");
                 return Err(async_graphql::Error::new("ml inference timed out")
                     .extend_with(|_, ext| ext.set("code", "MlInferenceTimeout")));
             }
-            Err(e) => {
+            MlCallOutcome::BadRequest(msg) => {
                 let _ = tx.rollback().await;
-                tracing::warn!(error = %e, url = %predict_url, "ml-inference-svc error (repredictCase)");
+                tracing::warn!(detail = %msg, "ml-inference-svc rejected request (repredictCase)");
+                return Err(async_graphql::Error::new("ml inference rejected request")
+                    .extend_with(|_, ext| ext.set("code", "MlInferenceBadRequest")));
+            }
+            MlCallOutcome::Unavailable => {
+                let _ = tx.rollback().await;
+                tracing::warn!("ml-inference-svc unavailable (repredictCase)");
                 return Err(async_graphql::Error::new("ml inference unavailable")
                     .extend_with(|_, ext| ext.set("code", "MlInferenceUnavailable")));
             }
-            Ok(resp) => {
-                let status = resp.status();
-                if status.is_success() {
-                    resp.json::<MlInferenceResponse>().await.map_err(|e| {
-                        tracing::warn!(error = %e, "ml response parse error (repredictCase)");
-                        async_graphql::Error::new("ml inference response parse error")
-                            .extend_with(|_, ext| ext.set("code", "MlInferenceUnavailable"))
-                    })?
-                } else if status.is_client_error() {
-                    let _ = tx.rollback().await;
-                    tracing::warn!(http_status = %status, "ml-inference-svc 4xx (repredictCase)");
-                    return Err(
-                        async_graphql::Error::new("ml inference rejected the request")
-                            .extend_with(|_, ext| ext.set("code", "MlInferenceClientError")),
-                    );
-                } else {
-                    let _ = tx.rollback().await;
-                    tracing::warn!(http_status = %status, "ml-inference-svc 5xx (repredictCase)");
-                    return Err(async_graphql::Error::new("ml inference unavailable")
-                        .extend_with(|_, ext| ext.set("code", "MlInferenceUnavailable")));
-                }
-            }
-        };
-
-        let new_prediction = PredictResult {
-            p_win:             ml_resp.p_win,
-            ci_lower:          ml_resp.ci_lower,
-            ci_upper:          ml_resp.ci_upper,
-            coverage:          ml_resp.coverage,
-            model_version:     ml_resp.model_version.clone(),
-            predicted_at_unix: ml_resp.predicted_at_unix,
         };
 
         // ── 4. Persist: INSERT into predictions + UPDATE cases ─────────────────
@@ -808,7 +780,7 @@ impl Mutation {
         .bind(case_uuid)
         .bind(tenant_id)
         .bind(&prediction_val)
-        .bind(&ml_resp.model_version)
+        .bind(&new_prediction.model_version)
         .execute(&mut *tx)
         .await
         .map_err(|e| async_graphql::Error::new(format!("predictions insert failed: {e}")))?;

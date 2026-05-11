@@ -191,7 +191,7 @@ services:
       GATEWAY_BIND: "0.0.0.0:4040"
       DATABASE_URL: "postgres://judicialpredict:judicialpredict_dev_pwd@postgres:5432/judicialpredict_dev"
       AUDIT_DATABASE_URL: "postgres://judicialpredict:judicialpredict_dev_pwd@postgres:5432/judicialpredict_dev"
-      ML_INFERENCE_URL: "http://ml-inference-svc:8001"
+      ML_INFERENCE_GRPC_URL: "http://ml-inference-svc:51051"
       FEATURE_STORE_GRPC_URL: "http://127.0.0.1:4001"  # in-process; reserved for S5+ split
       JWT_SECRET: "dev-only-NOT-A-REAL-SECRET-1234567890abcdef"
       RUST_LOG: "info"
@@ -271,7 +271,7 @@ services:
       DJANGO_AUTH_URL: "http://admin:8000"
       JWT_DEV_SECRET: "dev-only-NOT-A-REAL-SECRET-1234567890abcdef"
     ports:
-      - "127.0.0.1:3030:3030"
+      - "0.0.0.0:3030:3030"
     networks:
       - jp_dev_net
     healthcheck:

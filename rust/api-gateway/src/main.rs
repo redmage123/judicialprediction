@@ -3,16 +3,11 @@
 // Reads from the environment:
 //   FEATURE_STORE_GRPC_URL               — gRPC address of the feature-store service
 //                                          (default: http://127.0.0.1:4001)
-//   ML_INFERENCE_URL                     — HTTP base URL for ml-inference-svc
-//                                          (default: http://localhost:8001)
-//                                          Sprint-4 follow-up: switch to gRPC once the
-//                                          Python svc exposes InferenceService per
-//                                          protos/ml_plane/inference.proto.
 //   JWT_SECRET                           — HS256 signing secret (required; no default)
 //   RATE_LIMIT_RPM                       — max requests/min per tenant (default 60)
 //   RATE_LIMIT_GRAPHQL_MUTATIONS_PER_MIN — max mutations/min per tenant (default 10)
 //
-// Binds the HTTP/GraphQL server on $GATEWAY_BIND (default: 0.0.0.0:4000).
+// Binds the HTTP/GraphQL server on 0.0.0.0:4000.
 
 use anyhow::Result;
 use api_gateway::RateLimitConfig;
@@ -23,9 +18,6 @@ async fn main() -> Result<()> {
 
     let feature_store_url = std::env::var("FEATURE_STORE_GRPC_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:4001".to_string());
-
-    let ml_inference_url = std::env::var("ML_INFERENCE_URL")
-        .unwrap_or_else(|_| "http://localhost:8001".to_string());
 
     let jwt_secret = std::env::var("JWT_SECRET")
         .expect("JWT_SECRET environment variable must be set")
@@ -45,16 +37,11 @@ async fn main() -> Result<()> {
 
     tracing::info!(
         "api-gateway: feature-store gRPC at {feature_store_url}, \
-         ml-inference HTTP at {ml_inference_url}, \
          rate-limit {requests_per_min} rpm / {mutations_per_min} mutations/min"
     );
-    let app =
-        api_gateway::build_app(&feature_store_url, &ml_inference_url, jwt_secret, rate_config)
-            .await?;
+    let app = api_gateway::build_app(&feature_store_url, jwt_secret, rate_config).await?;
 
-    let bind_addr =
-        std::env::var("GATEWAY_BIND").unwrap_or_else(|_| "0.0.0.0:4000".to_string());
-    let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:4000").await?;
     tracing::info!("api-gateway listening on {}", listener.local_addr()?);
     axum::serve(listener, app).await?;
     Ok(())
