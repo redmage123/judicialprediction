@@ -155,10 +155,10 @@ services:
         postgres://judicialpredict:judicialpredict_dev_pwd@postgres:5432/judicialpredict_dev
       DJANGO_SECRET_KEY: dev-only-insecure-key-CHANGE-BEFORE-PRODUCTION-0000000000000000000
       DEBUG: "true"
-      ALLOWED_HOSTS: "localhost,127.0.0.1,0.0.0.0"
+      ALLOWED_HOSTS: "localhost,127.0.0.1,0.0.0.0,admin"
       STATIC_ROOT: /static
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:8090:8000"   # host 8000 is occupied by course-creator
     volumes:
       - jp_admin_static:/static
     networks:
@@ -169,6 +169,117 @@ services:
       timeout: 10s
       retries: 3
       start_period: 15s
+
+
+  # ---------------------------------------------------------------------------
+  # api-gateway (Rust async-graphql + axum)
+  # Production equivalent: Kubernetes Deployment + HPA
+  # ---------------------------------------------------------------------------
+  api-gateway:
+    build:
+      context: .                                # monorepo root: rust/ + protos/
+      dockerfile: rust/api-gateway/Dockerfile
+    image: jp-api-gateway:dev
+    container_name: judicialpredict_api_gateway
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ml-inference-svc:
+        condition: service_started
+    environment:
+      GATEWAY_BIND: "0.0.0.0:4040"
+      DATABASE_URL: "postgres://judicialpredict:judicialpredict_dev_pwd@postgres:5432/judicialpredict_dev"
+      AUDIT_DATABASE_URL: "postgres://judicialpredict:judicialpredict_dev_pwd@postgres:5432/judicialpredict_dev"
+      ML_INFERENCE_URL: "http://ml-inference-svc:8001"
+      FEATURE_STORE_GRPC_URL: "http://127.0.0.1:4001"  # in-process; reserved for S5+ split
+      JWT_SECRET: "dev-only-NOT-A-REAL-SECRET-1234567890abcdef"
+      RUST_LOG: "info"
+    ports:
+      - "127.0.0.1:4040:4040"
+    networks:
+      - jp_dev_net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:4040/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ---------------------------------------------------------------------------
+  # ml-inference-svc (Python FastAPI)
+  # Production equivalent: Kubernetes Deployment (CPU-bound, light memory)
+  # ---------------------------------------------------------------------------
+  ml-inference-svc:
+    build:
+      context: python/ml-inference-svc
+      dockerfile: Dockerfile
+    image: jp-ml-inference-svc:dev
+    container_name: judicialpredict_ml_inference
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgres://judicialpredict:judicialpredict_dev_pwd@postgres:5432/judicialpredict_dev"
+      AUDIT_DATABASE_URL: "postgres://judicialpredict:judicialpredict_dev_pwd@postgres:5432/judicialpredict_dev"
+      JWT_SECRET: "dev-only-NOT-A-REAL-SECRET-1234567890abcdef"
+      JWT_DEV_SECRET: "dev-only-NOT-A-REAL-SECRET-1234567890abcdef"
+      FEATURE_STORE_GRPC_URL: "http://127.0.0.1:4001"
+      RATE_LIMIT_RPM: "600"
+      RATE_LIMIT_GRAPHQL_MUTATIONS_PER_MIN: "600"
+    ports:
+      - "127.0.0.1:8001:8001"
+    volumes:
+      # Model artefacts trained by python/ml-inference-svc/train_first_models.py.
+      # MLflow meta.yaml bakes in absolute artifact_uri paths, so we mount the
+      # host directory at BOTH /app/mlruns (for predict.py s project_root lookup)
+      # and the absolute path the MLflow run records reference.
+      # Sprint-5: replace with MinIO / S3 model registry that uses relative paths.
+      - ./python/ml-inference-svc/mlruns:/app/mlruns:ro
+      - ./python/ml-inference-svc/mlruns:/opt/ai-elevate/gigforge/projects/judicialpredict/python/ml-inference-svc/mlruns:ro
+    networks:
+      - jp_dev_net
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request as u; u.urlopen('http://127.0.0.1:8001/healthz', timeout=2)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # web (Next.js 15 standalone build)
+  # Production equivalent: Kubernetes Deployment + CDN-fronted static assets
+  # ---------------------------------------------------------------------------
+  web:
+    build:
+      context: web
+      dockerfile: Dockerfile
+    image: jp-web:dev
+    container_name: judicialpredict_web
+    restart: unless-stopped
+    depends_on:
+      api-gateway:
+        condition: service_started
+      admin:
+        condition: service_started
+    environment:
+      PORT: "3030"
+      HOSTNAME: "0.0.0.0"
+      NODE_ENV: "production"
+      GATEWAY_INTERNAL_URL: "http://api-gateway:4040"
+      DJANGO_AUTH_URL: "http://admin:8000"
+      JWT_DEV_SECRET: "dev-only-NOT-A-REAL-SECRET-1234567890abcdef"
+    ports:
+      - "127.0.0.1:3030:3030"
+    networks:
+      - jp_dev_net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3030/api/health >/dev/null 2>&1 || wget -qO- http://127.0.0.1:3030/ >/dev/null 2>&1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
 
 # =============================================================================
 # Volumes — all local-dev data persists across restarts.
