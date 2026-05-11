@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { cookies } from "next/headers";
+import Link from "next/link";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { ApolloClientProvider } from "@/lib/apollo-provider";
@@ -39,10 +40,29 @@ export default async function RootLayout({
         <ApolloClientProvider>
           <AuthProvider>
             {isAuthenticated && (
-              <header className="flex items-center justify-end gap-4 border-b px-6 py-3">
-                <span className="text-sm text-muted-foreground">
-                  JudicialPredict
-                </span>
+              <header className="flex flex-wrap items-center justify-between gap-4 border-b px-6 py-3">
+                <div className="flex items-center gap-6">
+                  <Link
+                    href="/cases"
+                    className="text-sm font-semibold tracking-tight hover:text-primary"
+                  >
+                    JudicialPredict
+                  </Link>
+                  <nav className="flex items-center gap-4 text-sm" aria-label="Primary">
+                    <Link
+                      href="/cases"
+                      className="text-muted-foreground hover:text-foreground"
+                    >
+                      Cases
+                    </Link>
+                    <Link
+                      href="/case/new"
+                      className="text-muted-foreground hover:text-foreground"
+                    >
+                      New case
+                    </Link>
+                  </nav>
+                </div>
                 <LogoutButton />
               </header>
             )}

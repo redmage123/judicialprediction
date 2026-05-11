@@ -18,7 +18,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { useMutation, useQuery } from "@apollo/client";
+import { useMutation, useQuery } from "@apollo/client/react";
 import { useRouter } from "next/navigation";
 import {
   Card,
@@ -54,12 +54,33 @@ function fmtDollar(s: string): string {
   }).format(parseFloat(s));
 }
 
+const USD_INLINE = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  maximumFractionDigits: 0,
+});
+
+// Server-generated rationale bullets embed raw floats like `$32319.71`.
+// Normalise them to `$32,320` so they match the card values below.
+function formatBulletAmounts(s: string): string {
+  return s.replace(/\$\s?(\d+(?:\.\d+)?)/g, (_m, n: string) =>
+    USD_INLINE.format(parseFloat(n))
+  );
+}
+
 function badgeVariantForKind(
   kind: string
-): "default" | "secondary" | "warning" {
-  if (kind === "Try") return "default";
-  if (kind === "Settle") return "secondary";
+): "settle" | "try" | "warning" {
+  if (kind === "Try") return "try";
+  if (kind === "Settle") return "settle";
   return "warning";
+}
+
+// First 8 hex chars of the run_id are enough to identify a model version
+// without exposing 32-char MLflow internal IDs to the operator.
+function shortModelVersion(version: string): string {
+  if (!version) return "";
+  return version.length > 12 ? `${version.slice(0, 8)}` : version;
 }
 
 // ---------------------------------------------------------------------------
@@ -90,10 +111,10 @@ function RepredictButton({ caseId }: RepredictButtonProps) {
   return (
     <button
       type="button"
-      onClick={() => repredictCase()}
+      onClick={() => repredictCase({ variables: { id: caseId } })}
       disabled={loading}
       aria-label="Re-run with latest model"
-      className="inline-flex items-center justify-center rounded-md border border-input bg-background px-4 py-2 text-sm font-medium shadow-sm hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50"
+      className="inline-flex h-11 items-center justify-center rounded-md border border-input bg-background px-4 text-sm font-medium shadow-sm hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50"
     >
       {loading ? "Running…" : "Re-run with latest model"}
     </button>
@@ -198,8 +219,20 @@ interface ResultsLayoutProps {
 function ResultsLayout({ caseResult }: ResultsLayoutProps) {
   const { id, prediction, recommendation } = caseResult;
 
+  // CI width above 0.35 means the model could not pin a probability — surface
+  // a caution so the operator knows the point estimate is brittle.
+  const ciWidth = prediction.ciUpper - prediction.ciLower;
+  const wideCi = ciWidth > 0.35;
+
   return (
-    <main className="mx-auto max-w-3xl p-8 space-y-6">
+    <main className="mx-auto max-w-3xl p-6 sm:p-8 space-y-6">
+      {/* Breadcrumb */}
+      <nav aria-label="Breadcrumb" className="text-sm text-muted-foreground">
+        <Link href="/cases" className="hover:text-foreground">Cases</Link>
+        <span aria-hidden="true"> / </span>
+        <span aria-current="page">Case Analysis</span>
+      </nav>
+
       <h1 className="text-3xl font-bold tracking-tight">Case Analysis</h1>
 
       {/* Card #1 — P(win) header strip */}
@@ -207,11 +240,10 @@ function ResultsLayout({ caseResult }: ResultsLayoutProps) {
         <CardHeader>
           <CardTitle>Outcome Probability</CardTitle>
           <CardDescription>
-            Model:{" "}
-            <span className="font-mono text-xs">{prediction.modelVersion}</span>
+            Model version <span className="font-mono text-xs">{shortModelVersion(prediction.modelVersion)}</span>
           </CardDescription>
         </CardHeader>
-        <CardContent className="space-y-1">
+        <CardContent className="space-y-2">
           <p
             className="text-5xl font-extrabold tabular-nums"
             aria-label={`P win ${fmtPercent(prediction.pWin)}`}
@@ -219,11 +251,21 @@ function ResultsLayout({ caseResult }: ResultsLayoutProps) {
             {fmtPercent(prediction.pWin)}
           </p>
           <p className="text-sm text-muted-foreground">
-            90% CI{" "}
+            90% confidence interval{" "}
             <span className="font-mono">
               [{prediction.ciLower.toFixed(2)}, {prediction.ciUpper.toFixed(2)}]
             </span>
           </p>
+          {wideCi && (
+            <p
+              role="status"
+              className="mt-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900"
+            >
+              <strong>Low confidence:</strong> the {Math.round(ciWidth * 100)}-point
+              CI width means the point estimate above is brittle. Treat the
+              recommendation as directional, not definitive.
+            </p>
+          )}
         </CardContent>
       </Card>
 
@@ -243,7 +285,7 @@ function ResultsLayout({ caseResult }: ResultsLayoutProps) {
             aria-label="Reasoning"
           >
             {recommendation.rationaleBullets.map((bullet, i) => (
-              <li key={i}>{bullet}</li>
+              <li key={i}>{formatBulletAmounts(bullet)}</li>
             ))}
           </ul>
         </CardContent>
@@ -287,13 +329,12 @@ function ResultsLayout({ caseResult }: ResultsLayoutProps) {
           <a
             href={`/api/case/${id}/memo.pdf`}
             download
-            className="inline-flex items-center justify-center rounded-md border border-input bg-background px-4 py-2 text-sm font-medium shadow-sm hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+            className="inline-flex h-11 items-center justify-center rounded-md border border-input bg-background px-4 text-sm font-medium shadow-sm hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
           >
             Download memo (PDF)
           </a>
           <p className="text-xs text-muted-foreground">
-            PDF includes the audit trail and is signed by the gateway
-            model_version. Sprint-5 adds full statutory citations.
+            Includes the prediction, recommendation, and audit trail.
           </p>
         </div>
 
@@ -301,22 +342,13 @@ function ResultsLayout({ caseResult }: ResultsLayoutProps) {
         <div className="flex flex-col gap-1">
           <RepredictButton caseId={id} />
           <p className="text-xs text-muted-foreground">
-            Fetches the latest champion model and updates this case.
-            Recommendation is preserved; Sprint-5 will re-run decision-arith
-            when you supply updated damages.
+            Refreshes this case against the latest champion model.
           </p>
         </div>
       </div>
 
       {/* Prediction history disclosure (S4.7) */}
       <PredictionHistoryDisclosure caseId={id} />
-
-      {/* Demo limitations disclosure */}
-      <p className="text-xs text-muted-foreground border-t pt-4">
-        <strong>Demo limitations:</strong> Settlement value uses a 40% damages
-        anchor; cost-engine integration and real BATNA modelling come in
-        Sprint 5.
-      </p>
     </main>
   );
 }

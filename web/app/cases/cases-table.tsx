@@ -2,30 +2,36 @@
  * CasesTable — S4.5 (JP-59)
  *
  * Purely presentational: renders the paginated cases list, recommendation
- * badges, and Previous/Next pagination controls. Accepts pre-fetched data as
- * props so it can be tested without mocking fetch or Next.js internals.
+ * badges, and Previous/Next pagination controls.
+ *
+ * Layout:
+ *  - sm+      : table with date / type / jurisdiction / P(win) / recommendation / View
+ *  - below sm : card list with the same fields stacked vertically
  *
  * Pagination uses <Link> for the enabled state and a disabled <button> for the
  * disabled state (semantically correct: links navigate, disabled buttons
  * communicate "not available without JS involvement").
  *
  * Sprint-5 follow-ups:
- * - Client-side sort by P(win) and recommendation kind
- * - Filter by date range
- * - CSV export
+ *  - Client-side sort by P(win) and recommendation kind
+ *  - Filter by date range
+ *  - CSV export
  */
 
 import Link from "next/link";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import type { CaseConnection } from "@/lib/queries/predict";
 
 // ---------------------------------------------------------------------------
-// Badge styles keyed by recommendation kind
+// Badge styles keyed by recommendation kind.
+// Try    = decisive action, go to court  → blue
+// Settle = avoid risk, accept settlement → green
+// Borderline = unclear, needs partner input → amber
 // ---------------------------------------------------------------------------
 
 const BADGE_CLASS: Record<string, string> = {
   Try: "bg-blue-100 text-blue-800 border border-blue-200",
-  Settle: "bg-slate-100 text-slate-700 border border-slate-200",
+  Settle: "bg-emerald-100 text-emerald-800 border border-emerald-200",
   Borderline: "bg-amber-100 text-amber-800 border border-amber-200",
 };
 
@@ -41,6 +47,15 @@ function formatDate(iso: string): string {
   } catch {
     return iso;
   }
+}
+
+// inputFeatures is a JSON scalar from the gateway, so keys are snake_case.
+function getCaseType(features: Record<string, unknown>): string {
+  return String(features.case_type ?? features.caseType ?? "");
+}
+
+function getJurisdiction(features: Record<string, unknown>): string {
+  return String(features.jurisdiction ?? "");
 }
 
 // ---------------------------------------------------------------------------
@@ -70,7 +85,7 @@ export function CasesTable({ connection, offset, pageSize }: CasesTableProps) {
           <p className="text-slate-500 text-base mb-4">No cases yet.</p>
           <Link
             href="/case/new"
-            className="inline-flex items-center px-4 py-2 rounded-md bg-slate-900 text-white text-sm font-medium hover:bg-slate-700"
+            className="inline-flex h-11 items-center px-5 rounded-md bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90"
           >
             Submit your first case
           </Link>
@@ -84,92 +99,97 @@ export function CasesTable({ connection, offset, pageSize }: CasesTableProps) {
   const prevOffset = Math.max(0, offset - pageSize);
 
   return (
-    <main className="container mx-auto py-8 px-4">
+    <main className="container mx-auto py-8 px-4 max-w-5xl">
       {/* Page header */}
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-semibold tracking-tight">Cases</h1>
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-6">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Cases</h1>
+          <p className="text-sm text-muted-foreground">{`Showing ${fromRow}–${toRow} of ${totalCount}`}</p>
+        </div>
         <Link
           href="/case/new"
-          className="inline-flex items-center px-4 py-2 rounded-md bg-slate-900 text-white text-sm font-medium hover:bg-slate-700"
+          className="inline-flex h-11 items-center px-5 rounded-md bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90"
         >
           New case
         </Link>
       </div>
 
-      {/* Table card */}
-      <Card>
-        <CardHeader className="pb-2">
-          <CardTitle className="text-sm font-medium text-slate-500">
-            {`Showing ${fromRow}–${toRow} of ${totalCount}`}
-          </CardTitle>
-        </CardHeader>
+      {/* Desktop / tablet table */}
+      <Card className="hidden sm:block">
         <CardContent className="p-0">
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b bg-slate-50 text-slate-600 text-xs uppercase tracking-wider">
-                  <th scope="col" className="px-4 py-3 text-left font-medium">
-                    Date filed
-                  </th>
-                  <th scope="col" className="px-4 py-3 text-left font-medium">
-                    Case type
-                  </th>
-                  <th scope="col" className="px-4 py-3 text-left font-medium">
-                    Jurisdiction
-                  </th>
-                  <th scope="col" className="px-4 py-3 text-right font-medium">
-                    P(win) %
-                  </th>
-                  <th scope="col" className="px-4 py-3 text-left font-medium">
-                    Recommendation
-                  </th>
-                  <th scope="col" className="px-4 py-3 text-left font-medium sr-only">
-                    Action
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {nodes.map((c) => {
-                  const badgeClass =
-                    BADGE_CLASS[c.recommendation.kind] ?? BADGE_CLASS.Borderline;
-                  return (
-                    <tr
-                      key={c.id}
-                      className="border-b last:border-0 hover:bg-slate-50 transition-colors"
-                    >
-                      <td className="px-4 py-3 text-slate-700 whitespace-nowrap">
-                        {formatDate(c.createdAt)}
-                      </td>
-                      <td className="px-4 py-3 capitalize">
-                        {c.inputFeatures.caseType}
-                      </td>
-                      <td className="px-4 py-3">{c.inputFeatures.jurisdiction}</td>
-                      <td className="px-4 py-3 text-right font-mono tabular-nums">
-                        {Math.round(c.prediction.pWin * 100)}%
-                      </td>
-                      <td className="px-4 py-3">
-                        <span
-                          className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${badgeClass}`}
-                        >
-                          {c.recommendation.kind}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3">
-                        <Link
-                          href={`/case/${c.id}`}
-                          className="text-slate-700 underline underline-offset-2 hover:text-slate-900 text-xs"
-                        >
-                          View
-                        </Link>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b bg-slate-50 text-slate-600 text-xs uppercase tracking-wider">
+                <th scope="col" className="px-4 py-3 text-left font-medium">Date filed</th>
+                <th scope="col" className="px-4 py-3 text-left font-medium">Case type</th>
+                <th scope="col" className="px-4 py-3 text-left font-medium">Jurisdiction</th>
+                <th scope="col" className="px-4 py-3 text-right font-medium">P(win) %</th>
+                <th scope="col" className="px-4 py-3 text-left font-medium">Recommendation</th>
+                <th scope="col" className="px-4 py-3 text-right font-medium"><span className="sr-only">Open case</span></th>
+              </tr>
+            </thead>
+            <tbody>
+              {nodes.map((c) => {
+                const features = (c.inputFeatures ?? {}) as Record<string, unknown>;
+                const badgeClass = BADGE_CLASS[c.recommendation.kind] ?? BADGE_CLASS.Borderline;
+                return (
+                  <tr key={c.id} className="border-b last:border-0 hover:bg-slate-50 transition-colors">
+                    <td className="px-4 py-3 text-slate-700 whitespace-nowrap">{formatDate(c.createdAt)}</td>
+                    <td className="px-4 py-3 capitalize">{getCaseType(features) || "—"}</td>
+                    <td className="px-4 py-3">{getJurisdiction(features)}</td>
+                    <td className="px-4 py-3 text-right font-mono tabular-nums">{Math.round(c.prediction.pWin * 100)}%</td>
+                    <td className="px-4 py-3">
+                      <span className={`inline-block px-2.5 py-1 rounded text-xs font-semibold ${badgeClass}`}>
+                        {c.recommendation.kind}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      <Link
+                        href={`/case/${c.id}`}
+                        className="inline-flex h-9 items-center justify-center rounded-md border border-input bg-background px-4 text-sm font-medium hover:bg-accent"
+                      >
+                        Open
+                      </Link>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </CardContent>
       </Card>
+
+      {/* Mobile card list (fixes the table overflow heuristic finding) */}
+      <ul className="sm:hidden space-y-3" aria-label="Cases">
+        {nodes.map((c) => {
+          const features = (c.inputFeatures ?? {}) as Record<string, unknown>;
+          const badgeClass = BADGE_CLASS[c.recommendation.kind] ?? BADGE_CLASS.Borderline;
+          return (
+            <li key={c.id}>
+              <Link
+                href={`/case/${c.id}`}
+                className="block rounded-md border border-slate-200 bg-card p-4 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-xs text-slate-500">{formatDate(c.createdAt)}</p>
+                    <p className="mt-1 text-sm font-medium capitalize">
+                      {getCaseType(features) || "Case"} · {getJurisdiction(features)}
+                    </p>
+                  </div>
+                  <span className={`shrink-0 inline-block px-2.5 py-1 rounded text-xs font-semibold ${badgeClass}`}>
+                    {c.recommendation.kind}
+                  </span>
+                </div>
+                <div className="mt-3 flex items-baseline gap-2">
+                  <span className="text-2xl font-bold tabular-nums">{Math.round(c.prediction.pWin * 100)}%</span>
+                  <span className="text-xs text-slate-500 uppercase tracking-wide">P(win)</span>
+                </div>
+              </Link>
+            </li>
+          );
+        })}
+      </ul>
 
       {/* Pagination footer */}
       <div className="flex items-center justify-between mt-4 text-sm text-slate-600">
@@ -178,7 +198,7 @@ export function CasesTable({ connection, offset, pageSize }: CasesTableProps) {
           {offset > 0 ? (
             <Link
               href={`/cases?offset=${prevOffset}`}
-              className="px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50"
+              className="inline-flex h-9 items-center px-3 rounded border border-slate-300 hover:bg-slate-50"
               aria-label="Previous page"
             >
               Previous
@@ -187,7 +207,7 @@ export function CasesTable({ connection, offset, pageSize }: CasesTableProps) {
             <button
               disabled
               aria-label="Previous page"
-              className="px-3 py-1.5 rounded border border-slate-200 text-slate-400 cursor-not-allowed"
+              className="inline-flex h-9 items-center px-3 rounded border border-slate-200 text-slate-400 cursor-not-allowed"
             >
               Previous
             </button>
@@ -196,7 +216,7 @@ export function CasesTable({ connection, offset, pageSize }: CasesTableProps) {
           {nextOffset !== null ? (
             <Link
               href={`/cases?offset=${nextOffset}`}
-              className="px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50"
+              className="inline-flex h-9 items-center px-3 rounded border border-slate-300 hover:bg-slate-50"
               aria-label="Next page"
             >
               Next
@@ -205,7 +225,7 @@ export function CasesTable({ connection, offset, pageSize }: CasesTableProps) {
             <button
               disabled
               aria-label="Next page"
-              className="px-3 py-1.5 rounded border border-slate-200 text-slate-400 cursor-not-allowed"
+              className="inline-flex h-9 items-center px-3 rounded border border-slate-200 text-slate-400 cursor-not-allowed"
             >
               Next
             </button>

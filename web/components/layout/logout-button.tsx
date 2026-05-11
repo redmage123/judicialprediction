@@ -13,7 +13,7 @@ export function LogoutButton() {
   }
 
   return (
-    <Button variant="outline" size="sm" onClick={handleLogout}>
+    <Button variant="outline" onClick={handleLogout}>
       Sign out
     </Button>
   );

@@ -363,7 +363,7 @@ export function IntakeForm() {
           )}
 
           <div className="mt-6 flex items-center gap-4">
-            <Button type="submit" disabled={loading}>
+            <Button type="submit" size="lg" disabled={loading}>
               {loading ? "Predicting…" : "Run prediction"}
             </Button>
 

@@ -1,3 +1,6 @@
+import { cookies } from "next/headers";
+import { redirect } from "next/navigation";
+import Link from "next/link";
 import {
   Card,
   CardContent,
@@ -5,81 +8,33 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
 
-const GATEWAY_INTERNAL =
-  process.env.GATEWAY_INTERNAL_URL ?? "http://localhost:4000";
-
-interface HealthzResponse {
-  status: string;
-  timestamp?: string;
-  version?: string;
-  [key: string]: unknown;
-}
-
-async function fetchHealthz(): Promise<HealthzResponse | null> {
-  try {
-    const res = await fetch(`${GATEWAY_INTERNAL}/healthz`, {
-      // No caching — fresh check on each request during dev.
-      cache: "no-store",
-    });
-    if (!res.ok) return null;
-    return res.json() as Promise<HealthzResponse>;
-  } catch {
-    return null;
-  }
-}
-
+// Authenticated operators land on the case list. Unauthenticated visitors get
+// a short marketing card with a sign-in CTA. The internal /healthz check is
+// out of band (docker compose ps / scripts/jp-smoke) — it does not belong on
+// the operator-facing home.
 export default async function HomePage() {
-  const health = await fetchHealthz();
-  const isHealthy = health?.status === "ok" || health?.status === "healthy";
+  const cookieStore = await cookies();
+  if (cookieStore.has("jp_session")) {
+    redirect("/cases");
+  }
 
   return (
     <main className="flex min-h-screen items-center justify-center p-8">
-      <Card className="w-full max-w-md" aria-label="API health status">
+      <Card className="w-full max-w-md text-center">
         <CardHeader>
           <CardTitle className="text-2xl font-bold tracking-tight">
             JudicialPredict
           </CardTitle>
-          <CardDescription>API gateway health check</CardDescription>
+          <CardDescription>
+            AI-powered case evaluation for law firms.
+          </CardDescription>
         </CardHeader>
-        <CardContent className="space-y-4">
-          {health ? (
-            <>
-              <div
-                className="flex items-center gap-3"
-                aria-live="polite"
-                aria-atomic="true"
-              >
-                <span
-                  className={`inline-block h-3 w-3 rounded-full ${
-                    isHealthy ? "bg-green-500" : "bg-yellow-500"
-                  }`}
-                  aria-hidden="true"
-                />
-                <span className="text-lg font-semibold">
-                  {isHealthy ? "Healthy" : health.status}
-                </span>
-              </div>
-              {health.timestamp && (
-                <p className="text-sm text-muted-foreground">
-                  <span className="font-medium">Timestamp: </span>
-                  <time dateTime={health.timestamp}>{health.timestamp}</time>
-                </p>
-              )}
-              {health.version && (
-                <p className="text-sm text-muted-foreground">
-                  <span className="font-medium">Version: </span>
-                  {health.version}
-                </p>
-              )}
-            </>
-          ) : (
-            <p className="text-sm text-red-600" role="alert" aria-live="assertive">
-              Unable to reach api-gateway at{" "}
-              <code className="font-mono">{GATEWAY_INTERNAL}/healthz</code>.
-              Start the api-gateway service and reload.
-            </p>
-          )}
+        <CardContent>
+          <Button asChild className="w-full">
+            <Link href="/login">Sign in</Link>
+          </Button>
         </CardContent>
       </Card>
     </main>
