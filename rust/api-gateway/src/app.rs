@@ -11,8 +11,8 @@
 // per-tenant token and returns 429 on exhaustion.  Both middlewares run only
 // on the /graphql route; /health is unauthenticated.
 
-use anyhow::Result;
-use async_graphql::{Context, EmptyMutation, EmptySubscription, Object, Schema, SimpleObject};
+use anyhow::{Context as _, Result};
+use async_graphql::{Context, EmptySubscription, Object, Schema, SimpleObject};
 use async_graphql_axum::{GraphQLRequest, GraphQLResponse};
 use axum::{
     extract::{Extension, State},
@@ -24,6 +24,7 @@ use axum::{
 use feature_store::judicialpredict::data_plane::feature_store::v1::{
     feature_store_service_client::FeatureStoreServiceClient, GetFeatureRequest,
 };
+use sqlx::PgPool;
 use std::sync::Arc;
 use tonic::transport::Channel;
 use uuid::Uuid;
@@ -160,13 +161,289 @@ impl Query {
             },
         }))
     }
+
+    /// List the current tenant's cases, most-recent-first.
+    /// Resolves `Query.listCases(limit: Int = 20, offset: Int = 0)` (S4.3 / JP-57).
+    async fn list_cases(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(default = 20)] limit: i32,
+        #[graphql(default = 0)] offset: i32,
+    ) -> async_graphql::Result<crate::graphql_predict::CaseConnection> {
+        use async_graphql::{Json, ID};
+        use crate::graphql_predict::{Case, CaseConnection, PredictInput, PredictResult, RecommendationDto, compute_next_offset};
+        use sqlx::Row as _;
+
+        if !(1..=100).contains(&limit) {
+            return Err(async_graphql::Error::new("limit must be between 1 and 100"));
+        }
+        if offset < 0 {
+            return Err(async_graphql::Error::new("offset must be >= 0"));
+        }
+
+        let TenantId(tenant_id) = *ctx
+            .data::<TenantId>()
+            .map_err(|_| async_graphql::Error::new("missing tenant id"))?;
+
+        let pool = ctx
+            .data::<Option<Arc<PgPool>>>()
+            .map_err(|_| async_graphql::Error::new("cases store unavailable"))?
+            .as_ref()
+            .ok_or_else(|| {
+                async_graphql::Error::new("cases store not configured (DATABASE_URL missing)")
+            })?;
+
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("cases tx begin: {e}")))?;
+
+        sqlx::query(&format!("SET LOCAL app.current_tenant_id = '{tenant_id}'"))
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("SET LOCAL failed: {e}")))?;
+
+        let total_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM cases WHERE tenant_id = $1")
+                .bind(tenant_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| async_graphql::Error::new(format!("count query failed: {e}")))?;
+
+        let rows = sqlx::query(
+            r#"
+            SELECT id, tenant_id, input_features, prediction, recommendation,
+                   created_by, created_at::text AS created_at_s
+            FROM   cases
+            WHERE  tenant_id = $1
+            ORDER BY created_at DESC
+            LIMIT $2 OFFSET $3
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(i64::from(limit))
+        .bind(i64::from(offset))
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| async_graphql::Error::new(format!("list query failed: {e}")))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("cases tx commit: {e}")))?;
+
+        let mut nodes = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let id: Uuid = row.try_get("id")
+                .map_err(|e| async_graphql::Error::new(format!("row.id: {e}")))?;
+            let tenant_id_col: Uuid = row.try_get("tenant_id")
+                .map_err(|e| async_graphql::Error::new(format!("row.tenant_id: {e}")))?;
+            let created_by: Option<Uuid> = row.try_get("created_by")
+                .map_err(|e| async_graphql::Error::new(format!("row.created_by: {e}")))?;
+            let created_at: String = row.try_get("created_at_s")
+                .map_err(|e| async_graphql::Error::new(format!("row.created_at: {e}")))?;
+            let input_features_val: serde_json::Value = row.try_get("input_features")
+                .map_err(|e| async_graphql::Error::new(format!("case {id}: input_features NULL: {e}")))?;
+            let prediction_val: serde_json::Value = row.try_get("prediction")
+                .map_err(|e| async_graphql::Error::new(format!("case {id}: prediction NULL: {e}")))?;
+            let recommendation_val: serde_json::Value = row.try_get("recommendation")
+                .map_err(|e| async_graphql::Error::new(format!("case {id}: recommendation NULL: {e}")))?;
+
+            let input_features: PredictInput = serde_json::from_value(input_features_val)
+                .map_err(|e| async_graphql::Error::new(format!("case {id}: input_features parse: {e}")))?;
+            let prediction: PredictResult = serde_json::from_value(prediction_val)
+                .map_err(|e| async_graphql::Error::new(format!("case {id}: prediction parse: {e}")))?;
+            let recommendation: RecommendationDto = serde_json::from_value(recommendation_val)
+                .map_err(|e| async_graphql::Error::new(format!("case {id}: recommendation parse: {e}")))?;
+
+            nodes.push(Case {
+                id: ID::from(id.to_string()),
+                tenant_id: ID::from(tenant_id_col.to_string()),
+                input_features: Json(input_features),
+                prediction,
+                recommendation,
+                created_by: created_by.map(|u| ID::from(u.to_string())),
+                created_at,
+            });
+        }
+
+        let next_offset = compute_next_offset(offset, nodes.len(), total_count);
+        Ok(CaseConnection { nodes, total_count, next_offset })
+    }
+
+    /// Fetch one case by UUID; null if missing or other-tenant. Resolves `Query.case(id)` (S4.4 / JP-58).
+    #[graphql(name = "case")]
+    async fn get_case(
+        &self,
+        ctx: &Context<'_>,
+        id: async_graphql::ID,
+    ) -> async_graphql::Result<Option<crate::graphql_predict::Case>> {
+        use async_graphql::Json;
+        use crate::graphql_predict::{Case, PredictInput, PredictResult, RecommendationDto};
+        use sqlx::Row as _;
+
+        let TenantId(tenant_id) = *ctx
+            .data::<TenantId>()
+            .map_err(|_| async_graphql::Error::new("missing tenant id"))?;
+
+        let case_uuid = Uuid::parse_str(id.as_str())
+            .map_err(|_| async_graphql::Error::new("invalid case id: must be a UUID v4"))?;
+
+        let pool = ctx
+            .data::<Option<Arc<PgPool>>>()
+            .map_err(|_| async_graphql::Error::new("cases store unavailable"))?
+            .as_ref()
+            .ok_or_else(|| {
+                async_graphql::Error::new("cases store not configured (DATABASE_URL missing)")
+            })?;
+
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("cases tx begin: {e}")))?;
+
+        sqlx::query(&format!("SET LOCAL app.current_tenant_id = '{tenant_id}'"))
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("SET LOCAL failed: {e}")))?;
+
+        let row_opt = sqlx::query(
+            r#"
+            SELECT id, tenant_id, input_features, prediction, recommendation,
+                   created_by, created_at::text AS created_at_s
+            FROM   cases
+            WHERE  id = $1 AND tenant_id = $2
+            "#,
+        )
+        .bind(case_uuid)
+        .bind(tenant_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| async_graphql::Error::new(format!("case query failed: {e}")))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("cases tx commit: {e}")))?;
+
+        let Some(row) = row_opt else { return Ok(None); };
+
+        let row_id: Uuid = row.try_get("id")
+            .map_err(|e| async_graphql::Error::new(format!("row.id: {e}")))?;
+        let tenant_id_col: Uuid = row.try_get("tenant_id")
+            .map_err(|e| async_graphql::Error::new(format!("row.tenant_id: {e}")))?;
+        let created_by: Option<Uuid> = row.try_get("created_by")
+            .map_err(|e| async_graphql::Error::new(format!("row.created_by: {e}")))?;
+        let created_at: String = row.try_get("created_at_s")
+            .map_err(|e| async_graphql::Error::new(format!("row.created_at: {e}")))?;
+
+        let input_features_val: serde_json::Value = row.try_get("input_features")
+            .map_err(|e| async_graphql::Error::new(format!("case {row_id}: input_features NULL: {e}")))?;
+        let prediction_val: serde_json::Value = row.try_get("prediction")
+            .map_err(|e| async_graphql::Error::new(format!("case {row_id}: prediction NULL: {e}")))?;
+        let recommendation_val: serde_json::Value = row.try_get("recommendation")
+            .map_err(|e| async_graphql::Error::new(format!("case {row_id}: recommendation NULL: {e}")))?;
+
+        let input_features: PredictInput = serde_json::from_value(input_features_val)
+            .map_err(|e| async_graphql::Error::new(format!("case {row_id}: input_features parse: {e}")))?;
+        let prediction: PredictResult = serde_json::from_value(prediction_val)
+            .map_err(|e| async_graphql::Error::new(format!("case {row_id}: prediction parse: {e}")))?;
+        let recommendation: RecommendationDto = serde_json::from_value(recommendation_val)
+            .map_err(|e| async_graphql::Error::new(format!("case {row_id}: recommendation parse: {e}")))?;
+
+        Ok(Some(Case {
+            id: async_graphql::ID::from(row_id.to_string()),
+            tenant_id: async_graphql::ID::from(tenant_id_col.to_string()),
+            input_features: Json(input_features),
+            prediction,
+            recommendation,
+            created_by: created_by.map(|u| async_graphql::ID::from(u.to_string())),
+            created_at,
+        }))
+    }
+
+    /// Full prediction history for a case, most-recent-first. Resolves `Query.casePredictions(id)` (S4.7 / JP-61).
+    #[graphql(name = "casePredictions")]
+    async fn case_predictions(
+        &self,
+        ctx: &Context<'_>,
+        id: async_graphql::ID,
+    ) -> async_graphql::Result<Vec<crate::graphql_predict::PredictionHistoryEntry>> {
+        use crate::graphql_predict::{PredictResult, PredictionHistoryEntry};
+        use sqlx::Row as _;
+
+        let TenantId(tenant_id) = *ctx
+            .data::<TenantId>()
+            .map_err(|_| async_graphql::Error::new("missing tenant id"))?;
+
+        let case_uuid = Uuid::parse_str(id.as_str())
+            .map_err(|_| async_graphql::Error::new("invalid case id: must be a UUID v4"))?;
+
+        let pool = ctx
+            .data::<Option<Arc<PgPool>>>()
+            .map_err(|_| async_graphql::Error::new("cases store unavailable"))?
+            .as_ref()
+            .ok_or_else(|| {
+                async_graphql::Error::new("cases store not configured (DATABASE_URL missing)")
+            })?;
+
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("predictions tx begin: {e}")))?;
+
+        sqlx::query(&format!("SET LOCAL app.current_tenant_id = '{tenant_id}'"))
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("SET LOCAL failed: {e}")))?;
+
+        let rows = sqlx::query(
+            r#"
+            SELECT id, prediction, model_version, created_at::text AS created_at_s
+            FROM   predictions
+            WHERE  case_id = $1 AND tenant_id = $2
+            ORDER BY created_at DESC
+            "#,
+        )
+        .bind(case_uuid)
+        .bind(tenant_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| async_graphql::Error::new(format!("predictions query failed: {e}")))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("predictions tx commit: {e}")))?;
+
+        let mut entries = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let entry_id: Uuid = row.try_get("id")
+                .map_err(|e| async_graphql::Error::new(format!("row.id: {e}")))?;
+            let prediction_val: serde_json::Value = row.try_get("prediction")
+                .map_err(|e| async_graphql::Error::new(format!("prediction {entry_id}: prediction NULL: {e}")))?;
+            let model_version: String = row.try_get("model_version")
+                .map_err(|e| async_graphql::Error::new(format!("row.model_version: {e}")))?;
+            let created_at: String = row.try_get("created_at_s")
+                .map_err(|e| async_graphql::Error::new(format!("row.created_at: {e}")))?;
+
+            let prediction: PredictResult = serde_json::from_value(prediction_val)
+                .map_err(|e| async_graphql::Error::new(format!("prediction {entry_id}: parse error: {e}")))?;
+
+            entries.push(PredictionHistoryEntry {
+                id: async_graphql::ID::from(entry_id.to_string()),
+                prediction,
+                model_version,
+                created_at,
+            });
+        }
+
+        Ok(entries)
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Application state — owns the GraphQL schema, JWT secret, and rate-limit store
 // ---------------------------------------------------------------------------
 
-type AppSchema = Schema<Query, EmptyMutation, EmptySubscription>;
+type AppSchema = Schema<Query, crate::graphql_predict::Mutation, EmptySubscription>;
 
 /// Shared application state injected into every axum handler via `State<Arc<AppState>>`.
 pub(crate) struct AppState {
@@ -225,6 +502,9 @@ async fn health_handler() -> impl IntoResponse {
 /// ```
 pub async fn build_app(
     feature_store_grpc_url: &str,
+    ml_inference_url: &str,
+    cases_pool: Option<std::sync::Arc<sqlx::PgPool>>,
+    audit_recorder: Option<audit_recorder::AuditRecorder>,
     jwt_secret: Vec<u8>,
     rate_config: RateLimitConfig,
 ) -> Result<Router> {
@@ -234,7 +514,20 @@ pub async fn build_app(
 
     let fs_client = FeatureStoreServiceClient::new(channel);
 
-    let schema = Schema::build(Query, EmptyMutation, EmptySubscription)
+    let schema = Schema::build(Query, crate::graphql_predict::Mutation, EmptySubscription)
+        // gRPC client for ml-inference-svc (S5.4 / JP-71).  connect_lazy lets the
+        // gateway start even if ml-inference is briefly unreachable.
+        .data({
+            use crate::ml_inference_proto::inference_service_client::InferenceServiceClient;
+            let channel = tonic::transport::Channel::from_shared(ml_inference_url.to_string())
+                .context("ml-inference URL invalid")?
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(30))
+                .connect_lazy();
+            crate::graphql_predict::MlInferenceClient { inner: InferenceServiceClient::new(channel) }
+        })
+        .data(cases_pool)
+        .data(audit_recorder)
         .data(fs_client)
         .finish();
 
