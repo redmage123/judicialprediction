@@ -6,6 +6,9 @@
 pub mod recommend;
 pub use recommend::{recommend, PredictionInput, Recommendation, RecommendationKind};
 
+pub mod settle;
+pub use settle::{jurisdiction_settle_anchor, settle_offer};
+
 /// Expected value of a discrete probability distribution.
 /// `outcomes`: slice of (probability, value) pairs; probabilities must sum to 1.
 pub fn expected_value(outcomes: &[(f64, f64)]) -> f64 {

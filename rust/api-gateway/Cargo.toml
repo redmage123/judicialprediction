@@ -18,6 +18,7 @@ feature-store = { path = "../feature-store" }
 rate-limit = { path = "../rate-limit" }
 audit-recorder = { path = "../audit-recorder" }
 decision-arith = { path = "../decision-arith" }
+cost-engine = { path = "../cost-engine" }
 tonic = { workspace = true }
 prost = { workspace = true }
 tokio = { workspace = true }

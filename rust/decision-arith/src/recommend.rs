@@ -58,30 +58,30 @@ pub struct Recommendation {
 
 // ── Core function ─────────────────────────────────────────────────────────────
 
-/// Produce a structured recommendation from a probabilistic prediction and a
-/// litigation cost estimate.
+/// Produce a structured recommendation from a probabilistic prediction, a
+/// litigation cost estimate, and the case's jurisdiction.
 ///
 /// # Expected-value model
 ///
 /// ```text
 /// EV_try    = p_win × expected_damages − cost
-/// EV_settle = expected_damages × 0.40
+/// EV_settle = settle_offer(input, jurisdiction)
+///           = expected_damages × jurisdiction_settle_anchor(jurisdiction)
 /// ```
 ///
-/// The **0.40 settlement anchor** is a documented heuristic: US civil
-/// settlements typically land at 30–50 % of expected trial damages. Using 0.40
-/// (the midpoint of the empirical range) keeps the model conservative without
-/// requiring a cost-engine calibration at Sprint 2 maturity.
-///
-/// > **Sprint-4 follow-up:** replace the 0.40 anchor with the real
-/// > cost-engine output and a Rubinstein/Nash negotiation model that ingests
-/// > BATNA/WATNA/ZOPA inputs from spec §5.4.
+/// `jurisdiction_settle_anchor` (S5.11) returns `0.45` for federal, `0.35`
+/// for state, and `0.40` (legacy midpoint) for anything else.  Empty or
+/// unknown strings keep the pre-S5.11 behaviour exactly.
 ///
 /// # Decision rules (evaluated in order, first match wins)
 ///
 /// 1. **`Settle`** if `EV_settle > EV_try` AND `ci_lower < 0.40`
 /// 2. **`Try`** if `EV_try > EV_settle` AND `ci_lower > 0.55`
 /// 3. **`Borderline`** otherwise
+///
+/// The `0.40` and `0.55` here are **CI thresholds** on the conformal lower
+/// bound, not settle anchors — they happen to share a value with the legacy
+/// anchor by coincidence, not design.
 ///
 /// # Bullet generation
 ///
@@ -93,13 +93,15 @@ pub struct Recommendation {
 /// Never panics for any finite, well-formed input. `p_win` values outside
 /// `[0.0, 1.0]` or non-finite floats produce `Decimal::ZERO` via the
 /// `try_from` fallback and degrade gracefully to `Borderline`.
-pub fn recommend(input: &PredictionInput, cost: Decimal) -> Recommendation {
+pub fn recommend(input: &PredictionInput, cost: Decimal, jurisdiction: &str) -> Recommendation {
     // Convert p_win (f64) to Decimal; fall back to 0 for NaN / ±∞.
     let p_win_dec = Decimal::try_from(input.p_win).unwrap_or(Decimal::ZERO);
 
     let ev_try = p_win_dec * input.expected_damages - cost;
-    // 0.40 anchor: Decimal::new(40, 2) = 40 × 10^(-2) = 0.40 (exact, no f64 rounding).
-    let ev_settle = input.expected_damages * Decimal::new(40, 2);
+    // S5.11: anchor varies by jurisdiction. settle::settle_offer is the
+    // public derivation; we inline the multiplication here to avoid an
+    // unnecessary clone of `input`.
+    let ev_settle = input.expected_damages * crate::settle::jurisdiction_settle_anchor(jurisdiction);
 
     let kind = if ev_settle > ev_try && input.ci_lower < 0.40 {
         RecommendationKind::Settle
@@ -176,10 +178,34 @@ mod tests {
             ci_upper: 0.50,
             expected_damages: d("100000.00"),
         };
-        let rec = recommend(&input, d("50000.00"));
+        // Empty jurisdiction → legacy 0.40 anchor; preserves the pre-S5.11
+        // expected values so this assertion still pins the unchanged path.
+        let rec = recommend(&input, d("50000.00"), "");
         assert_eq!(rec.kind, RecommendationKind::Settle);
         assert_eq!(rec.expected_value_try, d("-20000.00"));
-        assert_eq!(rec.expected_value_settle, d("40000.00"));
+        assert_eq!(rec.expected_value_settle, d("40000.0000"));
+    }
+
+    /// S5.11: jurisdiction shifts the settle anchor, which can flip the
+    /// recommendation kind.  Same prediction + same cost + us-federal anchor
+    /// (0.45) raises EV_settle from $40k to $45k.  With p_win=0.30 the trial
+    /// EV stays at −$20k so Settle still dominates EV-wise, but the bullet
+    /// numbers shift.
+    #[test]
+    fn settle_anchor_varies_by_jurisdiction() {
+        let input = PredictionInput {
+            p_win: 0.30,
+            ci_lower: 0.30,
+            ci_upper: 0.50,
+            expected_damages: d("100000.00"),
+        };
+        let federal = recommend(&input, d("50000.00"), "us-federal");
+        let state = recommend(&input, d("50000.00"), "us-state");
+        assert_eq!(federal.expected_value_settle, d("45000.0000"));
+        assert_eq!(state.expected_value_settle, d("35000.0000"));
+        // EV_try is unaffected by jurisdiction.
+        assert_eq!(federal.expected_value_try, d("-20000.00"));
+        assert_eq!(state.expected_value_try, d("-20000.00"));
     }
 
     /// Try branch: EV_try > EV_settle AND ci_lower > 0.55.
@@ -196,10 +222,10 @@ mod tests {
             ci_upper: 0.92,
             expected_damages: d("100000.00"),
         };
-        let rec = recommend(&input, d("10000.00"));
+        let rec = recommend(&input, d("10000.00"), "");
         assert_eq!(rec.kind, RecommendationKind::Try);
         assert_eq!(rec.expected_value_try, d("70000.00"));
-        assert_eq!(rec.expected_value_settle, d("40000.00"));
+        assert_eq!(rec.expected_value_settle, d("40000.0000"));
     }
 
     /// Borderline branch: EV comparison favours settle but ci_lower ≥ 0.40,
@@ -218,7 +244,7 @@ mod tests {
             ci_upper: 0.60,
             expected_damages: d("100000.00"),
         };
-        let rec = recommend(&input, d("45000.00"));
+        let rec = recommend(&input, d("45000.00"), "");
         assert_eq!(rec.kind, RecommendationKind::Borderline);
     }
 
@@ -234,8 +260,8 @@ mod tests {
             expected_damages: d("250000.00"),
         };
         let cost = d("80000.00");
-        let r1 = recommend(&input, cost);
-        let r2 = recommend(&input, cost);
+        let r1 = recommend(&input, cost, "");
+        let r2 = recommend(&input, cost, "");
         assert_eq!(
             r1.rationale_bullets, r2.rationale_bullets,
             "bullets must be deterministic across identical calls",
@@ -252,8 +278,8 @@ mod tests {
             expected_damages: d("500000.00"),
         };
         let cost = d("50000.00");
-        let r1 = recommend(&input, cost);
-        let r2 = recommend(&input, cost);
+        let r1 = recommend(&input, cost, "");
+        let r2 = recommend(&input, cost, "");
         assert_eq!(
             r1.rationale_bullets, r2.rationale_bullets,
             "bullets must be deterministic across identical calls",
@@ -271,7 +297,7 @@ mod tests {
             ci_upper: 0.53,
             expected_damages: d("80000.00"),
         };
-        let rec = recommend(&input, d("20000.00"));
+        let rec = recommend(&input, d("20000.00"), "");
         assert!(
             rec.rationale_bullets[0].contains("P(win) 0.42"),
             "bullet[0] missing 'P(win) 0.42': got {:?}",
@@ -318,7 +344,7 @@ mod tests {
                 * Decimal::new(i64::from(cost_frac_pct), 2);
 
             let input = PredictionInput { p_win, ci_lower, ci_upper, expected_damages };
-            let rec = recommend(&input, cost);
+            let rec = recommend(&input, cost, "");
 
             // All three bullets must be non-empty strings.
             prop_assert!(!rec.rationale_bullets[0].is_empty(), "bullet[0] is empty");

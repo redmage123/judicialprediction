@@ -495,8 +495,19 @@ impl Mutation {
             ci_upper:          f64::from(prediction.ci_upper),
             expected_damages:  Decimal::from(100_000u32),
         };
-        // Sprint-5: replace $50k cost placeholder with cost-engine output.
-        let rec = decision_arith::recommend(&decision_input, Decimal::from(50_000u32));
+        // S5.10: replace the $50k cost placeholder with cost-engine output —
+        // jurisdiction_base × (1 + 0.08 × motion_count).  S5.11: jurisdiction
+        // also flows into the settle anchor (0.45 federal / 0.35 state / 0.40
+        // legacy fallback) via decision_arith::recommend.
+        // procedural_motion_count is an f32 in the GraphQL input (matches the
+        // feature wire format); clamp non-negative and round before casting.
+        // Rust's `as u32` is saturating for f32 → u32 since 1.45.
+        let motion_count = input
+            .procedural_motion_count
+            .max(0.0)
+            .round() as u32;
+        let cost = cost_engine::estimate_cost(&input.jurisdiction, motion_count);
+        let rec = decision_arith::recommend(&decision_input, cost, &input.jurisdiction);
 
         let recommendation = RecommendationDto {
             kind: match rec.kind {

@@ -2,6 +2,10 @@
 // Distributional cost composition: (component-distributions, correlation-matrix) -> total-distribution.
 // No I/O, no mutable global state, no unsafe.
 
+pub mod litigation_cost;
+
+pub use litigation_cost::{estimate_cost, jurisdiction_base_cost, MOTION_FACTOR_BPS};
+
 /// A simple discrete cost distribution: parallel slices of probabilities and costs.
 #[derive(Debug, Clone)]
 pub struct CostDistribution {
