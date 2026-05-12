@@ -76,11 +76,12 @@ export interface CasesTableProps {
 export function CasesTable({ connection, offset, pageSize }: CasesTableProps) {
   const { nodes, totalCount, nextOffset } = connection;
 
-  // ---- empty state --------------------------------------------------------
+  // Empty state is rendered by the stats cards above (which has the CTA);
+  // we still render an inline empty-state block so the page has a clear
+  // bottom region after the dashboard header.
   if (totalCount === 0) {
     return (
-      <main className="container mx-auto py-12 px-4">
-        <h1 className="text-2xl font-semibold tracking-tight mb-8">Cases</h1>
+      <main className="container mx-auto pb-12 px-4 max-w-5xl">
         <div className="text-center py-20 border border-dashed border-slate-200 rounded-lg">
           <p className="text-slate-500 text-base mb-4">No cases yet.</p>
           <Link
@@ -99,19 +100,12 @@ export function CasesTable({ connection, offset, pageSize }: CasesTableProps) {
   const prevOffset = Math.max(0, offset - pageSize);
 
   return (
-    <main className="container mx-auto py-8 px-4 max-w-5xl">
-      {/* Page header */}
-      <div className="flex flex-wrap items-center justify-between gap-3 mb-6">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Cases</h1>
-          <p className="text-sm text-muted-foreground">{`Showing ${fromRow}–${toRow} of ${totalCount}`}</p>
-        </div>
-        <Link
-          href="/case/new"
-          className="inline-flex h-11 items-center px-5 rounded-md bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90"
-        >
-          New case
-        </Link>
+    <main className="container mx-auto pb-8 px-4 max-w-5xl">
+      {/* Section header — the page-level h1 + primary CTA live in the
+          dashboard cards above, so this is just the list title. */}
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+        <h2 className="text-lg font-semibold tracking-tight">Recent cases</h2>
+        <p className="text-sm text-muted-foreground">{`Showing ${fromRow}–${toRow} of ${totalCount}`}</p>
       </div>
 
       {/* Desktop / tablet table */}

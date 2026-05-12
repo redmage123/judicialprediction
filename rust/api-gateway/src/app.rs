@@ -437,6 +437,99 @@ impl Query {
 
         Ok(entries)
     }
+
+    /// Aggregate stats for the current tenant's cases — drives the /cases
+    /// dashboard cards (total, recommendation breakdown, avg P(win), last 7d).
+    /// All counts honor RLS via `SET LOCAL app.current_tenant_id` + explicit
+    /// `tenant_id = $1` filter.
+    async fn case_stats(
+        &self,
+        ctx: &Context<'_>,
+    ) -> async_graphql::Result<CaseStats> {
+        use sqlx::Row as _;
+
+        let TenantId(tenant_id) = *ctx
+            .data::<TenantId>()
+            .map_err(|_| async_graphql::Error::new("missing tenant id"))?;
+
+        let pool = ctx
+            .data::<Option<Arc<PgPool>>>()
+            .map_err(|_| async_graphql::Error::new("cases store unavailable"))?
+            .as_ref()
+            .ok_or_else(|| {
+                async_graphql::Error::new("cases store not configured (DATABASE_URL missing)")
+            })?;
+
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("stats tx begin: {e}")))?;
+
+        sqlx::query(&format!("SET LOCAL app.current_tenant_id = '{tenant_id}'"))
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("SET LOCAL failed: {e}")))?;
+
+        // One round-trip: COUNT(*) plus per-recommendation counts plus avg
+        // p_win plus rows created in the last 7 days.  recommendation->>'kind'
+        // is the discriminator; prediction->>'p_win' is snake_case per the
+        // serde JSON encoding of PredictResult (the GraphQL alias is pWin).
+        let row = sqlx::query(
+            r#"
+            SELECT
+                COUNT(*)::bigint                                                                AS total,
+                COUNT(*) FILTER (WHERE recommendation->>'kind' = 'Settle')::bigint              AS settle,
+                COUNT(*) FILTER (WHERE recommendation->>'kind' = 'Try')::bigint                 AS try_count,
+                COUNT(*) FILTER (WHERE recommendation->>'kind' = 'Borderline')::bigint          AS borderline,
+                AVG((prediction->>'p_win')::float8)                                             AS avg_pwin,
+                COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days')::bigint         AS last7
+            FROM cases
+            WHERE tenant_id = $1
+            "#,
+        )
+        .bind(tenant_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| async_graphql::Error::new(format!("stats query failed: {e}")))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("stats tx commit: {e}")))?;
+
+        let total: i64 = row.try_get("total").unwrap_or(0);
+        let settle: i64 = row.try_get("settle").unwrap_or(0);
+        let try_count: i64 = row.try_get("try_count").unwrap_or(0);
+        let borderline: i64 = row.try_get("borderline").unwrap_or(0);
+        let avg_pwin: Option<f64> = row.try_get("avg_pwin").ok();
+        let last7: i64 = row.try_get("last7").unwrap_or(0);
+
+        Ok(CaseStats {
+            total_count: total,
+            settle_count: settle,
+            try_count,
+            borderline_count: borderline,
+            avg_p_win: avg_pwin,
+            last_seven_days_count: last7,
+        })
+    }
+}
+
+/// Aggregate counters returned by `Query.caseStats`.
+#[derive(SimpleObject)]
+pub(crate) struct CaseStats {
+    /// Total number of cases stored for this tenant.
+    total_count: i64,
+    /// Cases whose recommendation kind is `Settle`.
+    settle_count: i64,
+    /// Cases whose recommendation kind is `Try`.
+    try_count: i64,
+    /// Cases whose recommendation kind is `Borderline`.
+    borderline_count: i64,
+    /// Mean of `prediction.pWin` across all cases (0.0..1.0). `null` when there
+    /// are no cases yet.
+    avg_p_win: Option<f64>,
+    /// Cases created in the last seven days.
+    last_seven_days_count: i64,
 }
 
 // ---------------------------------------------------------------------------
