@@ -56,6 +56,7 @@ secrets/
 # Build / cache
 .cache/
 *.lock
+pnpm-lock.yaml
 sccache/
 
 # Test artifacts
