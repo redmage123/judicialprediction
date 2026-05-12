@@ -1,11 +1,13 @@
 "use client";
 
+import Link from "next/link";
 import { useState, type FormEvent } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { PasswordInput } from "@/components/ui/password-input";
 
 interface LoginFormProps {
   /** Safe redirect path after successful login. Defaults to "/". */
@@ -14,6 +16,10 @@ interface LoginFormProps {
 
 export function LoginForm({ nextUrl }: LoginFormProps) {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  // After a successful password reset the operator is bounced back to /login
+  // with ?reset=ok so we can show a "you can sign in now" confirmation.
+  const justReset = searchParams.get("reset") === "ok";
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -59,6 +65,15 @@ export function LoginForm({ nextUrl }: LoginFormProps) {
         <CardDescription>Sign in to your workspace</CardDescription>
       </CardHeader>
       <CardContent>
+        {justReset && (
+          <p
+            role="status"
+            aria-live="polite"
+            className="mb-4 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800"
+          >
+            Password updated. Sign in with your new password.
+          </p>
+        )}
         <form onSubmit={handleSubmit} noValidate aria-label="Sign in">
           <div className="space-y-4">
             <div className="space-y-1.5">
@@ -77,11 +92,18 @@ export function LoginForm({ nextUrl }: LoginFormProps) {
             </div>
 
             <div className="space-y-1.5">
-              <Label htmlFor="password">Password</Label>
-              <Input
+              <div className="flex items-center justify-between">
+                <Label htmlFor="password">Password</Label>
+                <Link
+                  href="/forgot-password"
+                  className="text-xs font-medium text-muted-foreground underline underline-offset-2 hover:text-primary"
+                >
+                  Forgot password?
+                </Link>
+              </div>
+              <PasswordInput
                 id="password"
                 name="password"
-                type="password"
                 autoComplete="current-password"
                 required
                 placeholder="••••••••"

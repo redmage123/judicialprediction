@@ -29,11 +29,14 @@ Sprint-4 follow-ups
 - Time-bounded elevated access (role='super' with expiry).
 """
 
+import datetime
+import secrets
 import uuid
 
 from django.contrib.auth.hashers import check_password as _check_password
 from django.contrib.auth.hashers import make_password as _make_password
 from django.db import models
+from django.utils import timezone
 
 
 class Operator(models.Model):
@@ -49,6 +52,18 @@ class Operator(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     email = models.EmailField(unique=True, help_text="Must match the Django auth user email.")
+    # Optional alphanumeric alias — operators can sign in with either email or
+    # username (auth_backends.py resolves both via case-insensitive Q lookup).
+    username = models.CharField(
+        max_length=64,
+        unique=True,
+        null=True,
+        blank=True,
+        help_text=(
+            "Optional alphanumeric login alias. Operators may sign in with "
+            "either email or username."
+        ),
+    )
     # Bcrypt hash — set via set_password(); blank means no password provisioned.
     password = models.CharField(
         max_length=128,
@@ -108,3 +123,89 @@ class Operator(models.Model):
         if not self.password:
             return False
         return _check_password(raw_password, self.password)
+
+
+# ---------------------------------------------------------------------------
+# Password-reset token (S5.9)
+#
+# Replaces the S4.8 "contact your admin" stub.  A request endpoint issues
+# a single-use token with a 1-hour TTL; a confirm endpoint consumes it and
+# sets a new password on the linked operator.
+#
+# Security
+# --------
+# - `token` is 256 bits of CSPRNG output, URL-safe base64.  We store the
+#   raw token (not a hash) because:
+#     1. it's single-use and short-lived (1h);
+#     2. the table is RLS-locked to the admin connection;
+#     3. compromise of the DB at rest is a much larger problem than this.
+# - `used_at` marks a token as redeemed so it cannot be replayed.
+# - `created_at` lets us audit reset activity even after expiry / use.
+# ---------------------------------------------------------------------------
+
+
+PASSWORD_RESET_TOKEN_TTL_MINUTES = 60
+
+
+def _generate_reset_token() -> str:
+    """Return 256 bits of URL-safe CSPRNG output as the token value."""
+    return secrets.token_urlsafe(32)
+
+
+class PasswordResetToken(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    operator = models.ForeignKey(
+        Operator,
+        on_delete=models.CASCADE,
+        related_name="password_reset_tokens",
+    )
+    token = models.CharField(
+        max_length=64,
+        unique=True,
+        default=_generate_reset_token,
+        help_text="URL-safe CSPRNG value embedded in the reset link.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    used_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "operators_passwordresettoken"
+        ordering = ["-created_at"]
+        verbose_name = "Password reset token"
+        verbose_name_plural = "Password reset tokens"
+        indexes = [
+            # Hot path: confirm-endpoint lookup by token string.
+            models.Index(fields=["token"], name="passwordresettoken_token_idx"),
+        ]
+
+    def __str__(self) -> str:  # pragma: no cover — admin display only
+        return f"reset[{self.operator.email}] expires={self.expires_at.isoformat()}"
+
+    # --- helpers ------------------------------------------------------------
+
+    @classmethod
+    def issue_for(cls, operator: Operator) -> "PasswordResetToken":
+        """Create and persist a fresh 1h-TTL token for *operator*."""
+        ttl = datetime.timedelta(minutes=PASSWORD_RESET_TOKEN_TTL_MINUTES)
+        return cls.objects.create(
+            operator=operator,
+            expires_at=timezone.now() + ttl,
+        )
+
+    @property
+    def is_expired(self) -> bool:
+        return timezone.now() >= self.expires_at
+
+    @property
+    def is_used(self) -> bool:
+        return self.used_at is not None
+
+    @property
+    def is_valid(self) -> bool:
+        return not self.is_expired and not self.is_used
+
+    def mark_used(self) -> None:
+        """Stamp `used_at` so the token cannot be replayed."""
+        self.used_at = timezone.now()
+        self.save(update_fields=["used_at"])

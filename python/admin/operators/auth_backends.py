@@ -41,8 +41,13 @@ class OperatorAuthBackend(BaseBackend):
         # Local import avoids circular imports at module load time.
         from operators.models import Operator  # noqa: PLC0415
 
+        # Accept either the email or the optional username alias.
+        from django.db.models import Q  # noqa: PLC0415
         try:
-            operator = Operator.objects.get(email=email, is_active=True)
+            operator = Operator.objects.get(
+                Q(email__iexact=email) | Q(username__iexact=email),
+                is_active=True,
+            )
         except Operator.DoesNotExist:
             # Run a dummy check to mitigate timing attacks even on miss.
             Operator().check_password(password)

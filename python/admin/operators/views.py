@@ -37,15 +37,29 @@ Sprint-5 follow-ups
 
 import datetime
 import json
+import logging
 import os
+from urllib.parse import urlencode
 
 import jwt  # PyJWT
+from django.conf import settings
 from django.contrib.auth import authenticate
+from django.contrib.auth.password_validation import (
+    ValidationError as PasswordValidationError,
+)
+from django.contrib.auth.password_validation import validate_password
+from django.core.mail import send_mail
 from django.http import HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 
-from operators.models import Operator
+from operators.models import (
+    PASSWORD_RESET_TOKEN_TTL_MINUTES,
+    Operator,
+    PasswordResetToken,
+)
+
+_log = logging.getLogger(__name__)
 
 _JWT_SECRET = os.environ.get(
     "JWT_SECRET",
@@ -117,3 +131,121 @@ def logout(request):
 def _is_debug() -> bool:
     """Return True when running in DEBUG mode (dev/CI)."""
     return os.environ.get("DEBUG", "true").lower() not in ("false", "0", "no")
+
+
+# ---------------------------------------------------------------------------
+# S5.9 — password reset (replaces the S4.8 "contact your admin" stub)
+#
+# POST /api/auth/reset/request
+#     Body: {"email": "..."}
+#     Always returns 200 with {ok: true} so callers cannot enumerate
+#     registered emails.  If the email matches an active operator, a fresh
+#     PasswordResetToken is created (1h TTL) and a reset link is emailed.
+#
+# POST /api/auth/reset/confirm
+#     Body: {"token": "...", "new_password": "..."}
+#     Validates the token (exists, not expired, not used), enforces Django's
+#     password validators, hashes via Operator.set_password(), and marks the
+#     token used.  On success returns 200 {ok: true}; on failure 400 with
+#     {error: "invalid_token" | "weak_password"}.
+# ---------------------------------------------------------------------------
+
+
+@csrf_exempt
+@require_POST
+def password_reset_request(request):
+    """Issue a 1h-TTL reset token + email the link (S5.9)."""
+    try:
+        body = json.loads(request.body)
+    except (json.JSONDecodeError, ValueError):
+        return JsonResponse({"ok": False, "error": "invalid_request"}, status=400)
+
+    email = (body.get("email") or "").strip().lower()
+
+    # Always return 200 to prevent email-enumeration attacks.  If the email
+    # is unknown, we just don't send anything; the response shape is identical.
+    response = JsonResponse(
+        {
+            "ok": True,
+            "ttl_minutes": PASSWORD_RESET_TOKEN_TTL_MINUTES,
+        },
+        status=200,
+    )
+
+    if not email:
+        return response
+
+    try:
+        operator = Operator.objects.get(email__iexact=email, is_active=True)
+    except Operator.DoesNotExist:
+        # Constant-time-ish: still cheap to skip the token creation here.
+        _log.info("password reset requested for unknown email=%s", email)
+        return response
+
+    token = PasswordResetToken.issue_for(operator)
+    reset_url = "{base}/reset-password?{qs}".format(
+        base=settings.WEB_BASE_URL.rstrip("/"),
+        qs=urlencode({"token": token.token}),
+    )
+    subject = "JudicialPredict — password reset request"
+    body_text = (
+        f"Hi,\n\n"
+        f"We received a request to reset the password for the JudicialPredict "
+        f"account associated with this email.\n\n"
+        f"Set a new password by opening the link below within the next "
+        f"{PASSWORD_RESET_TOKEN_TTL_MINUTES} minutes:\n\n"
+        f"    {reset_url}\n\n"
+        f"If you didn't request this, you can safely ignore this email.\n"
+    )
+    send_mail(
+        subject=subject,
+        message=body_text,
+        from_email=settings.DEFAULT_FROM_EMAIL,
+        recipient_list=[operator.email],
+        fail_silently=False,
+    )
+    _log.info("password reset email sent operator=%s token_id=%s", operator.id, token.id)
+    return response
+
+
+@csrf_exempt
+@require_POST
+def password_reset_confirm(request):
+    """Consume a reset token and set a new password (S5.9)."""
+    try:
+        body = json.loads(request.body)
+    except (json.JSONDecodeError, ValueError):
+        return JsonResponse({"ok": False, "error": "invalid_request"}, status=400)
+
+    token_str = (body.get("token") or "").strip()
+    new_password = body.get("new_password") or ""
+
+    if not token_str or not new_password:
+        return JsonResponse({"ok": False, "error": "invalid_request"}, status=400)
+
+    try:
+        token = PasswordResetToken.objects.select_related("operator").get(token=token_str)
+    except PasswordResetToken.DoesNotExist:
+        return JsonResponse({"ok": False, "error": "invalid_token"}, status=400)
+
+    if not token.is_valid:
+        return JsonResponse({"ok": False, "error": "invalid_token"}, status=400)
+
+    operator = token.operator
+    if not operator.is_active:
+        return JsonResponse({"ok": False, "error": "invalid_token"}, status=400)
+
+    try:
+        validate_password(new_password, user=None)
+    except PasswordValidationError as err:
+        return JsonResponse(
+            {"ok": False, "error": "weak_password", "details": list(err.messages)},
+            status=400,
+        )
+
+    operator.set_password(new_password)
+    operator.save(update_fields=["password", "updated_at"])
+    token.mark_used()
+
+    _log.info("password reset completed operator=%s token_id=%s", operator.id, token.id)
+    return JsonResponse({"ok": True}, status=200)

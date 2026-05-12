@@ -173,6 +173,36 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 # ---------------------------------------------------------------------------
+# Email (S5.9 password reset)
+#
+# Dev default writes messages to stdout — visible in the admin container's
+# logs.  Production wires a real SMTP backend via env vars:
+#     EMAIL_BACKEND     "django.core.mail.backends.smtp.EmailBackend"
+#     EMAIL_HOST        smtp.example.com
+#     EMAIL_PORT        587
+#     EMAIL_HOST_USER   noreply@judicialpredict.example.com
+#     EMAIL_HOST_PASSWORD  …
+#     EMAIL_USE_TLS     "true"
+# ---------------------------------------------------------------------------
+
+EMAIL_BACKEND = env(
+    "EMAIL_BACKEND",
+    default="django.core.mail.backends.console.EmailBackend",
+)
+EMAIL_HOST = env("EMAIL_HOST", default="localhost")
+EMAIL_PORT = env.int("EMAIL_PORT", default=25)
+EMAIL_HOST_USER = env("EMAIL_HOST_USER", default="")
+EMAIL_HOST_PASSWORD = env("EMAIL_HOST_PASSWORD", default="")
+EMAIL_USE_TLS = env.bool("EMAIL_USE_TLS", default=False)
+DEFAULT_FROM_EMAIL = env(
+    "DEFAULT_FROM_EMAIL",
+    default="noreply@judicialpredict.local",
+)
+# Used to construct the absolute reset-confirmation URL embedded in the email.
+# Set to your public web origin in production (e.g. https://app.example.com).
+WEB_BASE_URL = env("WEB_BASE_URL", default="http://localhost:3030")
+
+# ---------------------------------------------------------------------------
 # Internationalisation
 # ---------------------------------------------------------------------------
 
