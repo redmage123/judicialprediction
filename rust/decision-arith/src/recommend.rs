@@ -228,6 +228,132 @@ mod tests {
         assert_eq!(rec.expected_value_settle, d("40000.0000"));
     }
 
+    // ── Boundary-equality tests (S5.12) ────────────────────────────────────
+    //
+    // The decision rules use **strict** inequalities on both ci_lower and the
+    // EV comparison.  These tests pin every boundary so that a mutation from
+    // `<` to `<=` or `>` to `>=` (which cargo-mutants will routinely try)
+    // fails the suite immediately.  Without these, a flipped boundary
+    // produces a wrong recommendation for cases that land exactly on the
+    // threshold — a small but legally meaningful drift.
+
+    /// `ci_lower == 0.40` exactly → Borderline, NOT Settle.
+    /// Catches the `<` → `<=` mutation in the Settle branch.
+    #[test]
+    fn boundary_ci_lower_eq_0_40_is_borderline_not_settle() {
+        let input = PredictionInput {
+            p_win: 0.30,
+            ci_lower: 0.40, // exactly on the loss-exposure threshold
+            ci_upper: 0.50,
+            expected_damages: d("100000.00"),
+        };
+        let rec = recommend(&input, d("50000.00"), "");
+        assert_eq!(
+            rec.kind,
+            RecommendationKind::Borderline,
+            "ci_lower == 0.40 must be Borderline (strict `<`), got {:?}",
+            rec.kind,
+        );
+    }
+
+    /// `ci_lower == 0.55` exactly → Borderline, NOT Try.
+    /// Catches the `>` → `>=` mutation in the Try branch.
+    #[test]
+    fn boundary_ci_lower_eq_0_55_is_borderline_not_try() {
+        let input = PredictionInput {
+            p_win: 0.80,
+            ci_lower: 0.55, // exactly on the trial-justification threshold
+            ci_upper: 0.92,
+            expected_damages: d("100000.00"),
+        };
+        let rec = recommend(&input, d("10000.00"), "");
+        assert_eq!(
+            rec.kind,
+            RecommendationKind::Borderline,
+            "ci_lower == 0.55 must be Borderline (strict `>`), got {:?}",
+            rec.kind,
+        );
+    }
+
+    /// `ev_settle == ev_try` exactly with ci_lower < 0.40 → Borderline.
+    /// The Settle rule requires `ev_settle > ev_try` (strict); equal EVs
+    /// must NOT trigger Settle even with low CI.  Catches the EV
+    /// comparison `>` → `>=` mutation.
+    #[test]
+    fn boundary_ev_equal_is_borderline_not_settle() {
+        // EV_settle = damages × 0.40 = 40,000
+        // Pick p_win + cost so EV_try = 40,000 too:
+        //   ev_try = 0.90 × 100,000 − 50,000 = 40,000
+        let input = PredictionInput {
+            p_win: 0.90,
+            ci_lower: 0.30, // < 0.40 (would satisfy Settle's CI rule)
+            ci_upper: 0.95,
+            expected_damages: d("100000.00"),
+        };
+        let rec = recommend(&input, d("50000.00"), "");
+        assert_eq!(rec.expected_value_try, d("40000.00"));
+        assert_eq!(rec.expected_value_settle, d("40000.0000"));
+        assert_eq!(
+            rec.kind,
+            RecommendationKind::Borderline,
+            "ev_settle == ev_try must be Borderline (strict `>`), got {:?}",
+            rec.kind,
+        );
+    }
+
+    /// `ev_try == ev_settle` exactly with ci_lower > 0.55 → Borderline.
+    /// The Try rule requires `ev_try > ev_settle` (strict); equal EVs
+    /// must NOT trigger Try even with high CI.
+    #[test]
+    fn boundary_ev_equal_is_borderline_not_try() {
+        // Same EV setup as the previous test, but with ci_lower > 0.55.
+        let input = PredictionInput {
+            p_win: 0.90,
+            ci_lower: 0.60, // > 0.55 (would satisfy Try's CI rule)
+            ci_upper: 0.95,
+            expected_damages: d("100000.00"),
+        };
+        let rec = recommend(&input, d("50000.00"), "");
+        assert_eq!(rec.expected_value_try, d("40000.00"));
+        assert_eq!(rec.expected_value_settle, d("40000.0000"));
+        assert_eq!(
+            rec.kind,
+            RecommendationKind::Borderline,
+            "ev_try == ev_settle must be Borderline (strict `>`), got {:?}",
+            rec.kind,
+        );
+    }
+
+    /// Just-below threshold: `ci_lower = 0.40 - ε` still triggers Settle.
+    /// Sanity-check the other side of the boundary so the equality tests
+    /// above don't paper over a broader regression.
+    #[test]
+    fn just_below_0_40_threshold_still_settles() {
+        let input = PredictionInput {
+            p_win: 0.30,
+            ci_lower: 0.40 - 1e-9, // just under the threshold
+            ci_upper: 0.50,
+            expected_damages: d("100000.00"),
+        };
+        let rec = recommend(&input, d("50000.00"), "");
+        assert_eq!(rec.kind, RecommendationKind::Settle);
+    }
+
+    /// Just-above threshold: `ci_lower = 0.55 + ε` still triggers Try.
+    #[test]
+    fn just_above_0_55_threshold_still_tries() {
+        let input = PredictionInput {
+            p_win: 0.80,
+            ci_lower: 0.55 + 1e-9, // just over the threshold
+            ci_upper: 0.92,
+            expected_damages: d("100000.00"),
+        };
+        let rec = recommend(&input, d("10000.00"), "");
+        assert_eq!(rec.kind, RecommendationKind::Try);
+    }
+
+    // ── End boundary-equality tests ────────────────────────────────────────
+
     /// Borderline branch: EV comparison favours settle but ci_lower ≥ 0.40,
     /// so the Settle rule is not triggered; Try also fails.
     ///
