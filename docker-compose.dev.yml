@@ -200,7 +200,10 @@ services:
     networks:
       - jp_dev_net
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:4040/healthz >/dev/null 2>&1 || exit 1"]
+      # Runner image is debian-slim with curl installed in the Dockerfile
+      # (wget is not available).  The gateway exposes /health (not /healthz);
+      # /graphql is JWT-gated so it can't be used as a liveness probe.
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:4040/health >/dev/null || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 5
