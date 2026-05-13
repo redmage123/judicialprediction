@@ -1,0 +1,122 @@
+[
+  {
+    "id": "innocent-spouse-respondent",
+    "case_type": "innocent_spouse",
+    "outcome_for": "respondent",
+    "text": "Petitioner seeks relief from joint and several liability under section 6015(f) for tax year 2018. After reviewing the administrative record, we find that petitioner has not established that she had no reason to know of the understatement. Decision will be entered for respondent."
+  },
+  {
+    "id": "innocent-spouse-petitioner",
+    "case_type": "innocent_spouse",
+    "outcome_for": "petitioner",
+    "text": "This is an innocent spouse case. Petitioner requested relief under section 6015(c) following a divorce. The record amply supports petitioner's lack of knowledge of the omitted income. Decision will be entered for petitioner."
+  },
+  {
+    "id": "cdp-rule155",
+    "case_type": "collection_due_process",
+    "outcome_for": null,
+    "text": "Petitioner challenges respondent's notice of determination concerning collection action under section 6330. The Appeals officer's verification was adequate, but a computational adjustment remains. Decision will be entered under Rule 155."
+  },
+  {
+    "id": "cdp-respondent",
+    "case_type": "collection_due_process",
+    "outcome_for": "respondent",
+    "text": "This is a collection due process case arising under section 6320 and section 6330. We hold that the settlement officer did not abuse her discretion in sustaining the levy. Decision will be entered for respondent."
+  },
+  {
+    "id": "whistleblower-respondent",
+    "case_type": "whistleblower",
+    "outcome_for": "respondent",
+    "text": "Petitioner appeals the Whistleblower Office's denial of a whistleblower award under section 7623. Because the Service did not collect proceeds attributable to petitioner's information, no award is mandatory. Decision will be entered for respondent."
+  },
+  {
+    "id": "estate-tax-split",
+    "case_type": "estate_tax",
+    "outcome_for": "split",
+    "text": "The estate of the decedent filed a Form 706 reporting the value of closely held stock under section 2001. Decision will be entered for respondent as to the deficiency and for petitioner as to the accuracy-related penalty."
+  },
+  {
+    "id": "gift-tax-petitioner",
+    "case_type": "gift_tax",
+    "outcome_for": "petitioner",
+    "text": "Respondent determined a gift tax deficiency against the donor under section 2501. The transfer was an incomplete gift retaining substantial dominion. Decision will be entered for petitioner."
+  },
+  {
+    "id": "partnership-rule155",
+    "case_type": "partnership",
+    "outcome_for": null,
+    "text": "This TEFRA partnership-level proceeding under section 6221 concerns adjustments to partnership items for 2010. Respondent's determinations are sustained in part. Decision will be entered under Rule 155."
+  },
+  {
+    "id": "partnership-respondent",
+    "case_type": "partnership",
+    "outcome_for": "respondent",
+    "text": "This is a partnership-level proceeding under section 6221. The transactions lack economic substance. Decision will be entered for respondent."
+  },
+  {
+    "id": "employment-tax-respondent",
+    "case_type": "employment_tax",
+    "outcome_for": "respondent",
+    "text": "Respondent determined self-employment tax under section 1402(a) on income petitioner reported as nontaxable. Decision will be entered for respondent."
+  },
+  {
+    "id": "penalty-only-respondent",
+    "case_type": "penalty",
+    "outcome_for": "respondent",
+    "text": "The sole issue for decision is whether petitioner is liable for the section 6662 accuracy-related penalty. We find that petitioner did not act with reasonable cause. Decision will be entered for respondent."
+  },
+  {
+    "id": "income-tax-split-newline-wrap",
+    "case_type": "income_tax",
+    "outcome_for": "split",
+    "text": "Respondent issued a notice of deficiency for tax year 2017. We sustain the disallowance of certain Schedule C deductions. Decision will be entered for respondent as to the\n\ndeficiency and for petitioners as to the accuracy-related penalty."
+  },
+  {
+    "id": "income-tax-rule155",
+    "case_type": "income_tax",
+    "outcome_for": null,
+    "text": "Respondent issued a notice of deficiency. The character of certain gains is at issue. Decision will be entered under Rule 155."
+  },
+  {
+    "id": "income-tax-respondent",
+    "case_type": "income_tax",
+    "outcome_for": "respondent",
+    "text": "Respondent determined a deficiency in income tax of $12,500 for tax year 2019. Petitioner did not substantiate the claimed deductions. Decision will be entered for respondent."
+  },
+  {
+    "id": "income-tax-petitioner",
+    "case_type": "income_tax",
+    "outcome_for": "petitioner",
+    "text": "Respondent issued a notice of deficiency for tax year 2020. The Service incorrectly disallowed legitimate business expenses. Decision will be entered for petitioner."
+  },
+  {
+    "id": "dismissal-no-disposition",
+    "case_type": "income_tax",
+    "outcome_for": null,
+    "text": "The petition is dismissed for lack of jurisdiction. No notice of deficiency was issued for the year in suit."
+  },
+  {
+    "id": "default-income-tax",
+    "case_type": "income_tax",
+    "outcome_for": "respondent",
+    "text": "Respondent determined a deficiency. Petitioner did not appear at trial. Decision will be entered for respondent."
+  },
+  {
+    "id": "cdp-petitioner",
+    "case_type": "collection_due_process",
+    "outcome_for": "petitioner",
+    "text": "Petitioner challenges respondent's notice of determination concerning collection action. The settlement officer failed to verify the underlying liability. Decision will be entered for petitioner."
+  },
+  {
+    "id": "income-tax-mentions-penalty-but-deficiency",
+    "case_type": "income_tax",
+    "outcome_for": "respondent",
+    "text": "Respondent determined a deficiency in income tax and a section 6662 accuracy-related penalty. Petitioner's record-keeping was inadequate. Decision will be entered for respondent."
+  },
+  {
+    "id": "two-decisions-split",
+    "case_type": "income_tax",
+    "outcome_for": "split",
+    "text": "Respondent determined a deficiency for two consolidated dockets. As to docket 1, decision will be entered for petitioner. As to docket 2, decision will be entered for respondent."
+  }
+]

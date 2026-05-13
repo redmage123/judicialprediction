@@ -7,10 +7,12 @@
 //! Sprint-2 scope is fixture-only. Real-network smoke is Sprint-3.
 
 pub mod db;
+pub mod extract;
 pub mod fetch;
 pub mod kg;
 pub mod parse;
 pub mod rest;
 
+pub use extract::{classify_case_type, detect_outcome, run_extraction, ExtractStats};
 pub use kg::{populate_from_case_documents, PopulateStats};
 pub use parse::{parse_tarball, Opinion};

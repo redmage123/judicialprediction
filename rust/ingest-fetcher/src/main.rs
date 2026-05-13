@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use ingest_fetcher::{db, fetch, kg, parse_tarball, rest};
+use ingest_fetcher::{db, extract, fetch, kg, parse_tarball, rest};
 use uuid::Uuid;
 
 #[derive(Parser)]
@@ -57,6 +57,16 @@ enum Command {
         #[arg(long, default_value = "00000000-0000-0000-0000-000000000001")]
         tenant_id: Uuid,
         /// Postgres DSN. Defaults to $DATABASE_URL.
+        #[arg(long)]
+        database_url: Option<String>,
+    },
+    /// S5.7: scan `case_documents`, classify `case_type` + `outcome_for`, and
+    /// roll up per-judge severity into `judges.bio`.  Idempotent — only acts
+    /// on rows with `features_extracted_at IS NULL`, so a forced re-run needs
+    /// `UPDATE case_documents SET features_extracted_at = NULL` first.
+    ExtractFeatures {
+        #[arg(long, default_value = "00000000-0000-0000-0000-000000000001")]
+        tenant_id: Uuid,
         #[arg(long)]
         database_url: Option<String>,
     },
@@ -155,6 +165,23 @@ async fn main() -> Result<()> {
                 stats.courts_existing,
                 stats.judges_inserted,
                 stats.judges_existing,
+            );
+        }
+        Command::ExtractFeatures { tenant_id, database_url } => {
+            let dsn = database_url
+                .or_else(|| std::env::var("DATABASE_URL").ok())
+                .context("provide --database-url or set DATABASE_URL")?;
+            let pool = sqlx::PgPool::connect(&dsn)
+                .await
+                .context("connect to Postgres")?;
+            let stats = extract::run_extraction(&pool, tenant_id).await?;
+            println!(
+                "extract-features tenant={tenant_id} \
+                 docs_scanned={} case_type_set={} outcome_set={} judges_updated={}",
+                stats.docs_scanned,
+                stats.case_type_set,
+                stats.outcome_set,
+                stats.judges_updated,
             );
         }
     }
