@@ -5,7 +5,7 @@
 
 import { useState, type FormEvent, type ChangeEvent } from "react";
 import { useRouter } from "next/navigation";
-import { useMutation } from "@apollo/client/react";
+import { useApolloClient, useMutation } from "@apollo/client/react";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -19,9 +19,12 @@ import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 import {
   CREATE_CASE,
+  EXTRACT_FEATURES,
   type PredictInput,
   type CreateCaseData,
   type CreateCaseVars,
+  type ExtractFeaturesData,
+  type ExtractFeaturesVars,
 } from "@/lib/queries/predict";
 import { CASE_TYPES, type CaseType } from "@/lib/case-types";
 import { JURISDICTIONS, type Jurisdiction } from "@/lib/jurisdictions";
@@ -88,13 +91,31 @@ function validateField(
   }
 }
 
+// S5.8: track which form fields were last populated by the extractor so the
+// UI can label them as "Extracted — override?" until the operator edits
+// them. The flag is dropped on the first user-driven change to that field.
+type ExtractionContext = {
+  judgeName: string | null;
+  judgeCasesAnalyzed: number | null;
+  caseTypeHint: string;
+  outcomeFor: string | null;
+};
+
 export function IntakeForm() {
   const router = useRouter();
+  const apollo = useApolloClient();
   const [form, setForm] = useState<FormState>(INITIAL);
   const [fieldErrors, setFieldErrors] = useState<
     Partial<Record<keyof FormState, string>>
   >({});
   const [submitError, setSubmitError] = useState<string | null>(null);
+
+  // S5.8 extraction state
+  const [opinionText, setOpinionText] = useState("");
+  const [extractLoading, setExtractLoading] = useState(false);
+  const [extractError, setExtractError] = useState<string | null>(null);
+  const [extractCtx, setExtractCtx] = useState<ExtractionContext | null>(null);
+  const [prefilled, setPrefilled] = useState<Partial<Record<keyof FormState, true>>>({});
 
   const [createCase, { loading }] = useMutation<
     CreateCaseData,
@@ -105,7 +126,65 @@ export function IntakeForm() {
     return (e: ChangeEvent<HTMLInputElement>) => {
       setForm((prev) => ({ ...prev, [name]: e.target.value }));
       setFieldErrors((prev) => ({ ...prev, [name]: undefined }));
+      // Operator override — drop the prefilled flag for this field.
+      setPrefilled((prev) => {
+        if (!prev[name]) return prev;
+        const { [name]: _, ...rest } = prev;
+        return rest;
+      });
     };
+  }
+
+  async function handleExtract() {
+    if (!opinionText.trim()) {
+      setExtractError("Paste an opinion's plain text first.");
+      return;
+    }
+    setExtractError(null);
+    setExtractLoading(true);
+    try {
+      const res = await apollo.query<ExtractFeaturesData, ExtractFeaturesVars>({
+        query: EXTRACT_FEATURES,
+        variables: { text: opinionText },
+        fetchPolicy: "network-only",
+      });
+      const ef = res.data?.extractFeatures;
+      if (!ef) {
+        setExtractError("No suggestions returned.");
+        return;
+      }
+      const nextPrefilled: Partial<Record<keyof FormState, true>> = {};
+      setForm((prev) => {
+        const next = { ...prev };
+        if (ef.judgeSeverity != null) {
+          next.judgeSeverity = ef.judgeSeverity.toFixed(2);
+          nextPrefilled.judgeSeverity = true;
+        }
+        if (ef.caseTypeSuggestion === "civil" || ef.caseTypeSuggestion === "criminal" || ef.caseTypeSuggestion === "bankruptcy") {
+          next.caseType = ef.caseTypeSuggestion as CaseType;
+          nextPrefilled.caseType = true;
+        }
+        if (ef.jurisdictionSuggestion === "us-federal" || ef.jurisdictionSuggestion === "ca-state" || ef.jurisdictionSuggestion === "nj-state") {
+          next.jurisdiction = ef.jurisdictionSuggestion as Jurisdiction;
+          nextPrefilled.jurisdiction = true;
+        }
+        return next;
+      });
+      setPrefilled(nextPrefilled);
+      setExtractCtx({
+        judgeName: ef.judgeName,
+        judgeCasesAnalyzed: ef.judgeCasesAnalyzed,
+        caseTypeHint: ef.caseTypeHint,
+        outcomeFor: ef.outcomeFor,
+      });
+      setFieldErrors({});
+    } catch (e) {
+      setExtractError(
+        e instanceof Error ? e.message : "Extraction failed. Please try again."
+      );
+    } finally {
+      setExtractLoading(false);
+    }
   }
 
   function validate(): boolean {
@@ -176,6 +255,67 @@ export function IntakeForm() {
         </CardDescription>
       </CardHeader>
       <CardContent>
+        {/* S5.8 — Optional prior-opinion extraction panel.  Pasting a prior
+            opinion lets the server (extractFeatures GraphQL query) prefill
+            fields where the NLP extractor has a confident signal.  Operator
+            still owns final values via the standard form below. */}
+        <details className="mb-6 rounded-md border border-input bg-muted/30 p-3">
+          <summary className="cursor-pointer text-sm font-medium">
+            Prefill from a prior opinion (optional)
+          </summary>
+          <p className="mt-2 text-xs text-muted-foreground">
+            Paste an opinion authored by the assigned judge to prefill judge
+            severity, case type, and jurisdiction. You can override any
+            prefilled value before running prediction.
+          </p>
+          <textarea
+            value={opinionText}
+            onChange={(e) => setOpinionText(e.target.value)}
+            placeholder="Paste opinion plain text…"
+            rows={6}
+            className={cn(
+              "mt-3 block w-full rounded-md border border-input bg-background px-3 py-2",
+              "text-sm font-mono shadow-sm outline-none",
+              "focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+            )}
+            aria-label="Opinion text for feature extraction"
+          />
+          <div className="mt-2 flex items-center gap-3">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={handleExtract}
+              disabled={extractLoading || !opinionText.trim()}
+            >
+              {extractLoading ? "Extracting…" : "Extract features"}
+            </Button>
+            {extractError && (
+              <p role="alert" className="text-xs text-destructive">
+                {extractError}
+              </p>
+            )}
+          </div>
+          {extractCtx && (
+            <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
+              <dt className="text-muted-foreground">Detected judge</dt>
+              <dd>
+                {extractCtx.judgeName ?? "—"}
+                {extractCtx.judgeCasesAnalyzed != null && extractCtx.judgeName && (
+                  <span className="text-muted-foreground">
+                    {" "}({extractCtx.judgeCasesAnalyzed} prior opinion
+                    {extractCtx.judgeCasesAnalyzed === 1 ? "" : "s"})
+                  </span>
+                )}
+              </dd>
+              <dt className="text-muted-foreground">Case-type signal</dt>
+              <dd>{extractCtx.caseTypeHint || "—"}</dd>
+              <dt className="text-muted-foreground">Disposition</dt>
+              <dd>{extractCtx.outcomeFor ?? "unresolved"}</dd>
+            </dl>
+          )}
+        </details>
+
         <form
           onSubmit={handleSubmit}
           noValidate
@@ -185,7 +325,14 @@ export function IntakeForm() {
 
             {/* Judge Severity */}
             <div className="space-y-1.5">
-              <Label htmlFor="judgeSeverity">Judge severity</Label>
+              <Label htmlFor="judgeSeverity">
+                Judge severity
+                {prefilled.judgeSeverity && (
+                  <span className="ml-2 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-900">
+                    Extracted
+                  </span>
+                )}
+              </Label>
               <Input
                 id="judgeSeverity"
                 name="judgeSeverity"
@@ -306,18 +453,30 @@ export function IntakeForm() {
 
             {/* Case Type */}
             <div className="space-y-1.5">
-              <Label htmlFor="caseType">Case type</Label>
+              <Label htmlFor="caseType">
+                Case type
+                {prefilled.caseType && (
+                  <span className="ml-2 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-900">
+                    Extracted
+                  </span>
+                )}
+              </Label>
               <select
                 id="caseType"
                 name="caseType"
                 className={selectCn}
                 value={form.caseType}
-                onChange={(e) =>
+                onChange={(e) => {
                   setForm((prev) => ({
                     ...prev,
                     caseType: e.target.value as CaseType,
-                  }))
-                }
+                  }));
+                  setPrefilled((prev) => {
+                    if (!prev.caseType) return prev;
+                    const { caseType: _, ...rest } = prev;
+                    return rest;
+                  });
+                }}
               >
                 {CASE_TYPES.map((ct) => (
                   <option key={ct.value} value={ct.value}>
@@ -329,18 +488,30 @@ export function IntakeForm() {
 
             {/* Jurisdiction */}
             <div className="space-y-1.5 sm:col-span-2">
-              <Label htmlFor="jurisdiction">Jurisdiction</Label>
+              <Label htmlFor="jurisdiction">
+                Jurisdiction
+                {prefilled.jurisdiction && (
+                  <span className="ml-2 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-900">
+                    Extracted
+                  </span>
+                )}
+              </Label>
               <select
                 id="jurisdiction"
                 name="jurisdiction"
                 className={selectCn}
                 value={form.jurisdiction}
-                onChange={(e) =>
+                onChange={(e) => {
                   setForm((prev) => ({
                     ...prev,
                     jurisdiction: e.target.value as Jurisdiction,
-                  }))
-                }
+                  }));
+                  setPrefilled((prev) => {
+                    if (!prev.jurisdiction) return prev;
+                    const { jurisdiction: _, ...rest } = prev;
+                    return rest;
+                  });
+                }}
               >
                 {JURISDICTIONS.map((j) => (
                   <option key={j.value} value={j.value}>

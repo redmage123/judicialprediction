@@ -23,9 +23,10 @@ import { axe, toHaveNoViolations } from "jest-axe";
 // Hoist spies (must come before vi.mock factories)
 // ---------------------------------------------------------------------------
 
-const { mockRouterPush, mockMutate } = vi.hoisted(() => ({
+const { mockRouterPush, mockMutate, mockApolloQuery } = vi.hoisted(() => ({
   mockRouterPush: vi.fn(),
   mockMutate: vi.fn(),
+  mockApolloQuery: vi.fn(),
 }));
 
 // ---------------------------------------------------------------------------
@@ -46,6 +47,9 @@ vi.mock("@apollo/client/react", async (importOriginal) => {
   return {
     ...actual,
     useMutation: () => [mockMutate, { loading: false, error: undefined, data: null }],
+    // S5.8: intake-form now uses useApolloClient().query for extractFeatures.
+    // Stub the client so the hook doesn't require an ApolloProvider in tests.
+    useApolloClient: () => ({ query: mockApolloQuery }),
   };
 });
 
@@ -232,5 +236,92 @@ describe("IntakeForm — a11y gate", () => {
     const { container } = await renderForm();
     const results = await axe(container);
     expect(results).toHaveNoViolations();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// S5.8: prefill from prior opinion text
+// ---------------------------------------------------------------------------
+
+describe("IntakeForm — S5.8 prefill from prior opinion", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("prefills judgeSeverity, caseType, and jurisdiction when extractFeatures returns suggestions", async () => {
+    mockApolloQuery.mockResolvedValue({
+      data: {
+        extractFeatures: {
+          judgeSeverity: 0.42,
+          judgeName: "LAUBER",
+          judgeCasesAnalyzed: 7,
+          caseTypeHint: "innocent_spouse",
+          caseTypeSuggestion: "civil",
+          outcomeFor: "respondent",
+          jurisdictionSuggestion: "us-federal",
+        },
+      },
+    });
+
+    await renderForm();
+
+    // The textarea lives inside a <details>; expand it before typing.
+    fireEvent.click(screen.getByText(/prefill from a prior opinion/i));
+    fireEvent.change(
+      screen.getByLabelText(/opinion text for feature extraction/i),
+      { target: { value: "LAUBER, J., delivered the opinion. ..." } }
+    );
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /extract features/i }));
+    });
+
+    await waitFor(() => {
+      const sev = screen.getByLabelText(/judge severity/i) as HTMLInputElement;
+      expect(sev.value).toBe("0.42");
+    });
+
+    // "Extracted" badge appears next to the prefilled field's label.
+    expect(screen.getAllByText(/extracted/i).length).toBeGreaterThan(0);
+
+    // Context strip surfaces what the extractor matched.
+    expect(screen.getByText(/LAUBER/)).toBeTruthy();
+    expect(screen.getByText(/innocent_spouse/)).toBeTruthy();
+  });
+
+  it("does NOT prefill when extractFeatures returns null suggestions", async () => {
+    mockApolloQuery.mockResolvedValue({
+      data: {
+        extractFeatures: {
+          judgeSeverity: null,
+          judgeName: null,
+          judgeCasesAnalyzed: null,
+          caseTypeHint: "income_tax",
+          caseTypeSuggestion: null,
+          outcomeFor: null,
+          jurisdictionSuggestion: null,
+        },
+      },
+    });
+
+    await renderForm();
+
+    fireEvent.click(screen.getByText(/prefill from a prior opinion/i));
+    fireEvent.change(
+      screen.getByLabelText(/opinion text for feature extraction/i),
+      { target: { value: "Something with no recognisable judge." } }
+    );
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /extract features/i }));
+    });
+
+    // Wait for context to settle (caseTypeHint always populated)
+    await waitFor(() => {
+      expect(screen.getByText(/income_tax/)).toBeTruthy();
+    });
+
+    const sev = screen.getByLabelText(/judge severity/i) as HTMLInputElement;
+    expect(sev.value).toBe("");
+    // No "Extracted" badge should appear when nothing was prefilled.
+    expect(screen.queryAllByText(/extracted/i)).toHaveLength(0);
   });
 });

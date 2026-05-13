@@ -297,3 +297,48 @@ export interface GetCasePredictionsData {
 export interface GetCasePredictionsVars {
   id: string;
 }
+
+// ---------------------------------------------------------------------------
+// S5.8: extractFeatures query — suggest intake-form prefills from prior
+// opinion text.  Only fields with non-null suggestions get prefilled;
+// the operator can override any field before submitting.
+// ---------------------------------------------------------------------------
+
+export const EXTRACT_FEATURES = gql`
+  query ExtractFeatures($text: String!) {
+    extractFeatures(text: $text) {
+      judgeSeverity
+      judgeName
+      judgeCasesAnalyzed
+      caseTypeHint
+      caseTypeSuggestion
+      outcomeFor
+      jurisdictionSuggestion
+    }
+  }
+`;
+
+export interface ExtractedFeatures {
+  /** Suggested judgeSeverity [0, 1]; null when no known judge was found. */
+  judgeSeverity: number | null;
+  /** Name of the matched judge, for UI confirmation labelling. */
+  judgeName: string | null;
+  /** Sample size behind judgeSeverity (number of prior decisions). */
+  judgeCasesAnalyzed: number | null;
+  /** Tax-court sub-classification (e.g. innocent_spouse) — informational. */
+  caseTypeHint: string;
+  /** Suggested form CaseType value (civil/criminal/bankruptcy). */
+  caseTypeSuggestion: string | null;
+  /** Disposition from the opinion (petitioner/respondent/split). */
+  outcomeFor: string | null;
+  /** Suggested form jurisdiction value (e.g. us-federal). */
+  jurisdictionSuggestion: string | null;
+}
+
+export interface ExtractFeaturesData {
+  extractFeatures: ExtractedFeatures;
+}
+
+export interface ExtractFeaturesVars {
+  text: string;
+}

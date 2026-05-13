@@ -315,6 +315,55 @@ pub struct PredictionHistoryEntry {
 }
 
 // ---------------------------------------------------------------------------
+// GraphQL output type: ExtractedFeatures (S5.8 extractFeatures result)
+// ---------------------------------------------------------------------------
+
+/// Suggested prefills for the case-intake form, derived by running the S5.7
+/// extractor (`classify_case_type`, `detect_outcome`, `extract_judge_names`)
+/// against operator-supplied opinion text.
+///
+/// Optional fields are `None` when extraction had nothing to say.  The
+/// frontend prefills the corresponding form field only when a field is
+/// `Some(...)`; the operator can override any field before submitting.
+///
+/// Naming:
+///   `*_suggestion`  → values that map onto an input field (operator override
+///                     applies).
+///   `*_hint`        → context-only signals shown next to the form (no
+///                     direct field mapping; informational).
+#[derive(SimpleObject, Serialize, Deserialize)]
+pub struct ExtractedFeatures {
+    /// Suggested `judgeSeverity` (0.0–1.0).  Resolved by extracting judge
+    /// name(s) from the opinion text and looking up
+    /// `judges.bio.severity_proxy.severity` for the current tenant.
+    pub judge_severity: Option<f64>,
+    /// Display name of the judge whose prior decisions backed
+    /// `judge_severity`. Surfaced to the UI so operators can sanity-check
+    /// the match before accepting the prefill.
+    pub judge_name: Option<String>,
+    /// Number of prior decisions in our corpus used to compute
+    /// `judge_severity`. Lets the UI render confidence ("0 of 1" vs "0 of 12").
+    pub judge_cases_analyzed: Option<i32>,
+    /// S5.7 tax-court sub-classification (`income_tax`, `innocent_spouse`,
+    /// `collection_due_process`, etc.).  Always populated; shown next to
+    /// the form as context, not auto-set into `caseType` (different
+    /// taxonomies — see `case_type_suggestion`).
+    pub case_type_hint: String,
+    /// Suggested value for the form's `caseType` field
+    /// (`civil`/`criminal`/`bankruptcy`).  All S5.7 tax-court types collapse
+    /// to `civil` for the trained model's input taxonomy.
+    pub case_type_suggestion: Option<String>,
+    /// Detected disposition from the supplied opinion
+    /// (`petitioner`/`respondent`/`split`). `None` means Rule 155 /
+    /// dismissal-only / no disposition phrase — informational only.
+    pub outcome_for: Option<String>,
+    /// Suggested value for the form's `jurisdiction` field.  Populated when
+    /// the text carries a recognisable court signature
+    /// (e.g. "United States Tax Court" → `us-federal`).
+    pub jurisdiction_suggestion: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // GraphQL Mutation root
 // ---------------------------------------------------------------------------
 

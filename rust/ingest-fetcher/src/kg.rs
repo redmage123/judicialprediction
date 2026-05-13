@@ -226,7 +226,7 @@ fn head_chars(s: &str, max_chars: usize) -> String {
 ///   2. `JUDGE NAME.` / `NAME J.`   (caps-only signatures)
 ///
 /// Returns each unique candidate in source order; the caller normalizes.
-pub(crate) fn extract_judge_names(text: &str) -> Vec<String> {
+pub fn extract_judge_names(text: &str) -> Vec<String> {
     let mut hits = BTreeSet::new();
     let mut ordered = Vec::new();
     for line in text.lines() {
@@ -322,7 +322,7 @@ fn is_proper_name_candidate(s: &str) -> bool {
 
 /// Lowercase, strip titles, collapse whitespace.  This is the canonical
 /// match key for `judges.normalized_name`.
-pub(crate) fn normalize_judge_name(raw: &str) -> String {
+pub fn normalize_judge_name(raw: &str) -> String {
     let s = raw.to_lowercase();
     // Strip leading honorifics.
     let s = s

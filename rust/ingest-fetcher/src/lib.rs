@@ -14,5 +14,7 @@ pub mod parse;
 pub mod rest;
 
 pub use extract::{classify_case_type, detect_outcome, run_extraction, ExtractStats};
-pub use kg::{populate_from_case_documents, PopulateStats};
+pub use kg::{
+    extract_judge_names, normalize_judge_name, populate_from_case_documents, PopulateStats,
+};
 pub use parse::{parse_tarball, Opinion};

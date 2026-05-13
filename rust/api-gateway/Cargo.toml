@@ -19,6 +19,11 @@ rate-limit = { path = "../rate-limit" }
 audit-recorder = { path = "../audit-recorder" }
 decision-arith = { path = "../decision-arith" }
 cost-engine = { path = "../cost-engine" }
+# S5.8: extractFeatures Query reuses the same pure NLP helpers ingest-fetcher
+# uses to back-fill case_documents (classify_case_type / detect_outcome /
+# extract_judge_names) so the operator-facing extract and the corpus
+# back-fill stay 1:1.
+ingest-fetcher = { path = "../ingest-fetcher" }
 tonic = { workspace = true }
 prost = { workspace = true }
 tokio = { workspace = true }

@@ -512,6 +512,133 @@ impl Query {
             last_seven_days_count: last7,
         })
     }
+
+    /// S5.8 — Suggest intake-form prefills from a prior opinion's plain text.
+    ///
+    /// Runs the same pure NLP helpers that S5.7 uses to back-fill
+    /// `case_documents` (`classify_case_type`, `detect_outcome`,
+    /// `extract_judge_names`).  When the extracted judge matches a row in
+    /// `judges`, looks up `bio.severity_proxy.severity` and returns it.
+    ///
+    /// Pure-read; no audit row.  Requires a valid JWT but no special role.
+    async fn extract_features(
+        &self,
+        ctx: &Context<'_>,
+        text: String,
+    ) -> async_graphql::Result<crate::graphql_predict::ExtractedFeatures> {
+        use crate::graphql_predict::ExtractedFeatures;
+        use ingest_fetcher::{
+            classify_case_type, detect_outcome, extract_judge_names, normalize_judge_name,
+        };
+        use sqlx::Row as _;
+
+        // Bound the input — the regex passes don't care about size, but
+        // unbounded text from a malicious client would still chew CPU.
+        if text.len() > 256 * 1024 {
+            return Err(async_graphql::Error::new(
+                "text too long (>256 KB); supply just the opinion body",
+            ));
+        }
+
+        let TenantId(tenant_id) = *ctx
+            .data::<TenantId>()
+            .map_err(|_| async_graphql::Error::new("missing tenant id"))?;
+
+        // ── Pure NLP pass ────────────────────────────────────────────────────
+        let case_type_hint = classify_case_type(&text).to_string();
+        let outcome_for = detect_outcome(&text).map(str::to_string);
+        let judge_candidates: Vec<String> = extract_judge_names(&text);
+
+        // Every S5.7 tax-court class is "civil" in the PredictInput taxonomy
+        // (income_tax / innocent_spouse / cdp / whistleblower / ... are all
+        // civil proceedings under Title 26).  Suggest only when we actually
+        // had signal; an empty extraction means we don't know.
+        let case_type_suggestion = (!case_type_hint.is_empty()).then(|| "civil".to_string());
+
+        // Jurisdiction — cheap signature scan.  We don't try to be exhaustive
+        // here; a richer mapping lives in `kg::map_courtlistener_jurisdiction`
+        // but that one keys on CL slug rather than on free text.
+        let jurisdiction_suggestion =
+            if text.contains("United States Tax Court") || text.contains("U.S. Tax Court") {
+                Some("us-federal".to_string())
+            } else if text.contains("Supreme Court of the United States") {
+                Some("us-federal".to_string())
+            } else {
+                None
+            };
+
+        // ── Judge severity lookup ────────────────────────────────────────────
+        // Take the first extracted candidate as the primary judge (opinion
+        // header order is by construction "writer first" in CourtListener
+        // exports).  If none, leave severity fields None.
+        let (judge_severity, judge_name, judge_cases_analyzed) = if let Some(raw_name) =
+            judge_candidates.first()
+        {
+            let normalized = normalize_judge_name(raw_name);
+            if normalized.is_empty() {
+                (None, None, None)
+            } else {
+                let pool = ctx
+                    .data::<Option<Arc<PgPool>>>()
+                    .map_err(|_| async_graphql::Error::new("cases store unavailable"))?
+                    .as_ref()
+                    .ok_or_else(|| {
+                        async_graphql::Error::new(
+                            "cases store not configured (DATABASE_URL missing)",
+                        )
+                    })?;
+
+                let mut tx = pool.begin().await.map_err(|e| {
+                    async_graphql::Error::new(format!("judges tx begin: {e}"))
+                })?;
+                sqlx::query(&format!(
+                    "SET LOCAL app.current_tenant_id = '{tenant_id}'"
+                ))
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| async_graphql::Error::new(format!("SET LOCAL failed: {e}")))?;
+
+                let row = sqlx::query(
+                    "SELECT full_name,
+                            (bio->'severity_proxy'->>'severity')::float8       AS severity,
+                            (bio->'severity_proxy'->>'cases_analyzed')::int    AS cases_analyzed
+                     FROM judges
+                     WHERE tenant_id = $1 AND normalized_name = $2",
+                )
+                .bind(tenant_id)
+                .bind(&normalized)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| async_graphql::Error::new(format!("judge lookup failed: {e}")))?;
+
+                tx.commit().await.map_err(|e| {
+                    async_graphql::Error::new(format!("judges tx commit: {e}"))
+                })?;
+
+                match row {
+                    Some(r) => {
+                        let name: Option<String> = r.try_get("full_name").ok();
+                        let sev: Option<f64> = r.try_get("severity").ok();
+                        let n: Option<i32> = r.try_get("cases_analyzed").ok();
+                        (sev, name, n)
+                    }
+                    None => (None, None, None),
+                }
+            }
+        } else {
+            (None, None, None)
+        };
+
+        Ok(ExtractedFeatures {
+            judge_severity,
+            judge_name,
+            judge_cases_analyzed,
+            case_type_hint,
+            case_type_suggestion,
+            outcome_for,
+            jurisdiction_suggestion,
+        })
+    }
 }
 
 /// Aggregate counters returned by `Query.caseStats`.
