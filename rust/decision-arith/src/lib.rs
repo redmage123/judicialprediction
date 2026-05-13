@@ -4,7 +4,10 @@
 // No I/O, no mutable global state, no unsafe.
 
 pub mod recommend;
-pub use recommend::{recommend, PredictionInput, Recommendation, RecommendationKind};
+pub use recommend::{
+    recommend, ConfidenceBand, CounterRecommendation, PredictionInput, Recommendation,
+    RecommendationKind,
+};
 
 pub mod settle;
 pub use settle::{jurisdiction_settle_anchor, settle_offer};

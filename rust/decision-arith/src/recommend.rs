@@ -41,11 +41,57 @@ pub enum RecommendationKind {
     Borderline,
 }
 
+/// S6.4 — Qualitative confidence band derived from the prediction CI width.
+///
+/// Independent of the recommendation `kind`; lets the UI render
+/// "Settle (high conf)" vs "Settle (borderline)" without recomputing
+/// thresholds.  The band is purely a property of the prediction, not of the
+/// recommendation rule that fired.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfidenceBand {
+    /// CI width < 0.10 — model is tight; recommendation is robust to
+    /// prediction noise.
+    High,
+    /// 0.10 ≤ CI width < 0.20 — middling certainty; recommendation is the
+    /// best call but not insensitive to small prediction shifts.
+    Medium,
+    /// CI width ≥ 0.20 — the recommendation could flip if the true `p_win`
+    /// landed at the edges of the CI; check `counter_recommendation` for
+    /// the bound-evaluated alternative.
+    Low,
+}
+
+/// S6.4 — What the recommendation would have been at the CI bounds.
+///
+/// `Some(...)` only when [`ConfidenceBand::Low`] (CI width ≥ 0.20); below
+/// that threshold the bound-evaluated kinds are not meaningfully different
+/// from the point-estimate kind and surfacing them adds noise without
+/// signal.
+#[derive(Debug, Clone)]
+pub struct CounterRecommendation {
+    /// Recommendation kind that would fire if `p_win = ci_lower`.
+    pub kind_at_ci_lower: RecommendationKind,
+    /// Recommendation kind that would fire if `p_win = ci_upper`.
+    pub kind_at_ci_upper: RecommendationKind,
+    /// Whether `kind_at_ci_lower` differs from `kind_at_ci_upper` —
+    /// shorthand for "the recommendation flips inside the CI."
+    pub flips_within_ci: bool,
+    /// One-sentence operator-facing summary describing the flip (or its
+    /// absence).  Deterministic for any given input.
+    pub note: String,
+}
+
 /// Structured recommendation with expected-value comparison and reasoning bullets.
 #[derive(Debug, Clone)]
 pub struct Recommendation {
     /// The recommended action.
     pub kind: RecommendationKind,
+    /// S6.4 — qualitative confidence band derived from CI width.
+    pub confidence: ConfidenceBand,
+    /// S6.4 — bound-evaluated recommendation. `Some` only when the
+    /// confidence band is `Low`; `None` when the prediction is tight
+    /// enough that bound-evaluated alternatives are not informative.
+    pub counter_recommendation: Option<CounterRecommendation>,
     /// Three deterministic reasoning bullets. Same `PredictionInput` + same
     /// `cost` always produce the same three strings (no randomness, no I/O).
     pub rationale_bullets: [String; 3],
@@ -96,29 +142,83 @@ pub struct Recommendation {
 pub fn recommend(input: &PredictionInput, cost: Decimal, jurisdiction: &str) -> Recommendation {
     // Convert p_win (f64) to Decimal; fall back to 0 for NaN / ±∞.
     let p_win_dec = Decimal::try_from(input.p_win).unwrap_or(Decimal::ZERO);
+    let anchor = crate::settle::jurisdiction_settle_anchor(jurisdiction);
 
     let ev_try = p_win_dec * input.expected_damages - cost;
     // S5.11: anchor varies by jurisdiction. settle::settle_offer is the
     // public derivation; we inline the multiplication here to avoid an
     // unnecessary clone of `input`.
-    let ev_settle = input.expected_damages * crate::settle::jurisdiction_settle_anchor(jurisdiction);
+    let ev_settle = input.expected_damages * anchor;
 
-    let kind = if ev_settle > ev_try && input.ci_lower < 0.40 {
-        RecommendationKind::Settle
-    } else if ev_try > ev_settle && input.ci_lower > 0.55 {
-        RecommendationKind::Try
+    let kind = decide_kind(input.p_win, input.ci_lower, ev_try, ev_settle);
+
+    // S6.4 — confidence band derived purely from CI width (independent of
+    // the kind that fired).
+    let confidence = confidence_from_ci(input.ci_lower, input.ci_upper);
+
+    // S6.4 — counter-recommendation only when the band is Low.  We re-run
+    // the kind decision with p_win pinned to ci_lower then to ci_upper to
+    // see whether the recommendation would flip at the edges of the CI.
+    // EVs are recomputed at each bound because ev_try depends on p_win.
+    let counter_recommendation = if confidence == ConfidenceBand::Low {
+        let ev_try_lo = Decimal::try_from(input.ci_lower).unwrap_or(Decimal::ZERO)
+            * input.expected_damages
+            - cost;
+        let ev_try_hi = Decimal::try_from(input.ci_upper).unwrap_or(Decimal::ZERO)
+            * input.expected_damages
+            - cost;
+        let kind_lo = decide_kind(input.ci_lower, input.ci_lower, ev_try_lo, ev_settle);
+        let kind_hi = decide_kind(input.ci_upper, input.ci_upper, ev_try_hi, ev_settle);
+        let flips = kind_lo != kind_hi;
+        let note = if flips {
+            format!(
+                "Recommendation flips inside the 90% CI: at p_win={:.2} (lower) → {}; \
+                 at p_win={:.2} (upper) → {}.  Treat as advisory only.",
+                input.ci_lower,
+                kind_label(&kind_lo),
+                input.ci_upper,
+                kind_label(&kind_hi),
+            )
+        } else {
+            format!(
+                "Both CI bounds agree on {}; band is Low purely from CI width, not \
+                 from disagreement between bounds.",
+                kind_label(&kind_lo),
+            )
+        };
+        Some(CounterRecommendation {
+            kind_at_ci_lower: kind_lo,
+            kind_at_ci_upper: kind_hi,
+            flips_within_ci: flips,
+            note,
+        })
     } else {
-        RecommendationKind::Borderline
+        None
     };
 
     let bullet1 = format!(
-        "P(win) {:.2} with 90% CI [{:.2}, {:.2}]",
-        input.p_win, input.ci_lower, input.ci_upper,
+        "P(win) {:.2} with 90% CI [{:.2}, {:.2}] — {}",
+        input.p_win,
+        input.ci_lower,
+        input.ci_upper,
+        confidence_label(&confidence),
     );
+    // S6.4 — bullet 2 now exposes the Nash-Rubinstein anchor derivation so
+    // the EV comparison is auditable end-to-end.  Format:
+    //   "Expected value at trial $X (p_win × damages − cost) vs.
+    //    expected settlement value $Y (anchor A × damages, <juris> prior)"
+    let jurisdiction_label = if jurisdiction.is_empty() {
+        "legacy"
+    } else {
+        jurisdiction
+    };
     let bullet2 = format!(
-        "Expected value at trial ${} vs. expected settlement value ${}",
+        "Expected value at trial ${} (p_win × damages − cost) vs. expected settlement \
+         value ${} (Nash anchor {} × damages, {} prior)",
         ev_try.round_dp(2),
         ev_settle.round_dp(2),
+        anchor.round_dp(2),
+        jurisdiction_label,
     );
     let bullet3 = match &kind {
         RecommendationKind::Settle => format!(
@@ -144,9 +244,63 @@ pub fn recommend(input: &PredictionInput, cost: Decimal, jurisdiction: &str) -> 
 
     Recommendation {
         kind,
+        confidence,
+        counter_recommendation,
         rationale_bullets: [bullet1, bullet2, bullet3],
         expected_value_try: ev_try,
         expected_value_settle: ev_settle,
+    }
+}
+
+// ── Internal helpers ─────────────────────────────────────────────────────────
+
+/// Apply the S5.11 decision rules.  Pure function; extracted so the
+/// recommender can re-invoke at the CI bounds for `counter_recommendation`
+/// without duplicating the threshold logic.
+fn decide_kind(
+    _p_win: f64,
+    ci_lower: f64,
+    ev_try: Decimal,
+    ev_settle: Decimal,
+) -> RecommendationKind {
+    if ev_settle > ev_try && ci_lower < 0.40 {
+        RecommendationKind::Settle
+    } else if ev_try > ev_settle && ci_lower > 0.55 {
+        RecommendationKind::Try
+    } else {
+        RecommendationKind::Borderline
+    }
+}
+
+/// Width-keyed confidence band.  Saturates ci_upper to [0, 1] and
+/// ci_lower to [0, 1] before differencing so out-of-range inputs land in
+/// the same bucket they would have without the OOR slop.
+fn confidence_from_ci(ci_lower: f64, ci_upper: f64) -> ConfidenceBand {
+    let lo = ci_lower.clamp(0.0, 1.0);
+    let hi = ci_upper.clamp(0.0, 1.0);
+    let width = (hi - lo).abs();
+    if width < 0.10 {
+        ConfidenceBand::High
+    } else if width < 0.20 {
+        ConfidenceBand::Medium
+    } else {
+        ConfidenceBand::Low
+    }
+}
+
+fn confidence_label(b: &ConfidenceBand) -> &'static str {
+    match b {
+        ConfidenceBand::High => "high confidence",
+        ConfidenceBand::Medium => "medium confidence",
+        ConfidenceBand::Low => "low confidence (recommendation may flip — see counter)",
+    }
+}
+
+fn kind_label(k: &RecommendationKind) -> &'static str {
+    match k {
+        RecommendationKind::Settle => "Settle",
+        RecommendationKind::Try => "Try",
+        RecommendationKind::Borderline => "Borderline",
     }
 }
 
@@ -447,6 +601,144 @@ mod tests {
     }
 
     // ── Property test: no panics, always 3 non-empty bullets ─────────────────
+
+    // ── S6.4: ConfidenceBand + counter_recommendation ───────────────────────
+
+    /// Tight CI (< 0.10 width) → High band, no counter-recommendation.
+    #[test]
+    fn confidence_high_when_ci_tight() {
+        let input = PredictionInput {
+            p_win: 0.80,
+            ci_lower: 0.77,
+            ci_upper: 0.83, // width 0.06
+            expected_damages: d("100000.00"),
+        };
+        let rec = recommend(&input, d("10000.00"), "");
+        assert_eq!(rec.confidence, ConfidenceBand::High);
+        assert!(rec.counter_recommendation.is_none());
+    }
+
+    /// Medium-width CI (0.10–0.20) → Medium band, no counter.
+    #[test]
+    fn confidence_medium_when_ci_moderate() {
+        let input = PredictionInput {
+            p_win: 0.50,
+            ci_lower: 0.42,
+            ci_upper: 0.56, // width 0.14
+            expected_damages: d("100000.00"),
+        };
+        let rec = recommend(&input, d("50000.00"), "");
+        assert_eq!(rec.confidence, ConfidenceBand::Medium);
+        assert!(rec.counter_recommendation.is_none());
+    }
+
+    /// Wide CI (≥ 0.20 width) → Low band; counter MUST be populated.
+    #[test]
+    fn confidence_low_carries_counter_recommendation() {
+        let input = PredictionInput {
+            p_win: 0.50,
+            ci_lower: 0.30,
+            ci_upper: 0.70, // width 0.40
+            expected_damages: d("100000.00"),
+        };
+        let rec = recommend(&input, d("45000.00"), "");
+        assert_eq!(rec.confidence, ConfidenceBand::Low);
+        assert!(rec.counter_recommendation.is_some(), "Low band must carry a counter");
+    }
+
+    /// When the CI is wide enough that ci_lower triggers Settle but ci_upper
+    /// triggers Try, `flips_within_ci` must be true.
+    #[test]
+    fn counter_flips_when_bounds_disagree() {
+        let input = PredictionInput {
+            p_win: 0.50,
+            ci_lower: 0.30,   // < 0.40 → Settle territory at lower bound
+            ci_upper: 0.85,   // > 0.55 → Try territory at upper bound
+            expected_damages: d("100000.00"),
+        };
+        // Cost picked so EV ordering matches the CI-bound regimes at each end.
+        let rec = recommend(&input, d("10000.00"), "");
+        let counter = rec.counter_recommendation.expect("Low band must have counter");
+        assert!(counter.flips_within_ci);
+        assert_eq!(counter.kind_at_ci_lower, RecommendationKind::Settle);
+        assert_eq!(counter.kind_at_ci_upper, RecommendationKind::Try);
+        assert!(counter.note.contains("flips"));
+    }
+
+    /// CI width ≥ 0.20 but both bounds land in Borderline → counter present
+    /// but `flips_within_ci` is false; note says "agree on Borderline".
+    #[test]
+    fn counter_does_not_flip_when_both_bounds_agree() {
+        let input = PredictionInput {
+            p_win: 0.50,
+            ci_lower: 0.42,
+            ci_upper: 0.54, // 0.12 width → Medium, no counter
+            expected_damages: d("100000.00"),
+        };
+        let rec = recommend(&input, d("45000.00"), "");
+        // Sanity: this is Medium, not Low — confirms we don't synthesise a counter.
+        assert_eq!(rec.confidence, ConfidenceBand::Medium);
+        assert!(rec.counter_recommendation.is_none());
+    }
+
+    /// Bullet 0 now carries a confidence label suffix.
+    #[test]
+    fn bullet_0_carries_confidence_label() {
+        let high = PredictionInput {
+            p_win: 0.80,
+            ci_lower: 0.78,
+            ci_upper: 0.83,
+            expected_damages: d("100000.00"),
+        };
+        assert!(recommend(&high, d("10000.00"), "").rationale_bullets[0]
+            .contains("high confidence"));
+
+        let low = PredictionInput {
+            p_win: 0.50,
+            ci_lower: 0.30,
+            ci_upper: 0.70,
+            expected_damages: d("100000.00"),
+        };
+        assert!(recommend(&low, d("45000.00"), "").rationale_bullets[0]
+            .contains("low confidence"));
+    }
+
+    /// Bullet 1 now exposes the Nash-Rubinstein anchor derivation.
+    #[test]
+    fn bullet_1_exposes_nash_anchor() {
+        let input = PredictionInput {
+            p_win: 0.30,
+            ci_lower: 0.20,
+            ci_upper: 0.40,
+            expected_damages: d("100000.00"),
+        };
+        let rec = recommend(&input, d("20000.00"), "us-federal");
+        let b = &rec.rationale_bullets[1];
+        assert!(b.contains("Nash anchor"), "bullet 1 missing Nash anchor: {b}");
+        assert!(b.contains("0.45"), "bullet 1 missing federal anchor 0.45: {b}");
+        assert!(b.contains("us-federal"), "bullet 1 missing jurisdiction label: {b}");
+        assert!(
+            b.contains("p_win × damages − cost"),
+            "bullet 1 missing EV-try derivation: {b}",
+        );
+    }
+
+    /// Empty-jurisdiction → "legacy" label in bullet 1 (preserves the
+    /// "anchor is 0.40 legacy fallback" contract from S5.11).
+    #[test]
+    fn bullet_1_uses_legacy_label_for_empty_jurisdiction() {
+        let input = PredictionInput {
+            p_win: 0.30,
+            ci_lower: 0.20,
+            ci_upper: 0.40,
+            expected_damages: d("100000.00"),
+        };
+        let rec = recommend(&input, d("20000.00"), "");
+        assert!(rec.rationale_bullets[1].contains("legacy prior"));
+        assert!(rec.rationale_bullets[1].contains("0.40"));
+    }
+
+    // ── End S6.4 tests ───────────────────────────────────────────────────────
 
     proptest! {
         /// For any well-formed `PredictionInput` and `cost ∈ [0, expected_damages]`,

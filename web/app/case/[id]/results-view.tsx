@@ -277,9 +277,19 @@ function ResultsLayout({ caseResult }: ResultsLayoutProps) {
             <Badge variant={badgeVariantForKind(recommendation.kind)}>
               {recommendation.kind}
             </Badge>
+            {/* S6.4 — Confidence band sits next to the kind badge so the
+                UI conveys "Settle (high conf)" / "Settle (borderline)" at
+                a glance. */}
+            <Badge
+              variant="outline"
+              className="text-xs font-normal"
+              aria-label={`Confidence band: ${recommendation.confidence}`}
+            >
+              {recommendation.confidence.toLowerCase()} confidence
+            </Badge>
           </CardTitle>
         </CardHeader>
-        <CardContent>
+        <CardContent className="space-y-3">
           <ul
             className="space-y-2 list-disc list-inside text-sm"
             aria-label="Reasoning"
@@ -288,6 +298,34 @@ function ResultsLayout({ caseResult }: ResultsLayoutProps) {
               <li key={i}>{formatBulletAmounts(bullet)}</li>
             ))}
           </ul>
+          {/* S6.4 — Counter-recommendation panel.  Only rendered when the
+              backend marked confidence as "Low" (CI width ≥ 0.20); see
+              decision-arith::recommend.  Operators see what the call would
+              be at each end of the 90% CI so they can judge sensitivity. */}
+          {recommendation.counterRecommendation && (
+            <aside
+              className="rounded-md border border-amber-200 bg-amber-50 p-3 text-xs"
+              aria-label="Counter-recommendation"
+            >
+              <p className="font-medium text-amber-900">
+                Sensitivity: this recommendation may shift inside the
+                confidence interval
+              </p>
+              <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-amber-900">
+                <dt>At lower CI bound</dt>
+                <dd className="font-semibold">
+                  {recommendation.counterRecommendation.kindAtCiLower}
+                </dd>
+                <dt>At upper CI bound</dt>
+                <dd className="font-semibold">
+                  {recommendation.counterRecommendation.kindAtCiUpper}
+                </dd>
+              </dl>
+              <p className="mt-2 text-amber-800">
+                {recommendation.counterRecommendation.note}
+              </p>
+            </aside>
+          )}
         </CardContent>
       </Card>
 

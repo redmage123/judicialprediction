@@ -36,6 +36,13 @@ export const CREATE_CASE = gql`
       }
       recommendation {
         kind
+        confidence
+        counterRecommendation {
+          kindAtCiLower
+          kindAtCiUpper
+          flipsWithinCi
+          note
+        }
         rationaleBullets
         expectedValueTry
         expectedValueSettle
@@ -67,6 +74,13 @@ export const GET_CASE = gql`
       }
       recommendation {
         kind
+        confidence
+        counterRecommendation {
+          kindAtCiLower
+          kindAtCiUpper
+          flipsWithinCi
+          note
+        }
         rationaleBullets
         expectedValueTry
         expectedValueSettle
@@ -119,12 +133,24 @@ export interface PredictResult {
 export interface RecommendationResult {
   /** "Try" | "Settle" | "Borderline" */
   kind: string;
+  /** S6.4 — qualitative confidence band from CI width: "High" | "Medium" | "Low". */
+  confidence: string;
+  /** S6.4 — bound-evaluated recommendation; null unless confidence == "Low". */
+  counterRecommendation: CounterRecommendation | null;
   /** Three deterministic reasoning bullets. */
   rationaleBullets: string[];
   /** Expected value of trial as a decimal string (e.g. "-20000.00"). */
   expectedValueTry: string;
   /** Expected value of settlement as a decimal string (e.g. "40000.00"). */
   expectedValueSettle: string;
+}
+
+/** S6.4 — recommendation as it would land at each CI bound. */
+export interface CounterRecommendation {
+  kindAtCiLower: string;
+  kindAtCiUpper: string;
+  flipsWithinCi: boolean;
+  note: string;
 }
 
 /** A persisted case returned by createCase or the case(id) query. */
@@ -239,6 +265,13 @@ export const REPREDICT_CASE = gql`
       }
       recommendation {
         kind
+        confidence
+        counterRecommendation {
+          kindAtCiLower
+          kindAtCiUpper
+          flipsWithinCi
+          note
+        }
         rationaleBullets
         expectedValueTry
         expectedValueSettle

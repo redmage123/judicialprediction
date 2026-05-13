@@ -206,6 +206,12 @@ pub struct PredictResult {
 pub struct RecommendationDto {
     /// Recommended action: `"Try"`, `"Settle"`, or `"Borderline"`.
     pub kind: String,
+    /// S6.4 — qualitative confidence band from the CI width:
+    /// `"High"` (<0.10), `"Medium"` (0.10–0.20), or `"Low"` (≥0.20).
+    pub confidence: String,
+    /// S6.4 — bound-evaluated recommendation. Populated only when
+    /// `confidence == "Low"`; otherwise null.
+    pub counter_recommendation: Option<CounterRecommendationDto>,
     /// Three deterministic reasoning bullets produced by decision-arith.
     pub rationale_bullets: Vec<String>,
     /// Expected value of going to trial (`p_win × damages − cost`), as a
@@ -214,6 +220,26 @@ pub struct RecommendationDto {
     /// Expected value of settlement (`damages × 0.40` anchor), as a decimal
     /// string (e.g. `"40000.00"`).
     pub expected_value_settle: String,
+}
+
+/// S6.4 — bound-evaluated recommendation pair.
+///
+/// When the prediction CI is wide enough that the recommendation could
+/// reasonably flip depending on where the true `p_win` lands inside the
+/// CI, the api-gateway surfaces what the recommendation would be at each
+/// bound.  Useful for operator-side sensitivity messaging
+/// ("at the lower bound this would be Settle; at the upper bound this
+/// would be Try").
+#[derive(SimpleObject, Serialize, Deserialize, Clone)]
+pub struct CounterRecommendationDto {
+    /// Recommendation kind at `p_win = ci_lower`.
+    pub kind_at_ci_lower: String,
+    /// Recommendation kind at `p_win = ci_upper`.
+    pub kind_at_ci_upper: String,
+    /// Convenience flag: `kind_at_ci_lower != kind_at_ci_upper`.
+    pub flips_within_ci: bool,
+    /// Operator-facing one-sentence summary; deterministic for a given input.
+    pub note: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -254,6 +280,41 @@ pub struct Case {
 /// Returns `Some(offset + nodes_len)` when more rows remain beyond the
 /// current page (i.e. `offset + nodes_len < total_count`), or `None` when
 /// this page exhausts the result set.
+/// S6.4 — convert a `decision_arith::Recommendation` to the GraphQL DTO,
+/// including the new confidence band + counter-recommendation surfaces.
+/// Single source of truth so createCase / repredictCase / the unit tests
+/// don't drift from each other.
+pub(crate) fn build_recommendation_dto(
+    rec: decision_arith::Recommendation,
+) -> RecommendationDto {
+    let kind_label = |k: &decision_arith::RecommendationKind| match k {
+        decision_arith::RecommendationKind::Settle => "Settle".to_string(),
+        decision_arith::RecommendationKind::Try => "Try".to_string(),
+        decision_arith::RecommendationKind::Borderline => "Borderline".to_string(),
+    };
+    let confidence = match rec.confidence {
+        decision_arith::ConfidenceBand::High => "High",
+        decision_arith::ConfidenceBand::Medium => "Medium",
+        decision_arith::ConfidenceBand::Low => "Low",
+    }
+    .to_string();
+    let counter_recommendation =
+        rec.counter_recommendation.map(|c| CounterRecommendationDto {
+            kind_at_ci_lower: kind_label(&c.kind_at_ci_lower),
+            kind_at_ci_upper: kind_label(&c.kind_at_ci_upper),
+            flips_within_ci: c.flips_within_ci,
+            note: c.note,
+        });
+    RecommendationDto {
+        kind: kind_label(&rec.kind),
+        confidence,
+        counter_recommendation,
+        rationale_bullets: rec.rationale_bullets.to_vec(),
+        expected_value_try: rec.expected_value_try.to_string(),
+        expected_value_settle: rec.expected_value_settle.to_string(),
+    }
+}
+
 pub(crate) fn compute_next_offset(
     offset: i32,
     nodes_len: usize,
@@ -558,16 +619,7 @@ impl Mutation {
         let cost = cost_engine::estimate_cost(&input.jurisdiction, motion_count);
         let rec = decision_arith::recommend(&decision_input, cost, &input.jurisdiction);
 
-        let recommendation = RecommendationDto {
-            kind: match rec.kind {
-                decision_arith::RecommendationKind::Settle    => "Settle".to_string(),
-                decision_arith::RecommendationKind::Try       => "Try".to_string(),
-                decision_arith::RecommendationKind::Borderline => "Borderline".to_string(),
-            },
-            rationale_bullets: rec.rationale_bullets.to_vec(),
-            expected_value_try:    rec.expected_value_try.to_string(),
-            expected_value_settle: rec.expected_value_settle.to_string(),
-        };
+        let recommendation = build_recommendation_dto(rec);
 
         // ── 5. Serialise structs to serde_json::Value for JSONB columns ───────
         let input_features_val = serde_json::to_value(&input)
@@ -986,8 +1038,10 @@ mod tests {
     fn case_serializes_with_decimal_as_string() {
         let rec = RecommendationDto {
             kind: "Try".to_string(),
+            confidence: "High".to_string(),
+            counter_recommendation: None,
             rationale_bullets: vec![
-                "P(win) 0.80 with 90% CI [0.65, 0.92]".to_string(),
+                "P(win) 0.80 with 90% CI [0.65, 0.92] — high confidence".to_string(),
                 "Expected value at trial $70000.00 vs. expected settlement value $40000.00"
                     .to_string(),
                 "Trial EV exceeds settlement and lower CI bound is above 0.55".to_string(),
@@ -1044,8 +1098,10 @@ mod tests {
     fn recommendation_dto_round_trip() {
         let dto = RecommendationDto {
             kind: "Borderline".to_string(),
+            confidence: "Medium".to_string(),
+            counter_recommendation: None,
             rationale_bullets: vec![
-                "P(win) 0.50 with 90% CI [0.45, 0.60]".to_string(),
+                "P(win) 0.50 with 90% CI [0.45, 0.60] — medium confidence".to_string(),
                 "Expected value at trial $5000.00 vs. expected settlement value $40000.00"
                     .to_string(),
                 "Outcome is borderline: CI lower bound (0.45) falls between thresholds".to_string(),
@@ -1091,6 +1147,8 @@ mod tests {
             },
             recommendation: RecommendationDto {
                 kind: "Try".to_string(),
+                confidence: "High".to_string(),
+                counter_recommendation: None,
                 rationale_bullets: vec![
                     "bullet-1".to_string(),
                     "bullet-2".to_string(),

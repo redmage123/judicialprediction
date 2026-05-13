@@ -105,6 +105,8 @@ const MOCK_CASE_RESULT = {
   },
   recommendation: {
     kind: "Try",
+    confidence: "High",
+    counterRecommendation: null,
     rationaleBullets: ["bullet 1", "bullet 2", "bullet 3"],
     expectedValueTry: "24000.00",
     expectedValueSettle: "100000.00",

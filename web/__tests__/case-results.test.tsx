@@ -109,8 +109,10 @@ const VALID_CASE: import("@/lib/queries/predict").CaseResult = {
   },
   recommendation: {
     kind: "Settle",
+    confidence: "Medium",
+    counterRecommendation: null,
     rationaleBullets: [
-      "P(win) 0.42 with 90% CI [0.31, 0.53]",
+      "P(win) 0.42 with 90% CI [0.31, 0.53] — medium confidence",
       "Expected value at trial $55000.00 vs. expected settlement value $100000.00",
       "Settlement preferred: CI lower bound (0.31) is below the loss-exposure threshold of 0.40",
     ],
