@@ -39,9 +39,13 @@ use crate::parse::Opinion;
 
 const REST_BASE: &str = "https://www.courtlistener.com/api/rest/v4";
 const SEARCH_PAGE_SIZE: u32 = 20; // /search/ ignores larger sizes
-/// Stay under the 5/min hard limit on `/opinions/<id>/`.
-const OPINION_DELAY: Duration = Duration::from_secs(13);
-const SEARCH_DELAY: Duration = Duration::from_secs(2);
+/// 60s / 5 requests = 12s per request; +1s margin against clock skew.
+/// The same 5/min bucket applies to `/search/` and `/opinions/<id>/`, so
+/// both paths use this delay. Initial probing (S3.6) suggested `/search/`
+/// had a higher quota; that turned out to be wrong once daily ingest
+/// started — every cron run from 2026-05-10 onward hit 429 on the 6th
+/// search page when SEARCH_DELAY was 2s. Treat the bucket as global.
+const REQUEST_DELAY: Duration = Duration::from_secs(13);
 
 #[derive(Debug, Deserialize)]
 struct SearchPage<T> {
@@ -134,11 +138,25 @@ pub async fn fetch_and_upsert_via_rest(
         "loaded existing opinion_ids"
     );
 
-    // Stage 1: enumerate IDs + case metadata via /search/. Search is not
-    // bound by the 125/day cap, so we can scan more candidates than we
-    // need and still find net-new opinions.
-    let scan_size = (target_count * 4).max(40);
-    let candidates = enumerate_via_search(&client, court, scan_size).await?;
+    // When the court already has rows, walk backward into history using
+    // `filed_before` so we don't waste search-side quota re-enumerating
+    // the same recent opinions and then de-duping them all. Threshold of
+    // 20 (one search page) avoids triggering on a fresh court_id.
+    let filed_before = if already_ingested.len() >= 20 {
+        load_oldest_date_filed(pool, court).await?
+    } else {
+        None
+    };
+    if let Some(d) = filed_before {
+        tracing::info!(filed_before = %d, "walking backward into history");
+    }
+
+    // Stage 1: enumerate IDs + case metadata via /search/.  Each page
+    // consumes one slot in the same 5/min bucket as /opinions/<id>/,
+    // so we cap scan_size to keep search from starving hydrate.
+    let scan_size = (target_count * 2).clamp(40, 200);
+    let candidates =
+        enumerate_via_search(&client, court, scan_size, filed_before).await?;
     tracing::info!(candidates = candidates.len(), "stage 1 complete");
 
     // Stage 2: hydrate + upsert one-by-one. Returns early on daily cap.
@@ -153,7 +171,7 @@ pub async fn fetch_and_upsert_via_rest(
             continue;
         }
         if hydrated_count > 0 {
-            tokio::time::sleep(OPINION_DELAY).await;
+            tokio::time::sleep(REQUEST_DELAY).await;
         }
         hydrated_count += 1;
         match hydrate_opinion(&client, cand).await {
@@ -208,6 +226,24 @@ async fn load_existing_opinion_ids(
     Ok(rows.into_iter().map(|(id,)| id).collect())
 }
 
+/// Oldest `date_filed` already in `case_documents` for this court.  Used
+/// as the search-side `filed_before` cursor so each run walks one page
+/// further back into history instead of re-enumerating recent opinions.
+async fn load_oldest_date_filed(
+    pool: &sqlx::PgPool,
+    court: &str,
+) -> Result<Option<chrono::NaiveDate>> {
+    let row: Option<(Option<chrono::NaiveDate>,)> = sqlx::query_as(
+        "SELECT MIN(date_filed) FROM case_documents \
+         WHERE court_id = $1 AND date_filed IS NOT NULL",
+    )
+    .bind(court)
+    .fetch_optional(pool)
+    .await
+    .context("load oldest date_filed")?;
+    Ok(row.and_then(|(d,)| d))
+}
+
 #[derive(Debug, Clone)]
 struct OpinionCandidate {
     opinion_id: i64,
@@ -222,9 +258,15 @@ async fn enumerate_via_search(
     client: &reqwest::Client,
     court: &str,
     target_count: usize,
+    filed_before: Option<chrono::NaiveDate>,
 ) -> Result<Vec<OpinionCandidate>> {
+    let filed_before_q = filed_before
+        .map(|d| format!("&filed_before={d}"))
+        .unwrap_or_default();
     let mut next_url = Some(format!(
-        "{REST_BASE}/search/?type=o&court={court}&format=json&page_size={SEARCH_PAGE_SIZE}"
+        "{REST_BASE}/search/?type=o&court={court}\
+         &order_by=dateFiled+desc\
+         &format=json&page_size={SEARCH_PAGE_SIZE}{filed_before_q}"
     ));
     let mut out = Vec::with_capacity(target_count);
     let mut page = 0u32;
@@ -234,11 +276,7 @@ async fn enumerate_via_search(
         }
         page += 1;
         tracing::info!(page, accumulated = out.len(), "search page");
-        let resp = client
-            .get(&url)
-            .send()
-            .await
-            .with_context(|| format!("GET {url}"))?;
+        let resp = get_with_retry(client, &url).await?;
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
@@ -270,10 +308,34 @@ async fn enumerate_via_search(
         }
         next_url = parsed.next;
         if next_url.is_some() && out.len() < target_count {
-            tokio::time::sleep(SEARCH_DELAY).await;
+            tokio::time::sleep(REQUEST_DELAY).await;
         }
     }
     Ok(out)
+}
+
+/// GET with one-shot 429 retry.  Parses CourtListener's
+/// `Expected available in N seconds` body hint when present; falls back
+/// to 60 s.  Used for both `/search/` and `/opinions/<id>/` GETs since
+/// both share the same per-minute bucket.
+async fn get_with_retry(client: &reqwest::Client, url: &str) -> Result<reqwest::Response> {
+    let mut resp = client
+        .get(url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        let body = resp.text().await.unwrap_or_default();
+        let wait = parse_retry_after_seconds(&body).unwrap_or(60);
+        tracing::warn!(url, wait_s = wait, "429 — backing off");
+        tokio::time::sleep(Duration::from_secs(wait + 2)).await;
+        resp = client
+            .get(url)
+            .send()
+            .await
+            .with_context(|| format!("GET {url} (retry)"))?;
+    }
+    Ok(resp)
 }
 
 /// Returns Ok(Some(op)) on success, Ok(None) on empty plain_text, Err on
@@ -283,27 +345,7 @@ async fn hydrate_opinion(
     cand: &OpinionCandidate,
 ) -> Result<Option<Opinion>> {
     let url = format!("{REST_BASE}/opinions/{}/?format=json", cand.opinion_id);
-
-    let mut resp = client
-        .get(&url)
-        .send()
-        .await
-        .with_context(|| format!("GET {url}"))?;
-
-    // 429 retry: CourtListener returns "Expected available in N seconds"
-    // in the body. Parse it, sleep N+2 seconds (margin), then retry once.
-    if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-        let body = resp.text().await.unwrap_or_default();
-        let wait = parse_retry_after_seconds(&body).unwrap_or(60);
-        tracing::warn!(opinion_id = cand.opinion_id, wait_s = wait, "429 — backing off");
-        tokio::time::sleep(Duration::from_secs(wait + 2)).await;
-        resp = client
-            .get(&url)
-            .send()
-            .await
-            .with_context(|| format!("GET {url} (retry)"))?;
-    }
-
+    let resp = get_with_retry(client, &url).await?;
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
