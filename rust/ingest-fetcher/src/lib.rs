@@ -8,7 +8,9 @@
 
 pub mod db;
 pub mod fetch;
+pub mod kg;
 pub mod parse;
 pub mod rest;
 
+pub use kg::{populate_from_case_documents, PopulateStats};
 pub use parse::{parse_tarball, Opinion};

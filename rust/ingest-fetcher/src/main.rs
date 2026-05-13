@@ -12,7 +12,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use ingest_fetcher::{db, fetch, parse_tarball, rest};
+use ingest_fetcher::{db, fetch, kg, parse_tarball, rest};
+use uuid::Uuid;
 
 #[derive(Parser)]
 #[command(name = "ingest-fetcher", about = "CourtListener bulk-dump ingester")]
@@ -43,6 +44,18 @@ enum Command {
         /// acceptance bar; raise via --target if you want a fuller pull.
         #[arg(long, default_value_t = 1000)]
         target: usize,
+        /// Postgres DSN. Defaults to $DATABASE_URL.
+        #[arg(long)]
+        database_url: Option<String>,
+    },
+    /// S5.6: scan `case_documents` and populate KG nodes (`courts`, `judges`)
+    /// for a given tenant.  Idempotent; safe to re-run.
+    PopulateKg {
+        /// UUID of the tenant to write nodes against.  Defaults to the
+        /// dev-tenant when --tenant-id is omitted (handy for the local
+        /// docker-compose stack).
+        #[arg(long, default_value = "00000000-0000-0000-0000-000000000001")]
+        tenant_id: Uuid,
         /// Postgres DSN. Defaults to $DATABASE_URL.
         #[arg(long)]
         database_url: Option<String>,
@@ -124,6 +137,25 @@ async fn main() -> Result<()> {
                 stats.http_errors,
             );
             // Exit cleanly if we just hit the daily cap — caller (cron) gets exit 0.
+        }
+        Command::PopulateKg { tenant_id, database_url } => {
+            let dsn = database_url
+                .or_else(|| std::env::var("DATABASE_URL").ok())
+                .context("provide --database-url or set DATABASE_URL")?;
+            let pool = sqlx::PgPool::connect(&dsn)
+                .await
+                .context("connect to Postgres")?;
+            let stats = kg::populate_from_case_documents(&pool, tenant_id).await?;
+            println!(
+                "populate-kg tenant={tenant_id} \
+                 docs_scanned={} courts_inserted={} courts_existing={} \
+                 judges_inserted={} judges_existing={}",
+                stats.case_documents_scanned,
+                stats.courts_inserted,
+                stats.courts_existing,
+                stats.judges_inserted,
+                stats.judges_existing,
+            );
         }
     }
     Ok(())
