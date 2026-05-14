@@ -605,10 +605,15 @@ impl Mutation {
             ci_upper:          f64::from(prediction.ci_upper),
             expected_damages:  Decimal::from(100_000u32),
         };
-        // S5.10: replace the $50k cost placeholder with cost-engine output —
-        // jurisdiction_base × (1 + 0.08 × motion_count).  S5.11: jurisdiction
-        // also flows into the settle anchor (0.45 federal / 0.35 state / 0.40
-        // legacy fallback) via decision_arith::recommend.
+        // S5.10: replace the $50k cost placeholder with cost-engine output.
+        // S5.11: jurisdiction also flows into the settle anchor (0.45 federal
+        // / 0.35 state / 0.40 legacy fallback) via decision_arith::recommend.
+        // S6.7: cost-engine v2 layers expected-duration + party-count factors
+        // on top of the jurisdiction-base × motion-count model.  PredictInput
+        // carries no party/duration signal (Tier-A/B only), so we derive the
+        // expected duration from the motion count via the documented
+        // cost_engine helper and pass the baseline party count — the v2 API
+        // is ready for when richer case-intake data is captured.
         // procedural_motion_count is an f32 in the GraphQL input (matches the
         // feature wire format); clamp non-negative and round before casting.
         // Rust's `as u32` is saturating for f32 → u32 since 1.45.
@@ -616,7 +621,12 @@ impl Mutation {
             .procedural_motion_count
             .max(0.0)
             .round() as u32;
-        let cost = cost_engine::estimate_cost(&input.jurisdiction, motion_count);
+        let cost = cost_engine::estimate_cost_v2(&cost_engine::CostInputs {
+            jurisdiction: &input.jurisdiction,
+            motion_count,
+            expected_duration_months: cost_engine::derive_duration_months(motion_count),
+            party_count: cost_engine::BASELINE_PARTY_COUNT,
+        });
         let rec = decision_arith::recommend(&decision_input, cost, &input.jurisdiction);
 
         let recommendation = build_recommendation_dto(rec);

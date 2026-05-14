@@ -4,7 +4,11 @@
 
 pub mod litigation_cost;
 
-pub use litigation_cost::{estimate_cost, jurisdiction_base_cost, MOTION_FACTOR_BPS};
+pub use litigation_cost::{
+    derive_duration_months, estimate_cost, estimate_cost_v2, jurisdiction_base_cost, CostInputs,
+    BASELINE_DURATION_MONTHS, BASELINE_PARTY_COUNT, DURATION_FACTOR_BPS, MOTION_FACTOR_BPS,
+    PARTY_FACTOR_BPS,
+};
 
 /// A simple discrete cost distribution: parallel slices of probabilities and costs.
 #[derive(Debug, Clone)]
