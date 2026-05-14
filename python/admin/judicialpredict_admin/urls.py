@@ -1,6 +1,7 @@
 from django.contrib import admin
 from django.urls import path
 
+from operators import oidc_views as operator_oidc_views
 from operators import views as operator_views
 
 admin.site.site_header = "JudicialPredict Operator Console"
@@ -22,5 +23,21 @@ urlpatterns = [
         "api/auth/reset/confirm",
         operator_views.password_reset_confirm,
         name="auth-reset-confirm",
+    ),
+    # S6.6 — OIDC SSO (env-gated; endpoints 404 when OIDC_ENABLED is false).
+    path(
+        "api/auth/sso/config",
+        operator_oidc_views.sso_config,
+        name="auth-sso-config",
+    ),
+    path(
+        "api/auth/sso/login",
+        operator_oidc_views.sso_login,
+        name="auth-sso-login",
+    ),
+    path(
+        "api/auth/sso/callback",
+        operator_oidc_views.sso_callback,
+        name="auth-sso-callback",
     ),
 ]

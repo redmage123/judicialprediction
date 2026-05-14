@@ -12,9 +12,34 @@ import { PasswordInput } from "@/components/ui/password-input";
 interface LoginFormProps {
   /** Safe redirect path after successful login. Defaults to "/". */
   nextUrl: string;
+  /** S6.6 — true when the Django auth service has OIDC SSO configured. */
+  ssoEnabled?: boolean;
+  /** S6.6 — human label for the SSO button (e.g. "Okta", "Entra ID"). */
+  ssoProviderName?: string;
+  /** S6.6 — failure code from a prior OIDC callback (?sso_error=...). */
+  ssoError?: string | null;
 }
 
-export function LoginForm({ nextUrl }: LoginFormProps) {
+/** S6.6 — map an OIDC callback failure code to a user-facing message. */
+function ssoErrorMessage(code: string): string {
+  switch (code) {
+    case "unknown_operator":
+      return "No JudicialPredict account is linked to that SSO identity. Contact your administrator.";
+    case "no_email":
+      return "Your identity provider did not share a verified email address.";
+    case "exchange_failed":
+      return "SSO sign-in could not be completed. Please try again.";
+    default:
+      return "SSO sign-in failed. Please try again or use your password.";
+  }
+}
+
+export function LoginForm({
+  nextUrl,
+  ssoEnabled = false,
+  ssoProviderName = "SSO",
+  ssoError = null,
+}: LoginFormProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
   // After a successful password reset the operator is bounced back to /login
@@ -22,7 +47,9 @@ export function LoginForm({ nextUrl }: LoginFormProps) {
   const justReset = searchParams.get("reset") === "ok";
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(
+    ssoError ? ssoErrorMessage(ssoError) : null
+  );
   const [pending, setPending] = useState(false);
 
   async function handleSubmit(e: FormEvent<HTMLFormElement>) {
@@ -129,6 +156,31 @@ export function LoginForm({ nextUrl }: LoginFormProps) {
             </Button>
           </div>
         </form>
+
+        {/* S6.6 — SSO sign-in.  Only rendered when the Django auth service
+            reports an OIDC IdP is configured.  This is a full-page
+            navigation (not a fetch) because the OIDC flow is a chain of
+            browser redirects: web → Django → IdP → Django → web. */}
+        {ssoEnabled && (
+          <>
+            <div className="my-4 flex items-center gap-3" aria-hidden="true">
+              <span className="h-px flex-1 bg-border" />
+              <span className="text-xs text-muted-foreground">or</span>
+              <span className="h-px flex-1 bg-border" />
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="lg"
+              className="w-full"
+              onClick={() => {
+                window.location.assign("/api/auth/sso/login");
+              }}
+            >
+              Sign in with {ssoProviderName}
+            </Button>
+          </>
+        )}
       </CardContent>
     </Card>
   );

@@ -12,6 +12,12 @@ dependencies = [
     "pyjwt>=2.8,<3",
     # bcrypt hasher backend — required by BCryptSHA256PasswordHasher.
     "bcrypt>=4.0,<5",
+    # OIDC SSO (S6.6) — Authlib's Django integration for the auth-code flow.
+    "authlib>=1.3,<2",
+    # Authlib's django_client integration imports its requests-based HTTP
+    # backend at module load; pin it explicitly rather than rely on a
+    # transitive pull.
+    "requests>=2.31,<3",
 ]
 
 [dependency-groups]

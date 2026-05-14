@@ -57,6 +57,10 @@ const VALID_CASE: CaseResult = {
   },
   recommendation: {
     kind: "Settle",
+    // S6.4 — confidence band + counter-recommendation are part of
+    // RecommendationResult; a Medium-confidence case carries no counter.
+    confidence: "Medium",
+    counterRecommendation: null,
     rationaleBullets: [
       "P(win) 0.42 with 90% CI [0.31, 0.53]",
       "Expected value at trial $55000.00 vs. expected settlement value $100000.00",
@@ -89,6 +93,8 @@ describe("CaseMemo PDF rendering", () => {
       prediction: { ...VALID_CASE.prediction, pWin: 0.82 },
       recommendation: {
         kind: "Try",
+        confidence: "High",
+        counterRecommendation: null,
         rationaleBullets: [
           "P(win) 0.82 with 90% CI [0.71, 0.91]",
           "Expected value at trial $70000.00 vs. expected settlement value $40000.00",

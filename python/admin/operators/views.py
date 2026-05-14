@@ -35,13 +35,10 @@ Sprint-5 follow-ups
 - Add rate-limiting middleware around /api/auth/login.
 """
 
-import datetime
 import json
 import logging
-import os
 from urllib.parse import urlencode
 
-import jwt  # PyJWT
 from django.conf import settings
 from django.contrib.auth import authenticate
 from django.contrib.auth.password_validation import (
@@ -53,6 +50,11 @@ from django.http import HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 
+from operators.jwt_helpers import (
+    COOKIE_NAME,
+    mint_session_jwt,
+    set_session_cookie,
+)
 from operators.models import (
     PASSWORD_RESET_TOKEN_TTL_MINUTES,
     Operator,
@@ -60,13 +62,6 @@ from operators.models import (
 )
 
 _log = logging.getLogger(__name__)
-
-_JWT_SECRET = os.environ.get(
-    "JWT_SECRET",
-    "dev-only-NOT-A-REAL-SECRET-1234567890abcdef",
-)
-_JWT_TTL_HOURS = 8
-_COOKIE_NAME = "jp_session"
 
 
 @csrf_exempt
@@ -92,30 +87,11 @@ def login(request):
     except Operator.DoesNotExist:
         return JsonResponse({"ok": False, "error": "invalid_credentials"}, status=401)
 
-    now = datetime.datetime.now(tz=datetime.timezone.utc)
-    payload = {
-        "sub": str(operator.id),
-        "tenant_id": str(operator.tenant_id) if operator.tenant_id else None,
-        "role": operator.role,
-        "iss": "judicialpredict-admin",
-        "aud": "judicialpredict-api",
-        "iat": int(now.timestamp()),
-        "exp": int((now + datetime.timedelta(hours=_JWT_TTL_HOURS)).timestamp()),
-    }
-    token = jwt.encode(payload, _JWT_SECRET, algorithm="HS256")
-
+    # S6.6: JWT minting + cookie are shared with the OIDC SSO callback so
+    # the two auth paths issue identical tokens.  See operators/jwt_helpers.py.
+    token = mint_session_jwt(operator)
     response = JsonResponse({"ok": True}, status=200)
-    # Secure=True only outside DEBUG so the cookie works over plain HTTP in dev.
-    use_secure = not _is_debug()
-    response.set_cookie(
-        _COOKIE_NAME,
-        token,
-        httponly=True,
-        samesite="Lax",
-        secure=use_secure,
-        max_age=_JWT_TTL_HOURS * 3600,
-        path="/",
-    )
+    set_session_cookie(response, token)
     return response
 
 
@@ -124,13 +100,8 @@ def login(request):
 def logout(request):
     """Clear the jp_session cookie."""
     response = HttpResponse(status=204)
-    response.delete_cookie(_COOKIE_NAME, path="/", samesite="Lax")
+    response.delete_cookie(COOKIE_NAME, path="/", samesite="Lax")
     return response
-
-
-def _is_debug() -> bool:
-    """Return True when running in DEBUG mode (dev/CI)."""
-    return os.environ.get("DEBUG", "true").lower() not in ("false", "0", "no")
 
 
 # ---------------------------------------------------------------------------

@@ -203,6 +203,30 @@ DEFAULT_FROM_EMAIL = env(
 WEB_BASE_URL = env("WEB_BASE_URL", default="http://localhost:3030")
 
 # ---------------------------------------------------------------------------
+# OIDC SSO (S6.6)
+#
+# Entirely env-gated.  When OIDC_ENABLED is false (the default) the SSO
+# endpoints 404 and the web login page hides the "Sign in with SSO" button —
+# password login is untouched.
+#
+# To enable, register an OAuth2 client with your IdP whose redirect URI is
+# <WEB_BASE_URL>/api/auth/sso/callback, then set:
+#     OIDC_ENABLED          "true"
+#     OIDC_CLIENT_ID        client id from the IdP
+#     OIDC_CLIENT_SECRET    client secret from the IdP
+#     OIDC_DISCOVERY_URL    https://<idp>/.well-known/openid-configuration
+#     OIDC_PROVIDER_NAME    button label (e.g. "Okta", "Entra ID")
+#     OIDC_REDIRECT_URI     (optional) override the derived callback URL
+# ---------------------------------------------------------------------------
+
+OIDC_ENABLED = env.bool("OIDC_ENABLED", default=False)
+OIDC_CLIENT_ID = env("OIDC_CLIENT_ID", default="")
+OIDC_CLIENT_SECRET = env("OIDC_CLIENT_SECRET", default="")
+OIDC_DISCOVERY_URL = env("OIDC_DISCOVERY_URL", default="")
+OIDC_PROVIDER_NAME = env("OIDC_PROVIDER_NAME", default="SSO")
+OIDC_REDIRECT_URI = env("OIDC_REDIRECT_URI", default="")
+
+# ---------------------------------------------------------------------------
 # Internationalisation
 # ---------------------------------------------------------------------------
 

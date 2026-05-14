@@ -56,6 +56,9 @@ vi.mock("next/navigation", () => ({
     push: mockRouterPush,
     refresh: mockRouterRefresh,
   }),
+  // LoginForm reads ?reset=ok via useSearchParams; provide a minimal stub
+  // with the .get() accessor the component uses.
+  useSearchParams: () => new URLSearchParams(),
 }));
 
 // ---------------------------------------------------------------------------
@@ -161,6 +164,117 @@ describe("LoginForm", () => {
 });
 
 // ---------------------------------------------------------------------------
+// S6.6 — OIDC SSO button + BFF proxy
+// ---------------------------------------------------------------------------
+
+describe("LoginForm — S6.6 SSO button", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  async function renderForm(props: Record<string, unknown>) {
+    const { LoginForm } = await import("../app/login/login-form");
+    return render(<LoginForm nextUrl="/" {...props} />);
+  }
+
+  it("hides the SSO button when ssoEnabled is false (default)", async () => {
+    await renderForm({});
+    expect(screen.queryByRole("button", { name: /sign in with/i })).toBeNull();
+  });
+
+  it("shows a labelled SSO button when ssoEnabled is true", async () => {
+    await renderForm({ ssoEnabled: true, ssoProviderName: "Example IdP" });
+    expect(
+      screen.getByRole("button", { name: /sign in with example idp/i })
+    ).toBeTruthy();
+  });
+
+  it("clicking the SSO button navigates to the SSO login proxy", async () => {
+    const assign = vi.fn();
+    // jsdom's window.location.assign is a no-op stub; replace it with a spy.
+    vi.stubGlobal("location", { ...window.location, assign });
+
+    await renderForm({ ssoEnabled: true, ssoProviderName: "Okta" });
+    fireEvent.click(screen.getByRole("button", { name: /sign in with okta/i }));
+
+    expect(assign).toHaveBeenCalledWith("/api/auth/sso/login");
+  });
+
+  it("surfaces a prior OIDC callback error from the ssoError prop", async () => {
+    await renderForm({ ssoError: "unknown_operator" });
+    expect(screen.getByRole("alert")).toBeTruthy();
+    expect(
+      screen.getByText(/no judicialpredict account is linked/i)
+    ).toBeTruthy();
+  });
+});
+
+describe("S6.6 — SSO BFF proxy route", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("forwards GET /api/auth/sso/config to DJANGO_AUTH_URL", async () => {
+    const mockUpstream = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ enabled: false }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    );
+    vi.stubGlobal("fetch", mockUpstream);
+
+    const mod = await import("../app/api/auth/sso/[...slug]/route");
+    const { NextRequest } = await import("next/server");
+    const req = new NextRequest(
+      new Request("http://localhost:3000/api/auth/sso/config")
+    );
+    const res = await mod.GET(req, { params: Promise.resolve({ slug: ["config"] }) });
+
+    expect(res.status).toBe(200);
+    const upstreamUrl = mockUpstream.mock.calls[0][0] as string;
+    expect(upstreamUrl).toMatch(/localhost:8000\/api\/auth\/sso\/config/);
+  });
+
+  it("rejects an unknown sub-path with 404 without calling upstream", async () => {
+    const mockUpstream = vi.fn();
+    vi.stubGlobal("fetch", mockUpstream);
+
+    const mod = await import("../app/api/auth/sso/[...slug]/route");
+    const { NextRequest } = await import("next/server");
+    const req = new NextRequest(
+      new Request("http://localhost:3000/api/auth/sso/evil")
+    );
+    const res = await mod.GET(req, { params: Promise.resolve({ slug: ["evil"] }) });
+
+    expect(res.status).toBe(404);
+    expect(mockUpstream).not.toHaveBeenCalled();
+  });
+
+  it("forwards a 302 redirect (login → IdP) back to the browser", async () => {
+    const mockUpstream = vi.fn().mockResolvedValue(
+      new Response(null, {
+        status: 302,
+        headers: { location: "https://idp.example.test/authorize?state=abc" },
+      })
+    );
+    vi.stubGlobal("fetch", mockUpstream);
+
+    const mod = await import("../app/api/auth/sso/[...slug]/route");
+    const { NextRequest } = await import("next/server");
+    const req = new NextRequest(
+      new Request("http://localhost:3000/api/auth/sso/login")
+    );
+    const res = await mod.GET(req, { params: Promise.resolve({ slug: ["login"] }) });
+
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe(
+      "https://idp.example.test/authorize?state=abc"
+    );
+    // The proxy must NOT auto-follow the redirect server-side.
+    expect(mockUpstream).toHaveBeenCalledWith(
+      expect.stringContaining("/api/auth/sso/login"),
+      expect.objectContaining({ redirect: "manual" })
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Middleware tests
 // ---------------------------------------------------------------------------
 
@@ -207,6 +321,7 @@ describe("/login route — axe-core a11y gate", () => {
   it("login form passes axe-core with no violations", async () => {
     vi.mock("next/navigation", () => ({
       useRouter: () => ({ push: vi.fn(), refresh: vi.fn() }),
+      useSearchParams: () => new URLSearchParams(),
     }));
 
     const { LoginForm } = await import("../app/login/login-form");
