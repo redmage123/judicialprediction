@@ -68,24 +68,54 @@ To unblock:
 
 ## Production schedule
 
-Daily cron at 04:00 UTC; court rotation by day-of-week (S4.11):
+Daily cron at 04:00 UTC. **S6.9: two courts per run** — `tax` (the
+high-volume workhorse) plus one rotating minor court, so cafc/bia/scotus
+keep growing instead of advancing ~1 search page per week. The minor slot
+is selected by `day-of-week mod 3`:
 
-| DOW    | Court  | Rationale                                                   |
-|--------|--------|-------------------------------------------------------------|
-| Mon    | tax    | tax has 13k opinions; biggest pool, hit it twice/week       |
-| Tue    | cafc   | US Federal Circuit (patent + IP cases — distinct posture)   |
-| Wed    | bia    | Board of Immigration Appeals                                |
-| Thu    | tax    | second tax day                                              |
-| Fri    | scotus | Supreme Court                                               |
-| Sat/Sun| tax    | absorb weekend slots into the largest pool                  |
+| DOW mod 3 | Minor court | Pair run    | Rationale                                          |
+|-----------|-------------|-------------|----------------------------------------------------|
+| 0         | cafc        | tax + cafc  | US Federal Circuit (patent + IP — distinct posture) |
+| 1         | bia         | tax + bia   | Board of Immigration Appeals                       |
+| 2         | scotus      | tax + scotus| Supreme Court                                      |
+
+Over a 7-day week the minor slot lands cafc x3, bia x2, scotus x2; `tax`
+runs every day. Each court walks one search page further back into history
+per run via its own `filed_before` cursor.
+
+Per-court `TARGET` defaults to 50 so the pair stays under the 125/day cap:
+`per court ~= TARGET hydrate + ceil(TARGET*2 / 20) search pages`, i.e.
+~55 calls/court, ~110 for the pair. If the first court hits the daily cap,
+the rest of the rotation is skipped (a second run would only 429).
 
 ```cron
 0 4 * * * /opt/ai-elevate/gigforge/projects/judicialpredict/scripts/courtlistener-daily.sh
 ```
 
-Override the auto-selected court for a manual run: `COURT=scotus ./scripts/courtlistener-daily.sh`.
+Override the rotation for a manual run with a space-separated `COURTS`
+list, and/or `TARGET`: `COURTS="tax scotus" TARGET=80 ./scripts/courtlistener-daily.sh`.
 
-**Sprint-5 follow-up:** parallel multi-court if FLP allowlist drops the daily cap.
+### Log format (`/var/log/jp-courtlistener-daily.log`)
+
+Each run brackets its per-court work with `RUN-START` / `RUN-END` lines:
+
+```
+<ts> RUN-START courts=tax,cafc target=50
+<ts> START court=tax target=50 start_count=1240
+... ingest-fetcher stdout/stderr streamed live ...
+<ts> END   court=tax rc=0 added=50 total=1290 cap_hit=0
+<ts> START court=cafc target=50 start_count=312
+... ingest-fetcher stdout/stderr streamed live ...
+<ts> END   court=cafc rc=0 added=47 total=359 cap_hit=0
+<ts> RUN-END   courts=tax,cafc total_added=97 rc=0 cap_hit=0
+```
+
+`cap_hit=1` on an `END` line means the shared 125/day cap fired during that
+court; any remaining courts get a `SKIP court=<id> reason=daily_cap_hit`
+line instead of `START`/`END`. `rc` is non-zero only on real errors
+(network, DB, build) — a clean daily-cap exit is `rc=0`.
+
+**Follow-up:** parallel multi-court if an FLP allowlist drops the daily cap.
 
 ## Expected timings
 
