@@ -158,6 +158,58 @@ describe("IntakeForm — happy path (S4.4: createCase + server UUID)", () => {
     // The route must use the server UUID directly — no crypto.randomUUID().
     expect(mockRouterPush).toHaveBeenCalledWith(`/case/${SERVER_CASE_UUID}`);
   });
+
+  // S6.8 — when no prior-opinion text was entered, createCase is called
+  // with just `input` (no opinionText key) so the server stores NULL.
+  it("omits opinionText from createCase when the prefill field is blank", async () => {
+    mockMutate.mockResolvedValue({
+      data: { createCase: MOCK_CASE_RESULT },
+      errors: undefined,
+    });
+
+    await renderForm();
+    fillAllFields();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /run prediction/i }));
+    });
+
+    await waitFor(() => expect(mockMutate).toHaveBeenCalledOnce());
+
+    const vars = mockMutate.mock.calls[0][0].variables;
+    expect(vars.input).toBeDefined();
+    expect(vars).not.toHaveProperty("opinionText");
+  });
+
+  // S6.8 — when the operator pasted prior-opinion text, the trimmed text is
+  // forwarded so the server can persist its NLP suggestion.
+  it("forwards opinionText to createCase when prior-opinion text was entered", async () => {
+    mockMutate.mockResolvedValue({
+      data: { createCase: MOCK_CASE_RESULT },
+      errors: undefined,
+    });
+
+    await renderForm();
+    fillAllFields();
+
+    // Expand the <details> and paste opinion text (no extract step needed —
+    // we only assert what gets forwarded on submit).
+    fireEvent.click(screen.getByText(/prefill from a prior opinion/i));
+    fireEvent.change(
+      screen.getByLabelText(/opinion text for feature extraction/i),
+      { target: { value: "  LAUBER, J., delivered the opinion.  " } }
+    );
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /run prediction/i }));
+    });
+
+    await waitFor(() => expect(mockMutate).toHaveBeenCalledOnce());
+
+    const vars = mockMutate.mock.calls[0][0].variables;
+    // Forwarded value must be trimmed.
+    expect(vars.opinionText).toBe("LAUBER, J., delivered the opinion.");
+  });
 });
 
 describe("IntakeForm — validation", () => {

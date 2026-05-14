@@ -220,7 +220,17 @@ export function IntakeForm() {
     };
 
     try {
-      const result = await createCase({ variables: { input } });
+      // S6.8 — forward the prior-opinion text (if the operator pasted any)
+      // so the server persists its NLP suggestion alongside these final,
+      // possibly hand-edited, values.  Omitted entirely when the field is
+      // blank, leaving the server-side nlp_suggestion NULL.
+      const trimmedOpinion = opinionText.trim();
+      const result = await createCase({
+        variables: {
+          input,
+          ...(trimmedOpinion ? { opinionText: trimmedOpinion } : {}),
+        },
+      });
 
       if (result.error || !result.data) {
         setSubmitError(

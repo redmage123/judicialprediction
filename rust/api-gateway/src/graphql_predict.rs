@@ -269,6 +269,12 @@ pub struct Case {
     pub created_by: Option<ID>,
     /// ISO-8601 UTC timestamp of row creation from `cases.created_at`.
     pub created_at: String,
+    /// S6.8 — the NLP feature suggestion extracted from the `opinion_text`
+    /// payload at `createCase` time, if one was supplied.  `None` when the
+    /// case was created without opinion text.  Stored alongside
+    /// `input_features` (the operator's final values) so NLP-vs-operator
+    /// accuracy can be evaluated later.
+    pub nlp_suggestion: Option<Json<ExtractedFeatures>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -424,6 +430,124 @@ pub struct ExtractedFeatures {
     pub jurisdiction_suggestion: Option<String>,
 }
 
+/// Maximum opinion-text length accepted by the NLP extractor.  The regex
+/// passes don't care about size, but unbounded text from a malicious client
+/// would still chew CPU.
+pub(crate) const MAX_OPINION_TEXT_BYTES: usize = 256 * 1024;
+
+/// Run the S5.7/S5.8 NLP extractor over `text` and resolve judge severity
+/// from the `judges` table for `tenant_id`.
+///
+/// Shared by the `extractFeatures` query (S5.8) and the `createCase`
+/// mutation (S6.8) so the prefill suggestion and the persisted suggestion
+/// are produced by exactly the same code path — they cannot drift.
+///
+/// Pure-read; opens its own short transaction for the `SET LOCAL` tenant
+/// scoping required by RLS on `judges`.
+pub(crate) async fn extract_features_from_text(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    text: &str,
+) -> async_graphql::Result<ExtractedFeatures> {
+    use ingest_fetcher::{
+        classify_case_type, detect_outcome, extract_judge_names, normalize_judge_name,
+    };
+
+    if text.len() > MAX_OPINION_TEXT_BYTES {
+        return Err(async_graphql::Error::new(
+            "text too long (>256 KB); supply just the opinion body",
+        ));
+    }
+
+    // ── Pure NLP pass ────────────────────────────────────────────────────────
+    let case_type_hint = classify_case_type(text).to_string();
+    let outcome_for = detect_outcome(text).map(str::to_string);
+    let judge_candidates: Vec<String> = extract_judge_names(text);
+
+    // Every S5.7 tax-court class is "civil" in the PredictInput taxonomy
+    // (income_tax / innocent_spouse / cdp / whistleblower / ... are all civil
+    // proceedings under Title 26).  Suggest only when we actually had signal;
+    // an empty extraction means we don't know.
+    let case_type_suggestion = (!case_type_hint.is_empty()).then(|| "civil".to_string());
+
+    // Jurisdiction — cheap signature scan.  A richer mapping lives in
+    // `kg::map_courtlistener_jurisdiction` but that one keys on CL slug.
+    let jurisdiction_suggestion = if text.contains("United States Tax Court")
+        || text.contains("U.S. Tax Court")
+        || text.contains("Supreme Court of the United States")
+    {
+        Some("us-federal".to_string())
+    } else {
+        None
+    };
+
+    // ── Judge severity lookup ────────────────────────────────────────────────
+    // Take the first extracted candidate as the primary judge (opinion header
+    // order is "writer first" in CourtListener exports).  If none, leave the
+    // severity fields None.
+    let (judge_severity, judge_name, judge_cases_analyzed) =
+        match judge_candidates.first() {
+            Some(raw_name) => {
+                let normalized = normalize_judge_name(raw_name);
+                if normalized.is_empty() {
+                    (None, None, None)
+                } else {
+                    let mut tx = pool.begin().await.map_err(|e| {
+                        async_graphql::Error::new(format!("judges tx begin: {e}"))
+                    })?;
+                    sqlx::query(&format!(
+                        "SET LOCAL app.current_tenant_id = '{tenant_id}'"
+                    ))
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| {
+                        async_graphql::Error::new(format!("SET LOCAL failed: {e}"))
+                    })?;
+
+                    let row = sqlx::query(
+                        "SELECT full_name,
+                                (bio->'severity_proxy'->>'severity')::float8    AS severity,
+                                (bio->'severity_proxy'->>'cases_analyzed')::int AS cases_analyzed
+                         FROM judges
+                         WHERE tenant_id = $1 AND normalized_name = $2",
+                    )
+                    .bind(tenant_id)
+                    .bind(&normalized)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(|e| {
+                        async_graphql::Error::new(format!("judge lookup failed: {e}"))
+                    })?;
+
+                    tx.commit().await.map_err(|e| {
+                        async_graphql::Error::new(format!("judges tx commit: {e}"))
+                    })?;
+
+                    match row {
+                        Some(r) => {
+                            let name: Option<String> = r.try_get("full_name").ok();
+                            let sev: Option<f64> = r.try_get("severity").ok();
+                            let n: Option<i32> = r.try_get("cases_analyzed").ok();
+                            (sev, name, n)
+                        }
+                        None => (None, None, None),
+                    }
+                }
+            }
+            None => (None, None, None),
+        };
+
+    Ok(ExtractedFeatures {
+        judge_severity,
+        judge_name,
+        judge_cases_analyzed,
+        case_type_hint,
+        case_type_suggestion,
+        outcome_for,
+        jurisdiction_suggestion,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // GraphQL Mutation root
 // ---------------------------------------------------------------------------
@@ -551,6 +675,15 @@ impl Mutation {
         &self,
         ctx: &Context<'_>,
         input: PredictInput,
+        // S6.8 — optional raw opinion text.  When supplied, the gateway runs
+        // the S5.7/S5.8 NLP extractor over it and persists the resulting
+        // suggestion in `cases.nlp_suggestion`, alongside the operator's
+        // final `input_features`, for later NLP-vs-operator accuracy
+        // evaluation.  Omitting it leaves `nlp_suggestion` NULL.
+        #[graphql(desc = "Optional raw opinion text; when supplied, its NLP \
+                          feature suggestion is persisted alongside the \
+                          operator's final values.")]
+        opinion_text: Option<String>,
     ) -> async_graphql::Result<Case> {
         let start = Instant::now();
 
@@ -648,6 +781,22 @@ impl Mutation {
                 async_graphql::Error::new("cases store not configured (DATABASE_URL missing)")
             })?;
 
+        // S6.8 — if opinion text was supplied, run the shared NLP extractor
+        // (same code path as the extractFeatures query) and persist its
+        // suggestion next to the operator's final values.  Done before the
+        // INSERT tx because the extractor opens its own short transaction.
+        let nlp_suggestion: Option<ExtractedFeatures> = match opinion_text.as_deref() {
+            Some(text) if !text.trim().is_empty() => {
+                Some(extract_features_from_text(pool, tenant_id, text).await?)
+            }
+            _ => None,
+        };
+        let nlp_suggestion_val = nlp_suggestion
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+
         let mut tx = pool
             .begin()
             .await
@@ -670,9 +819,10 @@ impl Mutation {
             r#"
             INSERT INTO cases
                 (tenant_id, title, jurisdiction,
-                 input_features, prediction, recommendation, created_by)
+                 input_features, prediction, recommendation, created_by,
+                 nlp_suggestion)
             VALUES
-                ($1, $2, $3, $4, $5, $6, $7)
+                ($1, $2, $3, $4, $5, $6, $7, $8)
             RETURNING id, created_at::text AS created_at_s
             "#,
         )
@@ -683,6 +833,7 @@ impl Mutation {
         .bind(&prediction_val)
         .bind(&recommendation_val)
         .bind(operator_id)
+        .bind(&nlp_suggestion_val)
         .fetch_one(&mut *tx)
         .await
         .map_err(|e| async_graphql::Error::new(format!("case insert failed: {e}")))?;
@@ -730,6 +881,7 @@ impl Mutation {
             recommendation,
             created_by:     operator_id.map(|id| ID::from(id.to_string())),
             created_at:     created_at_s,
+            nlp_suggestion: nlp_suggestion.map(Json),
         })
     }
 
@@ -801,7 +953,8 @@ impl Mutation {
                    input_features,
                    recommendation,
                    created_by,
-                   created_at::text AS created_at_s
+                   created_at::text AS created_at_s,
+                   nlp_suggestion
             FROM   cases
             WHERE  id = $1
               AND  tenant_id = $2
@@ -847,6 +1000,20 @@ impl Mutation {
                     "case {row_id}: input_features parse error: {e}"
                 ))
             })?;
+        // S6.8 — nlp_suggestion is nullable; repredict preserves whatever the
+        // original createCase stored (it does not re-run extraction).
+        let nlp_suggestion_val: Option<serde_json::Value> = row
+            .try_get("nlp_suggestion")
+            .map_err(|e| async_graphql::Error::new(format!("row.nlp_suggestion: {e}")))?;
+        let nlp_suggestion: Option<ExtractedFeatures> = nlp_suggestion_val
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|e| {
+                async_graphql::Error::new(format!(
+                    "case {row_id}: nlp_suggestion parse error: {e}"
+                ))
+            })?;
+
         let recommendation: RecommendationDto =
             serde_json::from_value(recommendation_val).map_err(|e| {
                 async_graphql::Error::new(format!(
@@ -954,6 +1121,7 @@ impl Mutation {
             recommendation,
             created_by:     created_by.map(|u| ID::from(u.to_string())),
             created_at,
+            nlp_suggestion: nlp_suggestion.map(Json),
         })
     }
 }
@@ -1082,6 +1250,7 @@ mod tests {
             recommendation: rec,
             created_by:  None,
             created_at:  "2026-05-10T12:00:00Z".to_string(),
+            nlp_suggestion: None,
         };
 
         let json_str = serde_json::to_string(&case).expect("Case must serialize to JSON");
@@ -1100,6 +1269,79 @@ mod tests {
             "70000.00",
             "expected_value_try string value must round-trip exactly"
         );
+
+        // S6.8 — nlp_suggestion is None here; it must serialize as JSON null.
+        assert!(
+            value["nlp_suggestion"].is_null(),
+            "absent nlp_suggestion must serialize as JSON null; got: {}",
+            value["nlp_suggestion"]
+        );
+    }
+
+    /// S6.8 — a `Case` carrying an `nlp_suggestion` round-trips through
+    /// serde_json with every ExtractedFeatures field intact.
+    #[test]
+    fn case_round_trips_with_nlp_suggestion() {
+        let suggestion = ExtractedFeatures {
+            judge_severity: Some(0.42),
+            judge_name: Some("LAUBER".to_string()),
+            judge_cases_analyzed: Some(7),
+            case_type_hint: "innocent_spouse".to_string(),
+            case_type_suggestion: Some("civil".to_string()),
+            outcome_for: Some("respondent".to_string()),
+            jurisdiction_suggestion: Some("us-federal".to_string()),
+        };
+        let case = Case {
+            id: ID::from("00000000-0000-0000-0000-000000000010"),
+            tenant_id: ID::from("00000000-0000-0000-0000-000000000002"),
+            input_features: Json(PredictInput {
+                judge_severity:          0.5,
+                attorney_win_rate:       0.6,
+                ideology_distance:       0.3,
+                materiality_score:       0.8,
+                procedural_motion_count: 2.0,
+                case_type:               "civil".to_string(),
+                jurisdiction:            "us-federal".to_string(),
+            }),
+            prediction: PredictResult {
+                p_win:             0.6,
+                ci_lower:          0.5,
+                ci_upper:          0.7,
+                coverage:          0.90,
+                model_version:     "test".to_string(),
+                predicted_at_unix: 1_746_748_800,
+            },
+            recommendation: RecommendationDto {
+                kind: "Borderline".to_string(),
+                confidence: "Medium".to_string(),
+                counter_recommendation: None,
+                rationale_bullets: vec![
+                    "b1".to_string(),
+                    "b2".to_string(),
+                    "b3".to_string(),
+                ],
+                expected_value_try:    "10000.00".to_string(),
+                expected_value_settle: "40000.00".to_string(),
+            },
+            created_by: None,
+            created_at: "2026-05-10T12:00:00Z".to_string(),
+            nlp_suggestion: Some(Json(suggestion)),
+        };
+
+        let json_str = serde_json::to_string(&case).expect("Case must serialize");
+        let decoded: Case =
+            serde_json::from_str(&json_str).expect("Case must deserialize");
+
+        let nlp = decoded
+            .nlp_suggestion
+            .expect("nlp_suggestion must round-trip as Some");
+        assert_eq!(nlp.0.judge_severity, Some(0.42));
+        assert_eq!(nlp.0.judge_name.as_deref(), Some("LAUBER"));
+        assert_eq!(nlp.0.judge_cases_analyzed, Some(7));
+        assert_eq!(nlp.0.case_type_hint, "innocent_spouse");
+        assert_eq!(nlp.0.case_type_suggestion.as_deref(), Some("civil"));
+        assert_eq!(nlp.0.outcome_for.as_deref(), Some("respondent"));
+        assert_eq!(nlp.0.jurisdiction_suggestion.as_deref(), Some("us-federal"));
     }
 
     /// `RecommendationDto` serializes and deserializes deterministically
@@ -1169,6 +1411,7 @@ mod tests {
             },
             created_by: None,
             created_at: "2026-05-10T12:00:00Z".to_string(),
+            nlp_suggestion: None,
         }
     }
 

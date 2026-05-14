@@ -263,6 +263,10 @@ impl Query {
                 recommendation,
                 created_by: created_by.map(|u| ID::from(u.to_string())),
                 created_at,
+                // S6.8 — listCases is a summary view; it does not fetch the
+                // nlp_suggestion column.  Clients that need it use the
+                // single-case `case(id)` query.
+                nlp_suggestion: None,
             });
         }
 
@@ -278,7 +282,9 @@ impl Query {
         id: async_graphql::ID,
     ) -> async_graphql::Result<Option<crate::graphql_predict::Case>> {
         use async_graphql::Json;
-        use crate::graphql_predict::{Case, PredictInput, PredictResult, RecommendationDto};
+        use crate::graphql_predict::{
+            Case, ExtractedFeatures, PredictInput, PredictResult, RecommendationDto,
+        };
         use sqlx::Row as _;
 
         let TenantId(tenant_id) = *ctx
@@ -309,7 +315,7 @@ impl Query {
         let row_opt = sqlx::query(
             r#"
             SELECT id, tenant_id, input_features, prediction, recommendation,
-                   created_by, created_at::text AS created_at_s
+                   created_by, created_at::text AS created_at_s, nlp_suggestion
             FROM   cases
             WHERE  id = $1 AND tenant_id = $2
             "#,
@@ -349,6 +355,15 @@ impl Query {
         let recommendation: RecommendationDto = serde_json::from_value(recommendation_val)
             .map_err(|e| async_graphql::Error::new(format!("case {row_id}: recommendation parse: {e}")))?;
 
+        // S6.8 — nlp_suggestion is nullable: NULL for cases created without
+        // an opinion_text payload.
+        let nlp_suggestion_val: Option<serde_json::Value> = row.try_get("nlp_suggestion")
+            .map_err(|e| async_graphql::Error::new(format!("case {row_id}: nlp_suggestion: {e}")))?;
+        let nlp_suggestion: Option<ExtractedFeatures> = nlp_suggestion_val
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|e| async_graphql::Error::new(format!("case {row_id}: nlp_suggestion parse: {e}")))?;
+
         Ok(Some(Case {
             id: async_graphql::ID::from(row_id.to_string()),
             tenant_id: async_graphql::ID::from(tenant_id_col.to_string()),
@@ -357,6 +372,7 @@ impl Query {
             recommendation,
             created_by: created_by.map(|u| async_graphql::ID::from(u.to_string())),
             created_at,
+            nlp_suggestion: nlp_suggestion.map(Json),
         }))
     }
 
@@ -515,10 +531,11 @@ impl Query {
 
     /// S5.8 — Suggest intake-form prefills from a prior opinion's plain text.
     ///
-    /// Runs the same pure NLP helpers that S5.7 uses to back-fill
-    /// `case_documents` (`classify_case_type`, `detect_outcome`,
-    /// `extract_judge_names`).  When the extracted judge matches a row in
-    /// `judges`, looks up `bio.severity_proxy.severity` and returns it.
+    /// Thin wrapper over `graphql_predict::extract_features_from_text`, which
+    /// runs the S5.7 NLP helpers (`classify_case_type`, `detect_outcome`,
+    /// `extract_judge_names`) and resolves judge severity from `judges`.
+    /// S6.8 — the `createCase` mutation calls the same helper so the prefill
+    /// suggestion and the persisted suggestion cannot drift.
     ///
     /// Pure-read; no audit row.  Requires a valid JWT but no special role.
     async fn extract_features(
@@ -526,118 +543,19 @@ impl Query {
         ctx: &Context<'_>,
         text: String,
     ) -> async_graphql::Result<crate::graphql_predict::ExtractedFeatures> {
-        use crate::graphql_predict::ExtractedFeatures;
-        use ingest_fetcher::{
-            classify_case_type, detect_outcome, extract_judge_names, normalize_judge_name,
-        };
-        use sqlx::Row as _;
-
-        // Bound the input — the regex passes don't care about size, but
-        // unbounded text from a malicious client would still chew CPU.
-        if text.len() > 256 * 1024 {
-            return Err(async_graphql::Error::new(
-                "text too long (>256 KB); supply just the opinion body",
-            ));
-        }
-
         let TenantId(tenant_id) = *ctx
             .data::<TenantId>()
             .map_err(|_| async_graphql::Error::new("missing tenant id"))?;
 
-        // ── Pure NLP pass ────────────────────────────────────────────────────
-        let case_type_hint = classify_case_type(&text).to_string();
-        let outcome_for = detect_outcome(&text).map(str::to_string);
-        let judge_candidates: Vec<String> = extract_judge_names(&text);
+        let pool = ctx
+            .data::<Option<Arc<PgPool>>>()
+            .map_err(|_| async_graphql::Error::new("cases store unavailable"))?
+            .as_ref()
+            .ok_or_else(|| {
+                async_graphql::Error::new("cases store not configured (DATABASE_URL missing)")
+            })?;
 
-        // Every S5.7 tax-court class is "civil" in the PredictInput taxonomy
-        // (income_tax / innocent_spouse / cdp / whistleblower / ... are all
-        // civil proceedings under Title 26).  Suggest only when we actually
-        // had signal; an empty extraction means we don't know.
-        let case_type_suggestion = (!case_type_hint.is_empty()).then(|| "civil".to_string());
-
-        // Jurisdiction — cheap signature scan.  We don't try to be exhaustive
-        // here; a richer mapping lives in `kg::map_courtlistener_jurisdiction`
-        // but that one keys on CL slug rather than on free text.
-        let jurisdiction_suggestion =
-            if text.contains("United States Tax Court") || text.contains("U.S. Tax Court") {
-                Some("us-federal".to_string())
-            } else if text.contains("Supreme Court of the United States") {
-                Some("us-federal".to_string())
-            } else {
-                None
-            };
-
-        // ── Judge severity lookup ────────────────────────────────────────────
-        // Take the first extracted candidate as the primary judge (opinion
-        // header order is by construction "writer first" in CourtListener
-        // exports).  If none, leave severity fields None.
-        let (judge_severity, judge_name, judge_cases_analyzed) = if let Some(raw_name) =
-            judge_candidates.first()
-        {
-            let normalized = normalize_judge_name(raw_name);
-            if normalized.is_empty() {
-                (None, None, None)
-            } else {
-                let pool = ctx
-                    .data::<Option<Arc<PgPool>>>()
-                    .map_err(|_| async_graphql::Error::new("cases store unavailable"))?
-                    .as_ref()
-                    .ok_or_else(|| {
-                        async_graphql::Error::new(
-                            "cases store not configured (DATABASE_URL missing)",
-                        )
-                    })?;
-
-                let mut tx = pool.begin().await.map_err(|e| {
-                    async_graphql::Error::new(format!("judges tx begin: {e}"))
-                })?;
-                sqlx::query(&format!(
-                    "SET LOCAL app.current_tenant_id = '{tenant_id}'"
-                ))
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| async_graphql::Error::new(format!("SET LOCAL failed: {e}")))?;
-
-                let row = sqlx::query(
-                    "SELECT full_name,
-                            (bio->'severity_proxy'->>'severity')::float8       AS severity,
-                            (bio->'severity_proxy'->>'cases_analyzed')::int    AS cases_analyzed
-                     FROM judges
-                     WHERE tenant_id = $1 AND normalized_name = $2",
-                )
-                .bind(tenant_id)
-                .bind(&normalized)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(|e| async_graphql::Error::new(format!("judge lookup failed: {e}")))?;
-
-                tx.commit().await.map_err(|e| {
-                    async_graphql::Error::new(format!("judges tx commit: {e}"))
-                })?;
-
-                match row {
-                    Some(r) => {
-                        let name: Option<String> = r.try_get("full_name").ok();
-                        let sev: Option<f64> = r.try_get("severity").ok();
-                        let n: Option<i32> = r.try_get("cases_analyzed").ok();
-                        (sev, name, n)
-                    }
-                    None => (None, None, None),
-                }
-            }
-        } else {
-            (None, None, None)
-        };
-
-        Ok(ExtractedFeatures {
-            judge_severity,
-            judge_name,
-            judge_cases_analyzed,
-            case_type_hint,
-            case_type_suggestion,
-            outcome_for,
-            jurisdiction_suggestion,
-        })
+        crate::graphql_predict::extract_features_from_text(pool, tenant_id, &text).await
     }
 }
 

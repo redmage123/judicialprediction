@@ -19,10 +19,15 @@ export const PREDICT_CASE_OUTCOME = gql`
   }
 `;
 
-/** S4.4: create + persist a case, returning the full Case with server UUID. */
+/**
+ * S4.4: create + persist a case, returning the full Case with server UUID.
+ * S6.8: `opinionText` is optional — when the operator used the prior-opinion
+ * prefill, the raw text is forwarded so the server persists the NLP
+ * suggestion next to the operator's final values.
+ */
 export const CREATE_CASE = gql`
-  mutation CreateCase($input: PredictInput!) {
-    createCase(input: $input) {
+  mutation CreateCase($input: PredictInput!, $opinionText: String) {
+    createCase(input: $input, opinionText: $opinionText) {
       id
       tenantId
       inputFeatures
@@ -178,6 +183,12 @@ export interface CreateCaseData {
 
 export interface CreateCaseVars {
   input: PredictInput;
+  /**
+   * S6.8 — optional raw opinion text.  When present, the gateway runs the
+   * NLP extractor and persists its suggestion alongside the operator's
+   * final values for later accuracy evaluation.
+   */
+  opinionText?: string;
 }
 
 export interface GetCaseData {
