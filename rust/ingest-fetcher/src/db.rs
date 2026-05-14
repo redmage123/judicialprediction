@@ -23,20 +23,32 @@ where
 {
     let mut stats = UpsertStats::default();
     for op in opinions {
+        // S6.5 — if the source carried a cites array, capture it (and stamp
+        // cites_extracted_at).  Bulk-tarball callers pass `cites = None`, in
+        // which case both cites columns are left at whatever the existing row
+        // had (or NULL on insert) and the back-fill worker will pick them up.
+        let cites_value = op.cites.as_ref().map(serde_json::to_value).transpose()
+            .with_context(|| format!("serialize cites for opinion_id={}", op.opinion_id))?;
         let res = sqlx::query(
             r#"
             INSERT INTO case_documents
               (court_id, opinion_id, case_name, date_filed, citation_count,
-               full_text_plain, source, source_url)
-            VALUES ($1, $2, $3, $4, $5, $6, 'courtlistener', $7)
+               full_text_plain, source, source_url,
+               cites_json, cites_extracted_at)
+            VALUES ($1, $2, $3, $4, $5, $6, 'courtlistener', $7,
+                    $8,
+                    CASE WHEN $8::jsonb IS NULL THEN NULL ELSE now() END)
             ON CONFLICT (opinion_id) DO UPDATE SET
-              court_id        = EXCLUDED.court_id,
-              case_name       = EXCLUDED.case_name,
-              date_filed      = EXCLUDED.date_filed,
-              citation_count  = EXCLUDED.citation_count,
-              full_text_plain = EXCLUDED.full_text_plain,
-              source_url      = EXCLUDED.source_url,
-              ingested_at     = now()
+              court_id           = EXCLUDED.court_id,
+              case_name          = EXCLUDED.case_name,
+              date_filed         = EXCLUDED.date_filed,
+              citation_count     = EXCLUDED.citation_count,
+              full_text_plain    = EXCLUDED.full_text_plain,
+              source_url         = EXCLUDED.source_url,
+              ingested_at        = now(),
+              cites_json         = COALESCE(EXCLUDED.cites_json, case_documents.cites_json),
+              cites_extracted_at = COALESCE(EXCLUDED.cites_extracted_at,
+                                            case_documents.cites_extracted_at)
             "#,
         )
         .bind(&op.court_id)
@@ -46,6 +58,7 @@ where
         .bind(op.citation_count)
         .bind(&op.full_text_plain)
         .bind(op.source_url.as_deref())
+        .bind(&cites_value)
         .execute(pool)
         .await
         .with_context(|| format!("upsert opinion_id={}", op.opinion_id))?;

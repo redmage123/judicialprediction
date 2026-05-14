@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use ingest_fetcher::{db, extract, fetch, kg, parse_tarball, rest};
+use ingest_fetcher::{citations, db, extract, fetch, kg, parse_tarball, rest};
 use uuid::Uuid;
 
 #[derive(Parser)]
@@ -67,6 +67,13 @@ enum Command {
     ExtractFeatures {
         #[arg(long, default_value = "00000000-0000-0000-0000-000000000001")]
         tenant_id: Uuid,
+        #[arg(long)]
+        database_url: Option<String>,
+    },
+    /// S6.5: scan `case_documents.cites_json` and populate
+    /// `case_document_citations` edges.  Idempotent.  No tenant arg — the
+    /// public corpus has no RLS.
+    PopulateCitations {
         #[arg(long)]
         database_url: Option<String>,
     },
@@ -182,6 +189,26 @@ async fn main() -> Result<()> {
                 stats.case_type_set,
                 stats.outcome_set,
                 stats.judges_updated,
+            );
+        }
+        Command::PopulateCitations { database_url } => {
+            let dsn = database_url
+                .or_else(|| std::env::var("DATABASE_URL").ok())
+                .context("provide --database-url or set DATABASE_URL")?;
+            let pool = sqlx::PgPool::connect(&dsn)
+                .await
+                .context("connect to Postgres")?;
+            let stats = citations::populate_citations(&pool).await?;
+            println!(
+                "populate-citations \
+                 citing_docs_scanned={} cites_seen={} cites_unparseable={} \
+                 cites_dangling={} edges_inserted={} edges_existing={}",
+                stats.citing_docs_scanned,
+                stats.cites_seen,
+                stats.cites_unparseable,
+                stats.cites_dangling,
+                stats.edges_inserted,
+                stats.edges_existing,
             );
         }
     }

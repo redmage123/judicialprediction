@@ -6,6 +6,7 @@
 //!
 //! Sprint-2 scope is fixture-only. Real-network smoke is Sprint-3.
 
+pub mod citations;
 pub mod db;
 pub mod extract;
 pub mod fetch;
@@ -13,6 +14,9 @@ pub mod kg;
 pub mod parse;
 pub mod rest;
 
+pub use citations::{
+    extract_uri_strings, parse_opinion_id_from_uri, populate_citations, CitationStats,
+};
 pub use extract::{classify_case_type, detect_outcome, run_extraction, ExtractStats};
 pub use kg::{
     extract_judge_names, normalize_judge_name, populate_from_case_documents, PopulateStats,

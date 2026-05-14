@@ -80,6 +80,12 @@ struct SearchHitOpinion {
 struct OpinionDetail {
     id: i64,
     plain_text: Option<String>,
+    /// S6.5 — array of API URIs like
+    /// `["https://www.courtlistener.com/api/rest/v4/opinions/12345/", ...]`.
+    /// `default` so older fixtures and the (rare) opinions with the field
+    /// absent both deserialize cleanly.
+    #[serde(default)]
+    opinions_cited: Vec<String>,
 }
 
 fn build_client(token: &str) -> Result<reqwest::Client> {
@@ -370,6 +376,11 @@ async fn hydrate_opinion(
         citation_count: cand.citation_count,
         full_text_plain: text,
         source_url: cand.source_url.clone(),
+        // S6.5 — capture the raw cites array so the populator can rebuild
+        // the citation graph without re-hitting CL.  Stored as `Some(_)`
+        // (possibly empty) when the REST path was used, so the back-fill
+        // worker can distinguish "fetched, no cites" from "never fetched".
+        cites: Some(detail.opinions_cited),
     }))
 }
 
@@ -431,6 +442,23 @@ mod tests {
         let d: OpinionDetail = serde_json::from_str(json).unwrap();
         assert_eq!(d.id, 42);
         assert_eq!(d.plain_text.as_deref(), Some("hello tax court"));
+        // S6.5: absent opinions_cited deserializes to empty vec, not error.
+        assert!(d.opinions_cited.is_empty());
+    }
+
+    #[test]
+    fn opinion_detail_decodes_with_opinions_cited() {
+        let json = r#"{
+            "id":42,
+            "plain_text":"hello tax court",
+            "opinions_cited":[
+                "https://www.courtlistener.com/api/rest/v4/opinions/1/",
+                "https://www.courtlistener.com/api/rest/v4/opinions/2/"
+            ]
+        }"#;
+        let d: OpinionDetail = serde_json::from_str(json).unwrap();
+        assert_eq!(d.opinions_cited.len(), 2);
+        assert!(d.opinions_cited[0].ends_with("/opinions/1/"));
     }
 
     #[test]

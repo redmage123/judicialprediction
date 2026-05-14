@@ -24,6 +24,10 @@ pub struct Opinion {
     pub citation_count: i32,
     pub full_text_plain: String,
     pub source_url: Option<String>,
+    /// S6.5 — `opinions_cited` array from CourtListener (REST path), or
+    /// `None` when the source did not carry citation data (bulk-tarball
+    /// path).  `Some(vec![])` means "fetched and no citations".
+    pub cites: Option<Vec<String>>,
 }
 
 /// Raw on-disk shape (CourtListener bulk format).
@@ -53,6 +57,11 @@ impl RawOpinion {
             citation_count: self.citation_count,
             full_text_plain: self.plain_text,
             source_url: self.absolute_url,
+            // S6.5 — bulk-tarball dumps don't carry cites; the REST path
+            // does.  None here means "never fetched", which keeps the
+            // back-fill worker's "WHERE cites_extracted_at IS NULL" scan
+            // honest.
+            cites: None,
         }
     }
 }
