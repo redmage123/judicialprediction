@@ -98,9 +98,16 @@ print(v['missed'] if v else 'null')
     log "$crate: caught=$caught missed=$missed unviable=$unviable → $STATUS"
 done
 
-# ── update baseline JSON if all crates ran successfully ──────────────────────
+# S6.11: do NOT auto-update the baseline JSON.  The pinned baseline
+# captures a deliberate engineering decision about which mutations we
+# accept; auto-bumping it would silently mask real regressions.  Update
+# the baseline by hand (see docs/runbooks/mutation-testing.md) after
+# adding the test that closes a survivor.
+#
+# To opt in to a baseline refresh (e.g. immediately after editing
+# CARGO_MUTANTS_BASELINE.md), set MUTANTS_UPDATE_BASELINE=1.
 
-if [[ "$ALL_OK" == "true" ]]; then
+if [[ "${MUTANTS_UPDATE_BASELINE:-0}" == "1" && "$ALL_OK" == "true" ]]; then
     python3 - <<PYEOF
 import json, datetime
 
@@ -124,32 +131,49 @@ baseline["generated_at"] = "$TIMESTAMP"
 json.dump(baseline, open("$BASELINE_JSON", "w"), indent=2)
 print("Baseline JSON updated.")
 PYEOF
-    log "Baseline JSON updated at $BASELINE_JSON"
+    log "Baseline JSON refreshed at $BASELINE_JSON (MUTANTS_UPDATE_BASELINE=1)"
 fi
 
 SUMMARY_TEXT="$(printf '%s\n' "${SUMMARY_LINES[@]}")"
 
 # ── deliver the summary ───────────────────────────────────────────────────────
+#
+# S6.11: Slack is reserved for regressions ("first new survivor").  When
+# every crate matches its baseline (`ALL_OK=true`), the summary lands in
+# the log only — no Slack ping, no noise.  Override with
+# MUTANTS_SLACK_ALWAYS=1 (handy for verifying the webhook itself).
 
+WANT_SLACK=false
 if [[ -n "${SLACK_WEBHOOK_URL:-}" ]]; then
+    if [[ "$ALL_OK" != "true" ]]; then
+        WANT_SLACK=true
+    elif [[ "${MUTANTS_SLACK_ALWAYS:-0}" == "1" ]]; then
+        WANT_SLACK=true
+    fi
+fi
+
+if [[ "$WANT_SLACK" == "true" ]]; then
     PAYLOAD=$(python3 -c "
 import json, sys
 text = sys.stdin.read()
 print(json.dumps({'text': text}))
 " <<< "$SUMMARY_TEXT")
     curl -s -X POST -H 'Content-type: application/json' --data "$PAYLOAD" "$SLACK_WEBHOOK_URL"
-    log "Summary posted to Slack."
-else
-    {
-        echo ""
-        echo "======================================================="
-        echo "$SUMMARY_TEXT"
-        echo "======================================================="
-    } >> "$LOG_FILE" 2>/dev/null || {
-        # Log dir not writable — print to stdout instead
-        echo "$SUMMARY_TEXT"
-    }
-    log "No SLACK_WEBHOOK_URL set — summary written to $LOG_FILE (or stdout)."
+    log "Summary posted to Slack (regression alert)."
 fi
 
-log "Weekly mutants survey complete."
+{
+    echo ""
+    echo "======================================================="
+    echo "$SUMMARY_TEXT"
+    echo "======================================================="
+} >> "$LOG_FILE" 2>/dev/null || {
+    # Log dir not writable — print to stdout instead
+    echo "$SUMMARY_TEXT"
+}
+
+if [[ "$ALL_OK" != "true" ]]; then
+    log "Weekly mutants survey complete — REGRESSION (see summary above)."
+    exit 1
+fi
+log "Weekly mutants survey complete — no regression."

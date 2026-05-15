@@ -1,0 +1,92 @@
+name: Rust — Mutation testing (weekly)
+
+# S6.11 — Run cargo-mutants on the four functional-core crates every
+# Monday, diff against the pinned `rust/.mutants-baseline.json`, and
+# post to Slack the first time a mutant escapes that isn't already
+# in the baseline.  Long-running (~30 min), so out-of-band of the
+# normal PR CI.
+
+on:
+  schedule:
+    - cron: "0 10 * * 1"  # Mon 10:00 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: cargo-mutants-weekly
+  cancel-in-progress: false
+
+jobs:
+  mutants:
+    name: cargo mutants — functional-core crates
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    defaults:
+      run:
+        working-directory: rust
+
+    env:
+      # rust/scripts/mutants-weekly.sh forwards this to the Slack message
+      # poster.  When unset, the script falls back to log-only mode and
+      # still uploads the mutants.out artifact.
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: cargo-mutants-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            cargo-mutants-${{ runner.os }}-
+
+      - name: Install cargo-mutants (pinned 27.x)
+        run: cargo install cargo-mutants --version "^27" --locked
+
+      # ----------------------------------------------------------------
+      # Run the existing rust/scripts/mutants-weekly.sh which:
+      #   1. runs `cargo mutants -p <crate>` for each functional-core crate
+      #   2. diffs the survivor count against rust/.mutants-baseline.json
+      #   3. posts to Slack on first NEW survivor (when SLACK_WEBHOOK_URL set)
+      #   4. exits non-zero when any crate has more survivors than baseline
+      # ----------------------------------------------------------------
+      - name: Run weekly mutation sweep
+        run: bash scripts/mutants-weekly.sh
+
+      - name: Upload mutants.out artifact (per-crate)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-out
+          path: rust/target/mutants/
+          retention-days: 30
+          if-no-files-found: ignore
+
+      # When the script exited non-zero (= new survivors), surface the
+      # baseline diff inline in the job summary so reviewers don't have
+      # to download the artifact for the headline number.
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## cargo-mutants weekly sweep"
+            echo
+            echo "Baseline (pinned at \`rust/.mutants-baseline.json\`):"
+            echo
+            echo '```json'
+            cat .mutants-baseline.json
+            echo
+            echo '```'
+            echo
+            echo "Update the baseline deliberately after a real code change — see"
+            echo "\`docs/runbooks/mutation-testing.md\`."
+          } >> "$GITHUB_STEP_SUMMARY"
