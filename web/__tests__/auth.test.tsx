@@ -311,6 +311,19 @@ describe("middleware", () => {
     // NextResponse.next() returns 200 (no redirect).
     expect(res.status).toBe(200);
   });
+
+  // S6.12 — operator-facing /audit is gated by middleware. Even without a JWT
+  // role claim the unauthenticated case must redirect to /login first.
+  it("redirects /audit to /login when jp_session cookie is absent", async () => {
+    const { middleware } = await import("../middleware");
+    const req = new NextRequest("http://localhost:3000/audit");
+    const res = middleware(req);
+
+    expect(res.status).toBe(302);
+    const location = res.headers.get("location") ?? "";
+    expect(location).toContain("/login");
+    expect(location).toContain("next=%2Faudit");
+  });
 });
 
 // ---------------------------------------------------------------------------

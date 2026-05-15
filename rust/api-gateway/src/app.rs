@@ -557,6 +557,196 @@ impl Query {
 
         crate::graphql_predict::extract_features_from_text(pool, tenant_id, &text).await
     }
+
+    /// S6.12 — operator-facing read of the `audit_log` table, most-recent-first.
+    ///
+    /// Mirrors the Django admin viewer (S4.9): same RLS contract, same column
+    /// shape.  Used by the Next.js `/audit` page rendered for operators whose
+    /// JWT carries `role: "admin"` (see `web/middleware.ts`).
+    ///
+    /// RLS / role enforcement
+    /// ----------------------
+    /// The audit_log table has an RLS policy keyed on `app.current_tenant_id`
+    /// so tenant-scoped operators only ever see their own tenant's rows.  This
+    /// resolver applies the same `SET LOCAL` pattern used by `listCases` /
+    /// `caseStats` to make that filter fire.
+    ///
+    /// TODO(S6.12 follow-up): once the auth issuer adds a `role` claim to
+    /// `Claims`, gate this resolver server-side too (deny unless `role` is
+    /// `"admin"` or `"super"`).  Until then defense-in-depth lives in the
+    /// Next.js middleware.  Tenant isolation is already enforced by RLS.
+    async fn audit_events(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(default = 25)] limit: i32,
+        #[graphql(default = 0)] offset: i32,
+    ) -> async_graphql::Result<AuditConnection> {
+        use crate::graphql_predict::compute_next_offset;
+        use sqlx::Row as _;
+
+        if !(1..=100).contains(&limit) {
+            return Err(async_graphql::Error::new("limit must be between 1 and 100"));
+        }
+        if offset < 0 {
+            return Err(async_graphql::Error::new("offset must be >= 0"));
+        }
+
+        let TenantId(tenant_id) = *ctx
+            .data::<TenantId>()
+            .map_err(|_| async_graphql::Error::new("missing tenant id"))?;
+
+        let pool = ctx
+            .data::<Option<Arc<PgPool>>>()
+            .map_err(|_| async_graphql::Error::new("audit store unavailable"))?
+            .as_ref()
+            .ok_or_else(|| {
+                async_graphql::Error::new("audit store not configured (DATABASE_URL missing)")
+            })?;
+
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("audit tx begin: {e}")))?;
+
+        // Same RLS pattern listCases / caseStats use — the audit_log_select
+        // policy is keyed on `app.current_tenant_id`.
+        sqlx::query(&format!("SET LOCAL app.current_tenant_id = '{tenant_id}'"))
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("SET LOCAL failed: {e}")))?;
+
+        // Tenant scoping is double-enforced (RLS + explicit `tenant_id = $1`)
+        // mirroring the existing case queries.
+        let total_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_log WHERE tenant_id = $1",
+        )
+        .bind(tenant_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| async_graphql::Error::new(format!("audit count query failed: {e}")))?;
+
+        let rows = sqlx::query(
+            r#"
+            SELECT id,
+                   tenant_id,
+                   subject_id,
+                   table_name,
+                   row_pk,
+                   action,
+                   reason_code,
+                   ts::text AS ts_s,
+                   latency_ms
+            FROM   audit_log
+            WHERE  tenant_id = $1
+            ORDER BY ts DESC
+            LIMIT $2 OFFSET $3
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(i64::from(limit))
+        .bind(i64::from(offset))
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| async_graphql::Error::new(format!("audit list query failed: {e}")))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("audit tx commit: {e}")))?;
+
+        let mut nodes = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let id: i64 = row
+                .try_get("id")
+                .map_err(|e| async_graphql::Error::new(format!("audit row.id: {e}")))?;
+            let tenant: Option<Uuid> = row
+                .try_get("tenant_id")
+                .map_err(|e| async_graphql::Error::new(format!("audit row.tenant_id: {e}")))?;
+            let subject_id: Option<String> = row
+                .try_get("subject_id")
+                .map_err(|e| async_graphql::Error::new(format!("audit row.subject_id: {e}")))?;
+            let table_name: String = row
+                .try_get("table_name")
+                .map_err(|e| async_graphql::Error::new(format!("audit row.table_name: {e}")))?;
+            let row_pk: Option<String> = row
+                .try_get("row_pk")
+                .map_err(|e| async_graphql::Error::new(format!("audit row.row_pk: {e}")))?;
+            let action: String = row
+                .try_get("action")
+                .map_err(|e| async_graphql::Error::new(format!("audit row.action: {e}")))?;
+            let reason_code: Option<String> = row
+                .try_get("reason_code")
+                .map_err(|e| async_graphql::Error::new(format!("audit row.reason_code: {e}")))?;
+            let ts: String = row
+                .try_get("ts_s")
+                .map_err(|e| async_graphql::Error::new(format!("audit row.ts: {e}")))?;
+            let latency_ms: Option<i32> = row
+                .try_get("latency_ms")
+                .map_err(|e| async_graphql::Error::new(format!("audit row.latency_ms: {e}")))?;
+
+            // `target` is a human-friendly composite of table_name + row_pk —
+            // the UI shows it as a single column so each row reads cleanly.
+            let target = match &row_pk {
+                Some(pk) if !pk.is_empty() => format!("{table_name}:{pk}"),
+                _ => table_name.clone(),
+            };
+
+            nodes.push(AuditEventDto {
+                id: id.to_string(),
+                tenant_id: tenant.map(|u| u.to_string()),
+                actor: subject_id,
+                action,
+                target,
+                reason_code,
+                ts,
+                latency_ms,
+            });
+        }
+
+        let next_offset = compute_next_offset(offset, nodes.len(), total_count);
+        Ok(AuditConnection { nodes, total_count, next_offset })
+    }
+}
+
+/// S6.12 — one row from `audit_log`, surfaced to the operator UI.
+///
+/// `tenantId` is exposed (super operators are able to inspect cross-tenant
+/// rows in the Django admin; the gateway resolver tenant-filters today but the
+/// field is kept on the wire to ease the super-role follow-up).
+///
+/// `target` is a composite of `table_name` + `row_pk` (e.g. `cases:abc-…`).
+/// The raw columns are not split because the UI only shows one column.
+#[derive(SimpleObject)]
+pub(crate) struct AuditEventDto {
+    /// Numeric primary key of the audit row (stringified for GraphQL ID safety).
+    pub id: String,
+    /// Tenant UUID the row was written under; `None` for tenant-agnostic events.
+    pub tenant_id: Option<String>,
+    /// Actor that triggered the event (operator UUID / email / service principal).
+    pub actor: Option<String>,
+    /// Fully-qualified action / RPC name (e.g. `case.create`, `predict_case_outcome`).
+    pub action: String,
+    /// Composite `table_name:row_pk`, or just `table_name` when the event is row-less.
+    pub target: String,
+    /// Stable outcome code (`ok` / `err` / `timeout` / `rate_limit`).
+    pub reason_code: Option<String>,
+    /// ISO-8601 UTC timestamp (Postgres `ts` column cast to text).
+    pub ts: String,
+    /// Round-trip latency in milliseconds; `None` when not applicable.
+    pub latency_ms: Option<i32>,
+}
+
+/// S6.12 — paginated list of audit events for the current tenant.
+///
+/// Same shape as `CaseConnection` so the Next.js pagination helper works on
+/// both surfaces unchanged.
+#[derive(SimpleObject)]
+pub(crate) struct AuditConnection {
+    /// Audit events on the current page, ordered `ts DESC`.
+    pub nodes: Vec<AuditEventDto>,
+    /// Total audit row count visible to this caller.
+    pub total_count: i64,
+    /// Offset for the next page, or `None` on the final page.
+    pub next_offset: Option<i32>,
 }
 
 /// Aggregate counters returned by `Query.caseStats`.
