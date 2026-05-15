@@ -42,6 +42,9 @@ dashmap = { workspace = true }
 # Added for S4.2/S4.3: direct DB access for createCase / listCases resolvers.
 sqlx = { workspace = true }
 rust_decimal = { workspace = true }
+# S6.15: PAT token hashing (SHA-256 hex).
+sha2 = { workspace = true }
+hex = { workspace = true }
 
 [build-dependencies]
 tonic-build = { workspace = true }

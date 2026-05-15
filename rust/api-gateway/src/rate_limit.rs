@@ -148,11 +148,18 @@ impl RateLimitStore for MemoryStore {
 // JWT axum middleware (runs first / outermost)
 // ---------------------------------------------------------------------------
 
-/// Decode and verify the `Authorization: Bearer <jwt>` header, then inject
+/// Decode and verify the `Authorization: Bearer <token>` header, then inject
 /// [`TenantId`] and [`crate::auth::Claims`] into request extensions.
 ///
-/// Returns HTTP 401 on any auth failure; the rate-limit and GraphQL layers
-/// are never reached for unauthenticated requests.
+/// S6.15 — dispatches on token prefix:
+///   - `pat_*`     → resolve via `pat_auth::resolve_pat` against the cases pool
+///   - otherwise   → decode_jwt against the HS256 secret
+/// Either path produces the same [`Claims`] / [`TenantId`] extensions so
+/// every downstream layer (rate-limit + GraphQL or REST) is auth-backend-
+/// agnostic.
+///
+/// Returns HTTP 401 on any auth failure; the rate-limit and GraphQL/REST
+/// layers are never reached for unauthenticated requests.
 pub async fn jwt_middleware(
     axum::extract::State(state): axum::extract::State<Arc<crate::app::AppState>>,
     mut req: Request,
@@ -168,14 +175,24 @@ pub async fn jwt_middleware(
         .strip_prefix("Bearer ")
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    let claims = crate::auth::decode_jwt(token, &state.jwt_secret)
-        .map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let claims = if token.starts_with(crate::pat_auth::PAT_PREFIX) {
+        let pool = state
+            .cases_pool
+            .as_ref()
+            .ok_or(StatusCode::UNAUTHORIZED)?;
+        crate::pat_auth::resolve_pat(pool, token)
+            .await
+            .ok_or(StatusCode::UNAUTHORIZED)?
+    } else {
+        crate::auth::decode_jwt(token, &state.jwt_secret)
+            .map_err(|_| StatusCode::UNAUTHORIZED)?
+    };
 
     let tenant_id =
         Uuid::parse_str(&claims.tenant_id).map_err(|_| StatusCode::UNAUTHORIZED)?;
 
     // Inject into extensions so downstream layers/handlers can read without
-    // re-parsing the JWT.
+    // re-parsing the auth header.
     req.extensions_mut().insert(TenantId(tenant_id));
     req.extensions_mut().insert(claims);
 

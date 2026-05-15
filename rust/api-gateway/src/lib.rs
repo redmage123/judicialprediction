@@ -12,4 +12,6 @@ pub(crate) mod auth;
 pub(crate) mod case_import;
 pub(crate) mod graphql_predict;
 pub(crate) mod ml_inference_proto;
+pub(crate) mod pat_auth;
 pub(crate) mod rate_limit;
+pub(crate) mod rest_api;

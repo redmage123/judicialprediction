@@ -62,7 +62,7 @@ cap):
 | **S6.9**  | courtlistener-daily.sh runs 2 courts per day (current 1) when daily quota allows — back-walk pagination per-court so cafc/bia/scotus also grow.  Updates `jp-courtlistener-daily.log` format. | gigforge-engineer | ingest-fix|
 | **S6.13** | PDF upload on `/case/new` next to the prior-opinion textarea.  Client-side text extraction via pdfjs-dist (PDF never leaves the browser).  Scanned / image-only PDFs are detected and surfaced to the operator with a "paste manually" hint — the Tesseract.js OCR fallback is split out to **S6.16** to keep this ticket shippable in-sprint. | dev-frontend      | S5.8 / S6.3 |
 | **S6.14** | CSV bulk import at `/cases/import`.  Columns = the 7 Tier-A/B features + optional `opinion_text`.  Sync for ≤50 rows; larger jobs land in a new `case_imports` queue with per-row pass/fail results. | dev-frontend / dev-backend | S4.4      |
-| **S6.15** | Public REST API at `POST /v1/cases` mirroring `createCase`.  Auth via per-operator Personal Access Tokens (`pat_*`) minted in the Django admin; gateway accepts `Authorization: Bearer pat_*` alongside JWT.  OpenAPI + Swagger UI at `/api/docs`; per-PAT rate limit. | dev-backend       | S5.9 / S6.6 |
+| **S6.15** | Public REST API at `POST /v1/cases` mirroring `createCase`.  Auth via per-operator Personal Access Tokens (`pat_*`) minted via the Django `mint_pat` management command; gateway accepts `Authorization: Bearer pat_*` alongside JWT and shares the same rate-limit + RLS bucket as JWT-authed traffic.  OpenAPI/Swagger UI, per-PAT rate-limit overrides, and the Django mint UI are split out to **S6.18 / S6.19 / S6.20** to keep this ticket shippable in-sprint. | dev-backend       | S5.9 / S6.6 |
 
 ### P2 — Could-have
 
@@ -112,6 +112,20 @@ is the stretch; P2 (3) slips to Sprint 7 if needed.
   ~30 MB WASM downloaded on first use.  Separate ticket so the S6.13 surface
   stays minimal and operators see the text-extractable path in the current
   sprint.
+- **S6.17** — de-duplicate `case_import::do_create_case` and
+  `graphql_predict::Mutation::create_case`.  S6.14 shipped a second copy
+  of the ML+decision+INSERT+audit pipeline so `importCases` could land
+  without touching the proven `createCase` path mid-sprint; both copies
+  should collapse onto one tested function.
+- **S6.18** — OpenAPI 3.1 spec + Swagger UI at `/api/docs` for the REST
+  API S6.15 ships.  Hand-written or `utoipa`-generated; documents the
+  bearer auth scheme, `POST /v1/cases`, the closed error-code union,
+  and rate-limit headers.
+- **S6.19** — per-PAT rate-limit overrides.  Today every PAT inherits the
+  per-tenant token bucket S3.x set up; partners with higher quotas need
+  a per-PAT cap stored alongside the token.
+- **S6.20** — Django admin UI for minting / revoking PATs (replaces the
+  S6.15 `mint_pat` management command for non-shell users).
 - Federated learning coordinator (Flower) + DP-SGD on the gradient-sharing path.
 - TabDDPM-with-DP synthetic-data generation for cold-start.
 - Heterogeneous GNN training on the KG.

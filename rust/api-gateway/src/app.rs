@@ -782,6 +782,18 @@ pub(crate) struct AppState {
     pub(crate) jwt_secret: Vec<u8>,
     /// Per-tenant token-bucket store. In-memory for now; Redis-backed in prod.
     pub(crate) rate_store: Arc<dyn RateLimitStore>,
+    /// S6.15 — Postgres pool used by the PAT auth backend AND by the
+    /// `/v1/cases` REST handler.  `None` in environments without a cases
+    /// store; PAT auth then unconditionally 401s and the REST endpoint
+    /// 503s (which matches the GraphQL `createCase` "store not configured"
+    /// behavior).
+    pub(crate) cases_pool: Option<Arc<sqlx::PgPool>>,
+    /// ML inference client shared with the GraphQL mutation; both auth
+    /// paths land on `case_import::do_create_case`, which takes this by
+    /// reference.
+    pub(crate) ml_client: crate::graphql_predict::MlInferenceClient,
+    /// Optional audit recorder; mirrors what the GraphQL schema injects.
+    pub(crate) audit_recorder: Option<audit_recorder::AuditRecorder>,
 }
 
 // ---------------------------------------------------------------------------
@@ -842,27 +854,38 @@ pub async fn build_app(
 
     let fs_client = FeatureStoreServiceClient::new(channel);
 
+    // S6.15: build the ML client once and share it between the GraphQL
+    // schema (via `.data()`) and the REST handler (via `AppState.ml_client`).
+    let ml_client = {
+        use crate::ml_inference_proto::inference_service_client::InferenceServiceClient;
+        let channel = tonic::transport::Channel::from_shared(ml_inference_url.to_string())
+            .context("ml-inference URL invalid")?
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_lazy();
+        crate::graphql_predict::MlInferenceClient { inner: InferenceServiceClient::new(channel) }
+    };
+
     let schema = Schema::build(Query, crate::graphql_predict::Mutation, EmptySubscription)
         // gRPC client for ml-inference-svc (S5.4 / JP-71).  connect_lazy lets the
         // gateway start even if ml-inference is briefly unreachable.
-        .data({
-            use crate::ml_inference_proto::inference_service_client::InferenceServiceClient;
-            let channel = tonic::transport::Channel::from_shared(ml_inference_url.to_string())
-                .context("ml-inference URL invalid")?
-                .connect_timeout(std::time::Duration::from_secs(10))
-                .timeout(std::time::Duration::from_secs(30))
-                .connect_lazy();
-            crate::graphql_predict::MlInferenceClient { inner: InferenceServiceClient::new(channel) }
-        })
-        .data(cases_pool)
-        .data(audit_recorder)
+        .data(ml_client.clone())
+        .data(cases_pool.clone())
+        .data(audit_recorder.clone())
         .data(fs_client)
         .finish();
 
     let rate_store: Arc<dyn RateLimitStore> =
         Arc::new(MemoryStore::new(rate_config.requests_per_min));
 
-    let state = Arc::new(AppState { schema, jwt_secret, rate_store });
+    let state = Arc::new(AppState {
+        schema,
+        jwt_secret,
+        rate_store,
+        cases_pool,
+        ml_client,
+        audit_recorder,
+    });
 
     // Build the /graphql sub-router with both auth + rate-limit middlewares.
     // route_layer is applied in reverse declaration order (last = outermost):
@@ -879,9 +902,23 @@ pub async fn build_app(
             crate::rate_limit::jwt_middleware,
         ));
 
+    // S6.15: public REST API.  Same auth+rate-limit stack as /graphql so
+    // every PAT goes through the same checks as a JWT.
+    let rest_router = Router::new()
+        .route("/v1/cases", post(crate::rest_api::create_case_v1))
+        .route_layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            crate::rate_limit::rate_limit_middleware,
+        ))
+        .route_layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            crate::rate_limit::jwt_middleware,
+        ));
+
     let app = Router::new()
         .route("/health", get(health_handler))
         .merge(graphql_router)
+        .merge(rest_router)
         .with_state(state);
 
     Ok(app)
