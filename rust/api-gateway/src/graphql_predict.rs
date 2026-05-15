@@ -26,6 +26,7 @@ use uuid::Uuid;
 
 use crate::app::TenantId;
 use crate::auth::Claims;
+use crate::case_import::{ImportCaseRow, ImportCasesResult, do_import_cases};
 
 // ---------------------------------------------------------------------------
 // gRPC client state — injected into the GraphQL schema by build_app (JP-71)
@@ -57,7 +58,7 @@ pub(crate) struct MlInferenceClient {
 
 /// Outcome of a `call_ml` invocation.  `Ok` contains an already-constructed
 /// `PredictResult` so call-sites need no further proto conversion.
-enum MlCallOutcome {
+pub(crate) enum MlCallOutcome {
     Ok(PredictResult),
     /// The RPC deadline was exceeded (tonic `DeadlineExceeded`).
     Timeout,
@@ -75,7 +76,7 @@ enum MlCallOutcome {
 /// the JP-70 Python server contract (`grpc_server.py`).  The `x-tenant-id`
 /// metadata header is set from `tenant_id` so the ML service's own
 /// `audit_recorder` fires with the correct tenant context.
-async fn call_ml(
+pub(crate) async fn call_ml(
     ml: &MlInferenceClient,
     tenant_id: &uuid::Uuid,
     features: &PredictInput,
@@ -883,6 +884,57 @@ impl Mutation {
             created_at:     created_at_s,
             nlp_suggestion: nlp_suggestion.map(Json),
         })
+    }
+
+    /// S6.14 — bulk import: validate + predict + persist up to 50 rows in
+    /// one request.  Per-row pipeline is identical to `createCase`'s; any
+    /// row that fails to predict or insert is reported in `results` with
+    /// `ok: false` and an operator-facing error message, but the request
+    /// as a whole still succeeds (the operator triages the failed rows).
+    ///
+    /// The mutation fails (top-level error) only on identity / config
+    /// problems (missing claims, missing pool, missing ml client, empty
+    /// rows, or a row count above the per-request cap).
+    async fn import_cases(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Up to 50 rows; each is the same shape as the \
+                          createCase input plus an optional opinion_text.")]
+        rows: Vec<ImportCaseRow>,
+    ) -> async_graphql::Result<ImportCasesResult> {
+        let claims = ctx
+            .data::<Claims>()
+            .map_err(|_| async_graphql::Error::new("missing claims"))?
+            .clone();
+        let tenant_id = Uuid::parse_str(&claims.tenant_id)
+            .map_err(|_| async_graphql::Error::new("invalid tenant_id in claims"))?;
+        let operator_id: Option<Uuid> = Uuid::parse_str(&claims.sub).ok();
+
+        let pool = ctx
+            .data::<Option<Arc<PgPool>>>()
+            .map_err(|_| async_graphql::Error::new("cases store unavailable"))?
+            .as_ref()
+            .ok_or_else(|| {
+                async_graphql::Error::new("cases store not configured (DATABASE_URL missing)")
+            })?;
+        let ml = ctx
+            .data::<MlInferenceClient>()
+            .map_err(|_| async_graphql::Error::new("ml inference client unavailable"))?;
+        let audit_recorder = ctx
+            .data::<Option<AuditRecorder>>()
+            .ok()
+            .and_then(|r| r.as_ref())
+            .cloned();
+
+        do_import_cases(
+            pool,
+            ml,
+            audit_recorder,
+            tenant_id,
+            operator_id,
+            rows,
+        )
+        .await
     }
 
     /// Re-run prediction on an existing case using the latest ML model.
