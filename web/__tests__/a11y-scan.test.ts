@@ -1,15 +1,17 @@
 /**
- * a11y-scan smoke tests — S3.13
+ * a11y-scan smoke tests — S3.13, widened in S6.10.
  *
  * Tests the exported `runAxeOnHtml` helper from scripts/a11y-scan.mjs.
  * These tests run in the vitest jsdom environment (document is available)
  * and do NOT launch a browser or spin up a Next.js server.
  *
  * Covers:
- *  1. Clean HTML → 0 serious/critical violations (exit-0 equivalent).
- *  2. Broken HTML (img without alt) → ≥1 serious/critical violation (exit-1 equiv).
+ *  1. Clean HTML → 0 moderate+ violations (exit-0 equivalent).
+ *  2. Broken HTML (img without alt) → ≥1 violation (exit-1 equivalent).
  *  3. Well-formed login form markup → 0 violations.
  *  4. Missing form labels → ≥1 violation.
+ *  5. S6.10 — a moderate-impact violation (content outside a landmark) is
+ *     now caught; pre-S6.10 the gate only blocked serious/critical.
  */
 
 import { describe, it, expect } from "vitest";
@@ -63,6 +65,16 @@ const BROKEN_EMPTY_LINK = `
   </main>
 `;
 
+// Heading levels jumping h1 → h4 → axe "heading-order" rule,
+// impact: moderate. This fixture PASSED the Sprint-4 serious/critical
+// gate; S6.10 widened the gate to moderate, so it must now be caught.
+const MODERATE_HEADING_ORDER = `
+  <main>
+    <h1>JudicialPredict</h1>
+    <h4>Recent cases (skipped h2 and h3)</h4>
+  </main>
+`;
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -89,6 +101,15 @@ describe("runAxeOnHtml — broken fixtures (simulate CI failure)", () => {
   it("detects serious violation for empty anchor link (link-name rule)", async () => {
     const result = await runAxeOnHtml(BROKEN_EMPTY_LINK);
     // link-name is serious — must be caught.
+    expect(result.violations).toBeGreaterThan(0);
+  });
+});
+
+describe("runAxeOnHtml — moderate-impact gate (S6.10 widening)", () => {
+  it("catches a moderate-impact violation (heading order skipped)", async () => {
+    const result = await runAxeOnHtml(MODERATE_HEADING_ORDER);
+    // "heading-order" is a moderate rule — pre-S6.10 this returned 0;
+    // now it blocks.
     expect(result.violations).toBeGreaterThan(0);
   });
 });

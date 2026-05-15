@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   a11y:
-    name: axe-core a11y gate
+    name: axe + pa11y + lighthouse a11y gate
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -56,17 +56,22 @@ jobs:
 
       # -------------------------------------------------------------------------
       # Step 4 — Install Playwright Chromium browser
+      # Used directly by the axe scan, and reused by Lighthouse via
+      # chrome-launcher. Pa11y drives its own puppeteer Chromium, which
+      # `npm ci` downloads in Step 1.
       # -------------------------------------------------------------------------
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium
 
       # -------------------------------------------------------------------------
-      # Step 5 — End-to-end axe-core scan
-      # Routes: /login, /case/new
-      # Threshold: serious + critical violations only (minor/moderate Sprint 4)
+      # Step 5 — End-to-end accessibility scan (S6.10 widening)
+      # Tools:  axe-core, Pa11y (WCAG2AA), Lighthouse (accessibility category)
+      # Routes: /login, /case/new, /cases
+      # Gate:   axe moderate+ impact | pa11y error-level issues |
+      #         lighthouse a11y score < 0.90
       # /case/[id] excluded — results view requires sessionStorage from intake.
       # -------------------------------------------------------------------------
-      - name: Run e2e axe-core scan
+      - name: Run e2e a11y scan (axe + pa11y + lighthouse)
         run: node scripts/a11y-scan.mjs
 
       # -------------------------------------------------------------------------
