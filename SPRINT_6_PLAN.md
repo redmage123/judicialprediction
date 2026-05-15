@@ -60,6 +60,9 @@ cap):
 | **S6.7**  | cost-engine v2: layer expected-duration + party-count factors on top of S5.10's jurisdiction-base × motion-count.  Risk-plan called this out as a Sprint-5 simplification to fix. | gigforge-engineer | S5.10     |
 | **S6.8**  | createCase BFF accepts an optional `opinion_text` payload — when present, runs `extractFeatures` server-side and stores the suggestion alongside the operator's final values for later NLP-vs-operator accuracy evaluation. | dev-backend       | S5.8      |
 | **S6.9**  | courtlistener-daily.sh runs 2 courts per day (current 1) when daily quota allows — back-walk pagination per-court so cafc/bia/scotus also grow.  Updates `jp-courtlistener-daily.log` format. | gigforge-engineer | ingest-fix|
+| **S6.13** | PDF upload on `/case/new` next to the prior-opinion textarea.  Client-side text extraction via pdfjs-dist (PDF never leaves the browser).  Scanned / image-only PDFs are detected and surfaced to the operator with a "paste manually" hint — the Tesseract.js OCR fallback is split out to **S6.16** to keep this ticket shippable in-sprint. | dev-frontend      | S5.8 / S6.3 |
+| **S6.14** | CSV bulk import at `/cases/import`.  Columns = the 7 Tier-A/B features + optional `opinion_text`.  Sync for ≤50 rows; larger jobs land in a new `case_imports` queue with per-row pass/fail results. | dev-frontend / dev-backend | S4.4      |
+| **S6.15** | Public REST API at `POST /v1/cases` mirroring `createCase`.  Auth via per-operator Personal Access Tokens (`pat_*`) minted in the Django admin; gateway accepts `Authorization: Bearer pat_*` alongside JWT.  OpenAPI + Swagger UI at `/api/docs`; per-PAT rate limit. | dev-backend       | S5.9 / S6.6 |
 
 ### P2 — Could-have
 
@@ -69,8 +72,9 @@ cap):
 | **S6.11** | Cargo-mutants weekly cron writes to a real Slack channel on first new survivor; baseline file pinned. | gigforge-engineer | S3.12     |
 | **S6.12** | Operator-facing audit log viewer (`/audit` page) — extends S4.9's Django admin viewer to the operator UI behind the `admin` role. | dev-frontend      | S4.9      |
 
-**12 stories.** P0 (5) is the realistic landing target; P1 (4) is the
-stretch; P2 (3) slips to Sprint 7 if needed.
+**15 stories.** P0 (5) is the realistic landing target; P1 (7, incl.
+S6.13–S6.15 added mid-sprint for PDF upload / bulk import / public API)
+is the stretch; P2 (3) slips to Sprint 7 if needed.
 
 ---
 
@@ -103,6 +107,11 @@ stretch; P2 (3) slips to Sprint 7 if needed.
 
 ## Out of Sprint 6 (Sprint 7 candidates)
 
+- **S6.16** — Tesseract.js OCR fallback for the scanned-PDF branch added by
+  S6.13.  Runs client-side after pdfjs-dist returns no extractable text;
+  ~30 MB WASM downloaded on first use.  Separate ticket so the S6.13 surface
+  stays minimal and operators see the text-extractable path in the current
+  sprint.
 - Federated learning coordinator (Flower) + DP-SGD on the gradient-sharing path.
 - TabDDPM-with-DP synthetic-data generation for cold-start.
 - Heterogeneous GNN training on the KG.

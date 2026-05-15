@@ -3,7 +3,7 @@
 // Sprint-3 follow-up: replaced sessionStorage + client UUID with createCase mutation
 // that persists the case server-side and returns a real server UUID (S4.4 / JP-58).
 
-import { useState, type FormEvent, type ChangeEvent } from "react";
+import { useRef, useState, type FormEvent, type ChangeEvent } from "react";
 import { useRouter } from "next/navigation";
 import { useApolloClient, useMutation } from "@apollo/client/react";
 import { Button } from "@/components/ui/button";
@@ -28,6 +28,11 @@ import {
 } from "@/lib/queries/predict";
 import { CASE_TYPES, type CaseType } from "@/lib/case-types";
 import { JURISDICTIONS, type Jurisdiction } from "@/lib/jurisdictions";
+import {
+  extractTextFromPdf,
+  PdfExtractError,
+  MAX_PDF_BYTES,
+} from "@/lib/pdf-extract";
 
 // ---------------------------------------------------------------------------
 // Sample data for developer smoke-testing (never rendered in production).
@@ -117,6 +122,13 @@ export function IntakeForm() {
   const [extractCtx, setExtractCtx] = useState<ExtractionContext | null>(null);
   const [prefilled, setPrefilled] = useState<Partial<Record<keyof FormState, true>>>({});
 
+  // S6.13 — PDF upload state.  pdfStatus surfaces "Parsing…" while pdfjs-dist
+  // is reading the file, and a one-line confirmation ("Loaded N pages") after.
+  const [pdfStatus, setPdfStatus] = useState<string | null>(null);
+  const [pdfError, setPdfError] = useState<string | null>(null);
+  const [pdfLoading, setPdfLoading] = useState(false);
+  const pdfInputRef = useRef<HTMLInputElement>(null);
+
   const [createCase, { loading }] = useMutation<
     CreateCaseData,
     CreateCaseVars
@@ -133,6 +145,48 @@ export function IntakeForm() {
         return rest;
       });
     };
+  }
+
+  /**
+   * S6.13 — Pick a PDF, parse it client-side via pdfjs-dist, drop the
+   * extracted text into the opinion textarea so the operator can review
+   * before running the existing `Extract features` flow.  Scanned PDFs
+   * (no extractable text layer) surface a clear "scanned — paste manually"
+   * hint until S6.16 ships the Tesseract.js OCR fallback.
+   */
+  async function handlePdfPick(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setPdfError(null);
+    setPdfStatus(`Parsing ${file.name}…`);
+    setPdfLoading(true);
+    try {
+      const result = await extractTextFromPdf(file);
+      if (result.kind === "text") {
+        setOpinionText(result.text);
+        setPdfStatus(
+          `Loaded ${result.pageCount} page${result.pageCount === 1 ? "" : "s"} from ${file.name}`
+        );
+      } else {
+        setPdfStatus(null);
+        setPdfError(
+          `${file.name} looks like a scanned / image-only PDF (no text layer found across ${result.pageCount} page${result.pageCount === 1 ? "" : "s"}). OCR support is coming — for now, please paste the text manually.`
+        );
+      }
+    } catch (err) {
+      setPdfStatus(null);
+      const msg =
+        err instanceof PdfExtractError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : "Could not read PDF.";
+      setPdfError(msg);
+    } finally {
+      setPdfLoading(false);
+      // Reset the input so picking the same file again still triggers onChange.
+      if (pdfInputRef.current) pdfInputRef.current.value = "";
+    }
   }
 
   async function handleExtract() {
@@ -277,6 +331,44 @@ export function IntakeForm() {
             Paste an opinion authored by the assigned judge to prefill judge
             severity, case type, and jurisdiction. You can override any
             prefilled value before running prediction.
+          </p>
+          {/* S6.13 — PDF upload populates the textarea below.  Runs entirely
+              client-side so the file never leaves the browser. */}
+          <div className="mt-3 flex flex-wrap items-center gap-3">
+            <label className="text-xs font-medium">
+              <span className="sr-only">Upload a PDF opinion</span>
+              <input
+                ref={pdfInputRef}
+                type="file"
+                accept=".pdf,application/pdf"
+                onChange={handlePdfPick}
+                disabled={pdfLoading}
+                aria-label="Upload PDF opinion"
+                className={cn(
+                  "block text-xs",
+                  "file:mr-3 file:rounded-md file:border file:border-input",
+                  "file:bg-background file:px-3 file:py-1 file:text-xs",
+                  "file:font-medium file:text-foreground hover:file:bg-muted",
+                  "file:cursor-pointer disabled:opacity-50"
+                )}
+              />
+            </label>
+            {pdfLoading && (
+              <span className="text-xs text-muted-foreground" role="status">
+                {pdfStatus ?? "Parsing PDF…"}
+              </span>
+            )}
+            {!pdfLoading && pdfStatus && (
+              <span className="text-xs text-muted-foreground">{pdfStatus}</span>
+            )}
+          </div>
+          {pdfError && (
+            <p role="alert" className="mt-2 text-xs text-destructive">
+              {pdfError}
+            </p>
+          )}
+          <p className="mt-2 text-[10px] text-muted-foreground">
+            Up to {Math.round(MAX_PDF_BYTES / 1024 / 1024)} MB. Scanned PDFs are not OCR-processed yet (S6.16).
           </p>
           <textarea
             value={opinionText}
