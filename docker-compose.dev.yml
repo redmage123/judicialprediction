@@ -186,7 +186,11 @@ services:
       postgres:
         condition: service_healthy
       ml-inference-svc:
-        condition: service_started
+        # service_healthy gates the gateway on /healthz AND /readyz (the
+        # healthcheck below tests both).  Without this, the gateway used
+        # to come up while the champion model wasn't loaded, and every
+        # createCase mutation failed with MlInferenceUnavailable.
+        condition: service_healthy
     environment:
       GATEWAY_BIND: "0.0.0.0:4040"
       DATABASE_URL: "postgres://judicialpredict:judicialpredict_dev_pwd@postgres:5432/judicialpredict_dev"
@@ -244,11 +248,17 @@ services:
     networks:
       - jp_dev_net
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request as u; u.urlopen('http://127.0.0.1:8001/healthz', timeout=2)\""]
+      # /readyz returns 503 until train_first_models.py has populated
+      # mlruns/champion.json.  Gating on /readyz (not /healthz) means the
+      # api-gateway's `service_healthy` depends_on actually waits for the
+      # champion model to be present, not just for uvicorn to bind.
+      test: ["CMD-SHELL", "python -c \"import urllib.request as u; u.urlopen('http://127.0.0.1:8001/readyz', timeout=2)\""]
       interval: 15s
       timeout: 5s
-      retries: 5
-      start_period: 10s
+      # Models train in ~10s for synthetic data but real datasets may take
+      # several minutes.  Generous retry budget keeps healthcheck noise low.
+      retries: 20
+      start_period: 30s
 
   # ---------------------------------------------------------------------------
   # web (Next.js 15 standalone build)

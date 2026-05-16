@@ -65,8 +65,14 @@ pub(crate) enum MlCallOutcome {
     /// The server returned `INVALID_ARGUMENT` — e.g. a Tier-C feature was
     /// supplied, or a required feature was missing.
     BadRequest(String),
-    /// Any other gRPC error (service unavailable, transport failure, etc.).
-    Unavailable,
+    /// gRPC `UNAVAILABLE` — downstream not ready (e.g. champion model not
+    /// loaded, transient transport failure).  Caller MUST surface the
+    /// server-provided message so operators see "model not trained" rather
+    /// than a generic "network failure".
+    Unavailable(String),
+    /// Any other gRPC error not covered above (Internal, Unknown, etc.).
+    /// Distinct from `Unavailable` so callers can return 500 vs 503.
+    Internal(String),
 }
 
 /// Build a `PredictCaseOutcomeRequest`, send it to ml-inference-svc over gRPC,
@@ -134,13 +140,15 @@ pub(crate) async fn call_ml(
                 predicted_at_unix: r.predicted_at_unix,
             })
         }
-        Err(status) => match status.code() {
-            tonic::Code::DeadlineExceeded => MlCallOutcome::Timeout,
-            tonic::Code::InvalidArgument => {
-                MlCallOutcome::BadRequest(status.message().to_string())
+        Err(status) => {
+            let msg = status.message().to_string();
+            match status.code() {
+                tonic::Code::DeadlineExceeded => MlCallOutcome::Timeout,
+                tonic::Code::InvalidArgument => MlCallOutcome::BadRequest(msg),
+                tonic::Code::Unavailable => MlCallOutcome::Unavailable(msg),
+                _ => MlCallOutcome::Internal(msg),
             }
-            _ => MlCallOutcome::Unavailable,
-        },
+        }
     }
 }
 
@@ -618,12 +626,28 @@ impl Mutation {
                         .extend_with(|_, ext| ext.set("code", "MlInferenceBadRequest"))),
                 )
             }
-            MlCallOutcome::Unavailable => {
-                tracing::warn!("ml-inference-svc unavailable (predictCaseOutcome)");
+            MlCallOutcome::Unavailable(msg) => {
+                tracing::warn!(detail = %msg, "ml-inference-svc unavailable (predictCaseOutcome)");
+                let detail = msg.clone();
                 (
                     AuditStatus::Err,
-                    Err(async_graphql::Error::new("ml inference unavailable")
-                        .extend_with(|_, ext| ext.set("code", "MlInferenceUnavailable"))),
+                    Err(async_graphql::Error::new(format!("ml inference unavailable: {detail}"))
+                        .extend_with(move |_, ext| {
+                            ext.set("code", "MlInferenceUnavailable");
+                            ext.set("detail", detail.clone());
+                        })),
+                )
+            }
+            MlCallOutcome::Internal(msg) => {
+                tracing::error!(detail = %msg, "ml-inference-svc internal error (predictCaseOutcome)");
+                let detail = msg.clone();
+                (
+                    AuditStatus::Err,
+                    Err(async_graphql::Error::new(format!("ml inference error: {detail}"))
+                        .extend_with(move |_, ext| {
+                            ext.set("code", "MlInferenceInternal");
+                            ext.set("detail", detail.clone());
+                        })),
                 )
             }
         };
@@ -724,10 +748,23 @@ impl Mutation {
                 return Err(async_graphql::Error::new("ml inference rejected request")
                     .extend_with(|_, ext| ext.set("code", "MlInferenceBadRequest")));
             }
-            MlCallOutcome::Unavailable => {
-                tracing::warn!("ml-inference-svc unavailable (createCase)");
-                return Err(async_graphql::Error::new("ml inference unavailable")
-                    .extend_with(|_, ext| ext.set("code", "MlInferenceUnavailable")));
+            MlCallOutcome::Unavailable(msg) => {
+                tracing::warn!(detail = %msg, "ml-inference-svc unavailable (createCase)");
+                let detail = msg.clone();
+                return Err(async_graphql::Error::new(format!("ml inference unavailable: {detail}"))
+                    .extend_with(move |_, ext| {
+                        ext.set("code", "MlInferenceUnavailable");
+                        ext.set("detail", detail.clone());
+                    }));
+            }
+            MlCallOutcome::Internal(msg) => {
+                tracing::error!(detail = %msg, "ml-inference-svc internal error (createCase)");
+                let detail = msg.clone();
+                return Err(async_graphql::Error::new(format!("ml inference error: {detail}"))
+                    .extend_with(move |_, ext| {
+                        ext.set("code", "MlInferenceInternal");
+                        ext.set("detail", detail.clone());
+                    }));
             }
         };
 
@@ -1100,11 +1137,25 @@ impl Mutation {
                 return Err(async_graphql::Error::new("ml inference rejected request")
                     .extend_with(|_, ext| ext.set("code", "MlInferenceBadRequest")));
             }
-            MlCallOutcome::Unavailable => {
+            MlCallOutcome::Unavailable(msg) => {
                 let _ = tx.rollback().await;
-                tracing::warn!("ml-inference-svc unavailable (repredictCase)");
-                return Err(async_graphql::Error::new("ml inference unavailable")
-                    .extend_with(|_, ext| ext.set("code", "MlInferenceUnavailable")));
+                tracing::warn!(detail = %msg, "ml-inference-svc unavailable (repredictCase)");
+                let detail = msg.clone();
+                return Err(async_graphql::Error::new(format!("ml inference unavailable: {detail}"))
+                    .extend_with(move |_, ext| {
+                        ext.set("code", "MlInferenceUnavailable");
+                        ext.set("detail", detail.clone());
+                    }));
+            }
+            MlCallOutcome::Internal(msg) => {
+                let _ = tx.rollback().await;
+                tracing::error!(detail = %msg, "ml-inference-svc internal error (repredictCase)");
+                let detail = msg.clone();
+                return Err(async_graphql::Error::new(format!("ml inference error: {detail}"))
+                    .extend_with(move |_, ext| {
+                        ext.set("code", "MlInferenceInternal");
+                        ext.set("detail", detail.clone());
+                    }));
             }
         };
 

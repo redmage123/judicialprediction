@@ -62,6 +62,7 @@ export default async function LoginPage({
 
   return (
     <main className="flex min-h-screen items-center justify-center p-8">
+      <h1 className="sr-only">Sign in to JudicialPredict</h1>
       <LoginForm
         nextUrl={nextUrl}
         ssoEnabled={sso.enabled}

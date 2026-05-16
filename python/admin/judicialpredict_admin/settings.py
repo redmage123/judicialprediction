@@ -77,6 +77,10 @@ MIDDLEWARE = [
     "core.middleware.RLSMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    # Strips wsgiref's "Server: WSGIServer/0.2 CPython/3.12.12" banner and
+    # adds CSP/HSTS/Referrer-Policy/Permissions-Policy.  Placed last so it
+    # wins over anything earlier in the chain.
+    "core.security_headers.SecurityHeadersMiddleware",
 ]
 
 ROOT_URLCONF = "judicialpredict_admin.urls"

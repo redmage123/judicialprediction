@@ -124,9 +124,21 @@ pub async fn do_create_case(
             return Err(async_graphql::Error::new("ml inference rejected request")
                 .extend_with(|_, ext| ext.set("code", "MlInferenceBadRequest")));
         }
-        MlCallOutcome::Unavailable => {
-            return Err(async_graphql::Error::new("ml inference unavailable")
-                .extend_with(|_, ext| ext.set("code", "MlInferenceUnavailable")));
+        MlCallOutcome::Unavailable(msg) => {
+            let detail = msg.clone();
+            return Err(async_graphql::Error::new(format!("ml inference unavailable: {detail}"))
+                .extend_with(move |_, ext| {
+                    ext.set("code", "MlInferenceUnavailable");
+                    ext.set("detail", detail.clone());
+                }));
+        }
+        MlCallOutcome::Internal(msg) => {
+            let detail = msg.clone();
+            return Err(async_graphql::Error::new(format!("ml inference error: {detail}"))
+                .extend_with(move |_, ext| {
+                    ext.set("code", "MlInferenceInternal");
+                    ext.set("detail", detail.clone());
+                }));
         }
     };
 

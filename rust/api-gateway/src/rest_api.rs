@@ -143,6 +143,7 @@ pub async fn create_case_v1(
             "MlInferenceBadRequest" => StatusCode::BAD_REQUEST,
             "MlInferenceTimeout" => StatusCode::GATEWAY_TIMEOUT,
             "MlInferenceUnavailable" => StatusCode::SERVICE_UNAVAILABLE,
+            "MlInferenceInternal" => StatusCode::BAD_GATEWAY,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         ErrorResponse {

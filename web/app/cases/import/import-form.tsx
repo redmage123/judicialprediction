@@ -274,6 +274,11 @@ export function ImportForm() {
           >
             {loading ? "Importing…" : `Import ${parsed?.rows.length ?? 0} case${parsed?.rows.length === 1 ? "" : "s"}`}
           </Button>
+          {!parsed && !loading && (
+            <p className="text-xs text-muted-foreground">
+              Choose a CSV file to enable import.
+            </p>
+          )}
           {submitError && (
             <p role="alert" className="text-xs text-destructive">{submitError}</p>
           )}

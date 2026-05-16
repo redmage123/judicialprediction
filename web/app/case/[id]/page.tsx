@@ -51,6 +51,13 @@ async function fetchCase(id: string): Promise<CaseResult | null> {
         }
         recommendation {
           kind
+          confidence
+          counterRecommendation {
+            kindAtCiLower
+            kindAtCiUpper
+            flipsWithinCi
+            note
+          }
           rationaleBullets
           expectedValueTry
           expectedValueSettle

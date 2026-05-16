@@ -20,6 +20,7 @@ export default async function ResetPasswordPage({
   const { token } = await searchParams;
   return (
     <main className="flex min-h-screen items-center justify-center p-8">
+      <h1 className="sr-only">Set a new password — JudicialPredict</h1>
       <ResetPasswordForm token={token ?? ""} />
     </main>
   );

@@ -6,6 +6,8 @@ import "./globals.css";
 import { ApolloClientProvider } from "@/lib/apollo-provider";
 import { AuthProvider } from "@/lib/auth-context";
 import { LogoutButton } from "@/components/layout/logout-button";
+import { PrimaryNav } from "@/components/layout/nav";
+import { CookieBanner } from "@/components/layout/cookie-banner";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -48,25 +50,13 @@ export default async function RootLayout({
                   >
                     JudicialPredict
                   </Link>
-                  <nav className="flex items-center gap-4 text-sm" aria-label="Primary">
-                    <Link
-                      href="/cases"
-                      className="text-muted-foreground hover:text-foreground"
-                    >
-                      Cases
-                    </Link>
-                    <Link
-                      href="/case/new"
-                      className="text-muted-foreground hover:text-foreground"
-                    >
-                      New case
-                    </Link>
-                  </nav>
+                  <PrimaryNav />
                 </div>
                 <LogoutButton />
               </header>
             )}
             {children}
+            <CookieBanner />
           </AuthProvider>
         </ApolloClientProvider>
       </body>

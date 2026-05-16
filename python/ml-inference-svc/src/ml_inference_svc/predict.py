@@ -65,6 +65,62 @@ def _champion_meta() -> dict:
         return json.load(f)
 
 
+def _resolve_run_artifact_path(
+    project_root: str, run_id: str, artifact_name: str
+) -> str | None:
+    """
+    Return the absolute filesystem path to a per-run artifact, or None.
+
+    Run-scoped artifacts live at
+    ``mlruns/<exp>/<run_id>/artifacts/<artifact_name>``.  Reading directly
+    side-steps the MLflowClient.download_artifacts plumbing that breaks on
+    MLflow 3's revised layout.
+    """
+    mlruns_root = os.path.join(project_root, "mlruns")
+    if not os.path.isdir(mlruns_root):
+        return None
+    for exp in os.listdir(mlruns_root):
+        candidate = os.path.join(
+            mlruns_root, exp, run_id, "artifacts", artifact_name
+        )
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def _resolve_logged_model_path(project_root: str, run_id: str) -> str | None:
+    """
+    Return the absolute filesystem path to the logged model artifacts dir, or
+    None if no model logged from this run can be located.
+
+    MLflow 3 separates logged models from runs: a `log_model(name="model")`
+    call writes the model to
+    ``mlruns/<exp>/models/m-<id>/artifacts/`` (with ``MLmodel`` and
+    ``model.pkl`` inside) and records the linkage in
+    ``mlruns/<exp>/<run>/outputs/m-<id>``.
+
+    Loading via the documented ``models:/<id>`` URI hits a MLflow 3.12 bug
+    where the inner LocalArtifactRepository receives an empty artifact_path
+    and throws ``No such artifact: ''``.  Loading via the absolute artifacts
+    directory on disk works reliably and side-steps the URI plumbing.
+    """
+    mlruns_root = os.path.join(project_root, "mlruns")
+    if not os.path.isdir(mlruns_root):
+        return None
+    # Experiment dirs are numeric; the only non-numeric entry is `.trash`.
+    for exp in os.listdir(mlruns_root):
+        outputs_dir = os.path.join(mlruns_root, exp, run_id, "outputs")
+        if not os.path.isdir(outputs_dir):
+            continue
+        for name in os.listdir(outputs_dir):
+            if not name.startswith("m-"):
+                continue
+            artifacts = os.path.join(mlruns_root, exp, "models", name, "artifacts")
+            if os.path.isfile(os.path.join(artifacts, "MLmodel")):
+                return artifacts
+    return None
+
+
 @lru_cache(maxsize=1)
 def _load_champion():
     """Load and cache the champion sklearn model + conformal predictor."""
@@ -76,13 +132,20 @@ def _load_champion():
     tracking_uri = "file://" + os.path.join(project_root, "mlruns")
 
     mlflow.set_tracking_uri(tracking_uri)
-    model_uri = f"runs:/{run_id}/model"
+    model_path = _resolve_logged_model_path(project_root, run_id)
+    model_uri = model_path if model_path else f"runs:/{run_id}/model"
     model = mlflow.sklearn.load_model(model_uri)
 
-    # Load conformal residuals artifact.
-    client = mlflow.tracking.MlflowClient()
-    local_dir = client.download_artifacts(run_id, "conformal_residuals.npy")
-    residuals = np.load(local_dir)
+    # Load conformal residuals artifact. MLflowClient.download_artifacts hits
+    # the same MLflow 3.12 path-resolution bug as load_model("models:/..."),
+    # so resolve the absolute path on disk and load with numpy directly.
+    residuals_path = _resolve_run_artifact_path(project_root, run_id, "conformal_residuals.npy")
+    if residuals_path is None:
+        raise FileNotFoundError(
+            f"Conformal residuals artifact not found for run {run_id}. "
+            "Re-run train_first_models.py."
+        )
+    residuals = np.load(residuals_path)
     conformal = SplitConformalPredictor.from_residuals(residuals)
 
     return model, conformal, meta

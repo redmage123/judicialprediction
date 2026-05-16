@@ -81,6 +81,50 @@ const INITIAL: FormState = {
   jurisdiction: "us-federal",
 };
 
+/**
+ * Map an Apollo/network error into a one-sentence human message.
+ *
+ * The gateway includes `extensions.code` and `extensions.detail` on every
+ * resolver error (S6.16) so we can distinguish "model not trained" from
+ * "timeout" from "bad request" rather than telling the operator to "try
+ * again" for failures that retrying won't fix.
+ */
+function humaniseError(err: unknown): string {
+  if (!err || typeof err !== "object") {
+    return "Prediction failed. Please try again.";
+  }
+  const anyErr = err as {
+    message?: string;
+    graphQLErrors?: Array<{
+      message?: string;
+      extensions?: { code?: string; detail?: string };
+    }>;
+    networkError?: { message?: string };
+  };
+  const gql = anyErr.graphQLErrors?.[0];
+  const code = gql?.extensions?.code;
+  const detail = gql?.extensions?.detail;
+  switch (code) {
+    case "MlInferenceUnavailable":
+      return detail
+        ? `Inference service is not ready: ${detail}. Ask an administrator to check the ML service.`
+        : "Inference service is not ready. Ask an administrator to check the ML service.";
+    case "MlInferenceTimeout":
+      return "Inference timed out. Please try again in a few seconds.";
+    case "MlInferenceBadRequest":
+      return detail ? `Server rejected the input: ${detail}` : "Server rejected the input.";
+    case "MlInferenceInternal":
+      return detail
+        ? `Inference service returned an error: ${detail}`
+        : "Inference service returned an error. Please try again.";
+    default:
+      if (anyErr.networkError) {
+        return "Could not reach the server. Check your connection and try again.";
+      }
+      return gql?.message ?? anyErr.message ?? "Prediction failed. Please try again.";
+  }
+}
+
 function validateField(
   name: keyof FormState,
   value: string
@@ -287,19 +331,16 @@ export function IntakeForm() {
       });
 
       if (result.error || !result.data) {
-        setSubmitError(
-          result.error?.message ?? "Prediction failed. Please try again."
-        );
+        setSubmitError(humaniseError(result.error));
         return;
       }
 
       // S4.4: use the server-assigned UUID from the persisted Case row.
       const { id } = result.data.createCase;
       router.push(`/case/${id}`);
-    } catch {
-      setSubmitError(
-        "Unable to reach the gateway. Please try again."
-      );
+    } catch (err) {
+      // Network/transport failure: Apollo's link threw before we got a response.
+      setSubmitError(humaniseError(err));
     }
   }
 
