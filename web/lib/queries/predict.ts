@@ -358,6 +358,10 @@ export const EXTRACT_FEATURES = gql`
       caseTypeSuggestion
       outcomeFor
       jurisdictionSuggestion
+      ideologyDistance
+      ideologySource
+      ideologyRelease
+      ideologyCfscore
     }
   }
 `;
@@ -377,6 +381,14 @@ export interface ExtractedFeatures {
   outcomeFor: string | null;
   /** Suggested form jurisdiction value (e.g. us-federal). */
   jurisdictionSuggestion: string | null;
+  /** S7 — suggested ideologyDistance [0, 1] derived from DIME cfscore. */
+  ideologyDistance: number | null;
+  /** S7 — provenance for ideologyDistance ("bonica_dime" today). */
+  ideologySource: string | null;
+  /** S7 — DIME release tag (e.g. "dime-2014-judges-v1.0"). */
+  ideologyRelease: string | null;
+  /** S7 — raw cfscore (DIME native scale, roughly [-2, 2]). */
+  ideologyCfscore: number | null;
 }
 
 export interface ExtractFeaturesData {

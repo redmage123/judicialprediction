@@ -148,6 +148,12 @@ type ExtractionContext = {
   judgeCasesAnalyzed: number | null;
   caseTypeHint: string;
   outcomeFor: string | null;
+  /** S7 — provenance for the ideology_distance prefill ("bonica_dime"). */
+  ideologySource: string | null;
+  /** S7 — DIME release tag the cfscore came from. */
+  ideologyRelease: string | null;
+  /** S7 — raw cfscore in DIME's native [-2, 2] scale (tooltip surface). */
+  ideologyCfscore: number | null;
 };
 
 export function IntakeForm() {
@@ -258,6 +264,11 @@ export function IntakeForm() {
           next.judgeSeverity = ef.judgeSeverity.toFixed(2);
           nextPrefilled.judgeSeverity = true;
         }
+        // S7 — DIME-derived ideology distance.
+        if (ef.ideologyDistance != null) {
+          next.ideologyDistance = ef.ideologyDistance.toFixed(2);
+          nextPrefilled.ideologyDistance = true;
+        }
         if (ef.caseTypeSuggestion === "civil" || ef.caseTypeSuggestion === "criminal" || ef.caseTypeSuggestion === "bankruptcy") {
           next.caseType = ef.caseTypeSuggestion as CaseType;
           nextPrefilled.caseType = true;
@@ -274,6 +285,9 @@ export function IntakeForm() {
         judgeCasesAnalyzed: ef.judgeCasesAnalyzed,
         caseTypeHint: ef.caseTypeHint,
         outcomeFor: ef.outcomeFor,
+        ideologySource: ef.ideologySource,
+        ideologyRelease: ef.ideologyRelease,
+        ideologyCfscore: ef.ideologyCfscore,
       });
       setFieldErrors({});
     } catch (e) {
@@ -524,7 +538,31 @@ export function IntakeForm() {
 
             {/* Ideology Distance */}
             <div className="space-y-1.5">
-              <Label htmlFor="ideologyDistance">Ideology distance</Label>
+              <div className="flex flex-wrap items-center gap-2">
+                <Label htmlFor="ideologyDistance">Ideology distance</Label>
+                {/* S7 — DIME-sourced ideology badge. Surfaces the release
+                    tag + raw cfscore so the operator can audit the prefill. */}
+                {prefilled.ideologyDistance && extractCtx?.ideologySource === "bonica_dime" && (
+                  <span
+                    className="inline-flex items-center gap-1 rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-blue-700"
+                    title={
+                      "Bonica DIME campaign-finance ideology proxy. " +
+                      (extractCtx.ideologyCfscore != null
+                        ? `Raw cfscore: ${extractCtx.ideologyCfscore.toFixed(2)} (range ≈ -2 to +2; lower = more liberal). `
+                        : "") +
+                      `Release: ${extractCtx.ideologyRelease ?? "unknown"}. ` +
+                      "Not a vote-direction prediction."
+                    }
+                  >
+                    Bonica DIME
+                    {extractCtx.ideologyCfscore != null && (
+                      <span className="font-mono normal-case tracking-normal">
+                        {extractCtx.ideologyCfscore.toFixed(2)}
+                      </span>
+                    )}
+                  </span>
+                )}
+              </div>
               <Input
                 id="ideologyDistance"
                 name="ideologyDistance"

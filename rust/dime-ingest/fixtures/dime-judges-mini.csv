@@ -1,0 +1,26 @@
+bonica_id,name,court,cfscore
+dime-001,"Tannenwald, Theodore",tax,-0.41
+dime-002,"Foley, Maurice B.",tax,-0.32
+dime-003,"Pritchard, Jay Roy",tax,0.15
+dime-004,"O'Connor, Sandra Day",scotus,0.21
+dime-005,"Roberts, John G.",scotus,0.72
+dime-006,"Marshall, Thurgood",scotus,-1.43
+dime-007,"Kawashima, Sandra",tax,
+dime-008,"Smith, John A., Jr.",scotus,0.55
+dime-009,"Smith, John A.",cafc,-0.12
+dime-010,"Ginsburg, Ruth Bader",scotus,-0.91
+dime-011,"Garcia, Maria Elena, Sr.",cafc,0.04
+dime-012,"Patel, Ravi III",tax,-0.18
+dime-013,"O'Brien, Patrick",bia,
+dime-014,"Wong, Linda",cafc,-0.27
+dime-015,"Hernandez, Carlos",bia,0.39
+dime-016,"Smith, John",,0.00
+dime-017,"Adams, Jane",,
+dime-018,"Lee, Robert E.",cafc,0.18
+dime-019,"Lee, Robert E.",scotus,0.20
+dime-020,"Brown-Williams, Alexis",tax,-0.55
+dime-021,"Holmes, Oliver Wendell, Jr.",scotus,-0.06
+dime-022,"de la Vega, Carmen",bia,-0.43
+dime-023,"van der Berg, Henrik",cafc,0.31
+dime-024,"NA",tax,
+dime-025,"Quincy, Adams",,NA

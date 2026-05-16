@@ -437,6 +437,24 @@ pub struct ExtractedFeatures {
     /// the text carries a recognisable court signature
     /// (e.g. "United States Tax Court" → `us-federal`).
     pub jurisdiction_suggestion: Option<String>,
+    /// Sprint-7 — DIME-derived ideology distance (0.0–1.0).  Computed from
+    /// the matched judge's `bio.dime.cfscore` by scaling the [-2, 2] DIME
+    /// range to [0, 1] around a neutral 0.0 anchor (`|cfscore| / 2.0`).
+    /// `None` when the judge isn't in DIME yet — operator-typed value wins
+    /// in that case.
+    pub ideology_distance: Option<f64>,
+    /// Sprint-7 — provenance for `ideology_distance`. Today only DIME, but
+    /// when Sprint-8 lands Martin-Quinn this becomes "mqs" / "jcs" / etc.
+    /// `None` mirrors `ideology_distance`.
+    pub ideology_source: Option<String>,
+    /// Sprint-7 — release tag of the DIME drop the cfscore came from
+    /// (e.g. `dime-2014-judges-v1.0`).  Surfaced in the compliance footer
+    /// so a printed memo can be traced back to a specific data vintage.
+    pub ideology_release: Option<String>,
+    /// Sprint-7 — raw cfscore in DIME's native scale, e.g. `-0.41`.
+    /// Surfaced in the intake-form badge tooltip; never used by the model
+    /// directly (the model consumes `ideology_distance`).
+    pub ideology_cfscore: Option<f64>,
 }
 
 /// Maximum opinion-text length accepted by the NLP extractor.  The regex
@@ -490,61 +508,81 @@ pub(crate) async fn extract_features_from_text(
         None
     };
 
-    // ── Judge severity lookup ────────────────────────────────────────────────
+    // ── Judge lookup (severity proxy + S7 DIME ideology) ────────────────────
     // Take the first extracted candidate as the primary judge (opinion header
-    // order is "writer first" in CourtListener exports).  If none, leave the
-    // severity fields None.
-    let (judge_severity, judge_name, judge_cases_analyzed) =
-        match judge_candidates.first() {
-            Some(raw_name) => {
-                let normalized = normalize_judge_name(raw_name);
-                if normalized.is_empty() {
-                    (None, None, None)
-                } else {
-                    let mut tx = pool.begin().await.map_err(|e| {
-                        async_graphql::Error::new(format!("judges tx begin: {e}"))
-                    })?;
-                    sqlx::query(&format!(
-                        "SET LOCAL app.current_tenant_id = '{tenant_id}'"
-                    ))
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(|e| {
-                        async_graphql::Error::new(format!("SET LOCAL failed: {e}"))
-                    })?;
+    // order is "writer first" in CourtListener exports).  If none, all
+    // judge-derived fields stay None.
+    //
+    // Single round-trip — the same row also carries any bio.dime patch
+    // dime-ingest has previously written.
+    let (
+        judge_severity,
+        judge_name,
+        judge_cases_analyzed,
+        ideology_cfscore,
+        ideology_release,
+    ) = match judge_candidates.first() {
+        Some(raw_name) => {
+            let normalized = normalize_judge_name(raw_name);
+            if normalized.is_empty() {
+                (None, None, None, None, None)
+            } else {
+                let mut tx = pool.begin().await.map_err(|e| {
+                    async_graphql::Error::new(format!("judges tx begin: {e}"))
+                })?;
+                sqlx::query(&format!(
+                    "SET LOCAL app.current_tenant_id = '{tenant_id}'"
+                ))
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| {
+                    async_graphql::Error::new(format!("SET LOCAL failed: {e}"))
+                })?;
 
-                    let row = sqlx::query(
-                        "SELECT full_name,
-                                (bio->'severity_proxy'->>'severity')::float8    AS severity,
-                                (bio->'severity_proxy'->>'cases_analyzed')::int AS cases_analyzed
-                         FROM judges
-                         WHERE tenant_id = $1 AND normalized_name = $2",
-                    )
-                    .bind(tenant_id)
-                    .bind(&normalized)
-                    .fetch_optional(&mut *tx)
-                    .await
-                    .map_err(|e| {
-                        async_graphql::Error::new(format!("judge lookup failed: {e}"))
-                    })?;
+                let row = sqlx::query(
+                    "SELECT full_name,
+                            (bio->'severity_proxy'->>'severity')::float8    AS severity,
+                            (bio->'severity_proxy'->>'cases_analyzed')::int AS cases_analyzed,
+                            (bio->'dime'->>'cfscore')::float8                AS cfscore,
+                            (bio->'dime'->>'release')                        AS release
+                     FROM judges
+                     WHERE tenant_id = $1 AND normalized_name = $2",
+                )
+                .bind(tenant_id)
+                .bind(&normalized)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| {
+                    async_graphql::Error::new(format!("judge lookup failed: {e}"))
+                })?;
 
-                    tx.commit().await.map_err(|e| {
-                        async_graphql::Error::new(format!("judges tx commit: {e}"))
-                    })?;
+                tx.commit().await.map_err(|e| {
+                    async_graphql::Error::new(format!("judges tx commit: {e}"))
+                })?;
 
-                    match row {
-                        Some(r) => {
-                            let name: Option<String> = r.try_get("full_name").ok();
-                            let sev: Option<f64> = r.try_get("severity").ok();
-                            let n: Option<i32> = r.try_get("cases_analyzed").ok();
-                            (sev, name, n)
-                        }
-                        None => (None, None, None),
+                match row {
+                    Some(r) => {
+                        let name: Option<String> = r.try_get("full_name").ok();
+                        let sev: Option<f64> = r.try_get("severity").ok();
+                        let n: Option<i32> = r.try_get("cases_analyzed").ok();
+                        let cfscore: Option<f64> = r.try_get("cfscore").ok();
+                        let release: Option<String> = r.try_get("release").ok();
+                        (sev, name, n, cfscore, release)
                     }
+                    None => (None, None, None, None, None),
                 }
             }
-            None => (None, None, None),
-        };
+        }
+        None => (None, None, None, None, None),
+    };
+
+    // Sprint-7 — derive ideology_distance from cfscore.
+    //
+    // DIME cfscore runs roughly [-2, 2]; the model consumes
+    // ideology_distance in [0, 1] where 0 = aligned and 1 = maximally opposed.
+    // Anchor at 0.0 (neutral) and scale by 2.0, clamped.
+    let ideology_distance = ideology_cfscore.map(|cf| (cf.abs() / 2.0).clamp(0.0, 1.0));
+    let ideology_source = ideology_cfscore.is_some().then(|| "bonica_dime".to_string());
 
     Ok(ExtractedFeatures {
         judge_severity,
@@ -554,6 +592,10 @@ pub(crate) async fn extract_features_from_text(
         case_type_suggestion,
         outcome_for,
         jurisdiction_suggestion,
+        ideology_distance,
+        ideology_source,
+        ideology_release,
+        ideology_cfscore,
     })
 }
 

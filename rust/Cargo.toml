@@ -9,6 +9,7 @@ members = [
     "monte-carlo-sim",
     "cost-engine",
     "ingest-fetcher",
+    "dime-ingest",
     "feature-deriver",
     "event-broker",
     "partner-gateway",

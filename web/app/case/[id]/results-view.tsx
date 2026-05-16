@@ -387,6 +387,49 @@ function ResultsLayout({ caseResult }: ResultsLayoutProps) {
 
       {/* Prediction history disclosure (S4.7) */}
       <PredictionHistoryDisclosure caseId={id} />
+
+      {/* S7.6 — Tier-A sources used disclosure.
+          This is the compliance footer the partner can hand to a client or
+          drop into a discovery response.  It states what data the system MAY
+          have drawn on, since per-case provenance persistence lands in
+          Sprint 8 (along with Martin-Quinn).  Tier-C is explicitly absent
+          here because the system never accepts those features. */}
+      <section
+        aria-labelledby="sources-heading"
+        className="mt-8 rounded-md border bg-muted/20 p-4 text-xs leading-relaxed text-muted-foreground"
+      >
+        <h2 id="sources-heading" className="text-sm font-semibold text-foreground">
+          Tier-A sources used
+        </h2>
+        <ul className="mt-2 list-disc space-y-1 pl-5">
+          <li>
+            <strong>Judge severity:</strong> per-court win rate for the
+            responding party, computed over our CourtListener opinion
+            corpus (`judges.bio.severity_proxy`). Operator-typed when no
+            opinion text was supplied at intake.
+          </li>
+          <li>
+            <strong>Ideology distance:</strong> Bonica DIME 2014 release
+            (`judges.bio.dime.cfscore`), scaled from the [-2, 2]
+            campaign-finance space to [0, 1] around a neutral anchor.
+            Falls back to operator-typed when the judge isn&apos;t in DIME.
+            Methodology:{" "}
+            <a className="underline" href="https://data.stanford.edu/dime" rel="noreferrer">
+              Bonica, Adam. DIME, Stanford
+            </a>
+            .
+          </li>
+          <li>
+            <strong>Attorney win rate, materiality score, procedural
+            motions:</strong> operator-typed.
+          </li>
+          <li>
+            <strong>Tier-C (party-identifying) features:</strong> never used.
+            Enforced in the type system, the GraphQL schema, and the ML
+            service&apos;s allowlist.
+          </li>
+        </ul>
+      </section>
     </main>
   );
 }
