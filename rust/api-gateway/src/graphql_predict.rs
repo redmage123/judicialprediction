@@ -437,24 +437,30 @@ pub struct ExtractedFeatures {
     /// the text carries a recognisable court signature
     /// (e.g. "United States Tax Court" → `us-federal`).
     pub jurisdiction_suggestion: Option<String>,
-    /// Sprint-7 — DIME-derived ideology distance (0.0–1.0).  Computed from
-    /// the matched judge's `bio.dime.cfscore` by scaling the [-2, 2] DIME
-    /// range to [0, 1] around a neutral 0.0 anchor (`|cfscore| / 2.0`).
-    /// `None` when the judge isn't in DIME yet — operator-typed value wins
-    /// in that case.
+    /// DIME or MQ-derived ideology distance (0.0–1.0).  Computed by scaling
+    /// the matched judge's ideology score (DIME cfscore in [-2, 2], or MQ
+    /// posterior mean in roughly [-6, 6]) to [0, 1] around a neutral 0.0
+    /// anchor — `|score| / scale_max` clamped.  `None` when the judge
+    /// isn't in any enrichment source yet — operator-typed value wins.
     pub ideology_distance: Option<f64>,
-    /// Sprint-7 — provenance for `ideology_distance`. Today only DIME, but
-    /// when Sprint-8 lands Martin-Quinn this becomes "mqs" / "jcs" / etc.
-    /// `None` mirrors `ideology_distance`.
+    /// Provenance for `ideology_distance`. One of `bonica_dime`,
+    /// `martin_quinn`, or `null`.  Sprint-8 added Martin-Quinn; precedence
+    /// is MQ > DIME (voting-record beats campaign-finance proxy).  When
+    /// Sprint-9 lands JCS this enum gains `judicial_common_space`.
     pub ideology_source: Option<String>,
-    /// Sprint-7 — release tag of the DIME drop the cfscore came from
-    /// (e.g. `dime-2014-judges-v1.0`).  Surfaced in the compliance footer
-    /// so a printed memo can be traced back to a specific data vintage.
+    /// Release tag of the upstream drop (e.g. `dime-2014-judges-v1.0`,
+    /// `mqs-2023-v1`).  Surfaced in the compliance footer so a printed
+    /// memo can be traced back to a specific data vintage.
     pub ideology_release: Option<String>,
-    /// Sprint-7 — raw cfscore in DIME's native scale, e.g. `-0.41`.
-    /// Surfaced in the intake-form badge tooltip; never used by the model
-    /// directly (the model consumes `ideology_distance`).
+    /// Raw ideology score in the source's native scale: cfscore for
+    /// DIME (roughly [-2, 2]), post_mean for MQ (roughly [-6, 6]).
+    /// Surfaced in the intake-form badge tooltip; the model never
+    /// consumes this directly — only `ideology_distance` does.
     pub ideology_cfscore: Option<f64>,
+    /// Sprint-8 — for MQ rows, the four-digit court term the
+    /// `ideology_cfscore` corresponds to (e.g. 2019). `None` for DIME
+    /// rows because DIME's release is a single static drop.
+    pub ideology_term: Option<i32>,
 }
 
 /// Maximum opinion-text length accepted by the NLP extractor.  The regex
@@ -508,24 +514,29 @@ pub(crate) async fn extract_features_from_text(
         None
     };
 
-    // ── Judge lookup (severity proxy + S7 DIME ideology) ────────────────────
+    // ── Judge lookup (severity proxy + S7 DIME + S8 MQ ideology) ────────────
     // Take the first extracted candidate as the primary judge (opinion header
     // order is "writer first" in CourtListener exports).  If none, all
     // judge-derived fields stay None.
     //
-    // Single round-trip — the same row also carries any bio.dime patch
-    // dime-ingest has previously written.
-    let (
-        judge_severity,
-        judge_name,
-        judge_cases_analyzed,
-        ideology_cfscore,
-        ideology_release,
-    ) = match judge_candidates.first() {
+    // Single round-trip — the same row carries severity_proxy + DIME +
+    // Martin-Quinn enrichment if any of them were previously written.
+    struct JudgeRow {
+        full_name:      Option<String>,
+        severity:       Option<f64>,
+        cases_analyzed: Option<i32>,
+        dime_cfscore:   Option<f64>,
+        dime_release:   Option<String>,
+        mqs_score:      Option<f64>,
+        mqs_term:       Option<i32>,
+        mqs_release:    Option<String>,
+    }
+
+    let judge_row: Option<JudgeRow> = match judge_candidates.first() {
         Some(raw_name) => {
             let normalized = normalize_judge_name(raw_name);
             if normalized.is_empty() {
-                (None, None, None, None, None)
+                None
             } else {
                 let mut tx = pool.begin().await.map_err(|e| {
                     async_graphql::Error::new(format!("judges tx begin: {e}"))
@@ -543,8 +554,11 @@ pub(crate) async fn extract_features_from_text(
                     "SELECT full_name,
                             (bio->'severity_proxy'->>'severity')::float8    AS severity,
                             (bio->'severity_proxy'->>'cases_analyzed')::int AS cases_analyzed,
-                            (bio->'dime'->>'cfscore')::float8                AS cfscore,
-                            (bio->'dime'->>'release')                        AS release
+                            (bio->'dime'->>'cfscore')::float8                AS dime_cfscore,
+                            (bio->'dime'->>'release')                        AS dime_release,
+                            (bio->'mqs'->>'latest_score')::float8            AS mqs_score,
+                            (bio->'mqs'->>'latest_term')::int                AS mqs_term,
+                            (bio->'mqs'->>'release')                         AS mqs_release
                      FROM judges
                      WHERE tenant_id = $1 AND normalized_name = $2",
                 )
@@ -560,29 +574,73 @@ pub(crate) async fn extract_features_from_text(
                     async_graphql::Error::new(format!("judges tx commit: {e}"))
                 })?;
 
-                match row {
-                    Some(r) => {
-                        let name: Option<String> = r.try_get("full_name").ok();
-                        let sev: Option<f64> = r.try_get("severity").ok();
-                        let n: Option<i32> = r.try_get("cases_analyzed").ok();
-                        let cfscore: Option<f64> = r.try_get("cfscore").ok();
-                        let release: Option<String> = r.try_get("release").ok();
-                        (sev, name, n, cfscore, release)
-                    }
-                    None => (None, None, None, None, None),
-                }
+                row.map(|r| JudgeRow {
+                    full_name:      r.try_get("full_name").ok(),
+                    severity:       r.try_get("severity").ok(),
+                    cases_analyzed: r.try_get("cases_analyzed").ok(),
+                    dime_cfscore:   r.try_get("dime_cfscore").ok(),
+                    dime_release:   r.try_get("dime_release").ok(),
+                    mqs_score:      r.try_get("mqs_score").ok(),
+                    mqs_term:       r.try_get("mqs_term").ok(),
+                    mqs_release:    r.try_get("mqs_release").ok(),
+                })
             }
         }
-        None => (None, None, None, None, None),
+        None => None,
     };
 
-    // Sprint-7 — derive ideology_distance from cfscore.
+    let (judge_severity, judge_name, judge_cases_analyzed) = judge_row
+        .as_ref()
+        .map(|r| (r.severity, r.full_name.clone(), r.cases_analyzed))
+        .unwrap_or((None, None, None));
+
+    // Precedence: MQ > DIME. MQ is voting-record-derived (closer to "how
+    // the judge rules") while DIME is a campaign-finance proxy. The UI
+    // surfaces only the source that actually fed the score, so two chips
+    // are never shown for the same field.
     //
-    // DIME cfscore runs roughly [-2, 2]; the model consumes
-    // ideology_distance in [0, 1] where 0 = aligned and 1 = maximally opposed.
-    // Anchor at 0.0 (neutral) and scale by 2.0, clamped.
-    let ideology_distance = ideology_cfscore.map(|cf| (cf.abs() / 2.0).clamp(0.0, 1.0));
-    let ideology_source = ideology_cfscore.is_some().then(|| "bonica_dime".to_string());
+    // Scaling rationale:
+    //   DIME cfscore runs roughly [-2, 2]; divide by 2.
+    //   MQ post_mean runs roughly [-6, 6]; divide by 6.
+    // Both clamp to [0, 1] for the model.
+    let (
+        ideology_distance,
+        ideology_source,
+        ideology_release,
+        ideology_cfscore,
+        ideology_term,
+    ) = match &judge_row {
+        Some(JudgeRow {
+            mqs_score: Some(score),
+            mqs_term,
+            mqs_release,
+            ..
+        }) => {
+            let distance = (score.abs() / 6.0).clamp(0.0, 1.0);
+            (
+                Some(distance),
+                Some("martin_quinn".to_string()),
+                mqs_release.clone(),
+                Some(*score),
+                *mqs_term,
+            )
+        }
+        Some(JudgeRow {
+            dime_cfscore: Some(cf),
+            dime_release,
+            ..
+        }) => {
+            let distance = (cf.abs() / 2.0).clamp(0.0, 1.0);
+            (
+                Some(distance),
+                Some("bonica_dime".to_string()),
+                dime_release.clone(),
+                Some(*cf),
+                None,
+            )
+        }
+        _ => (None, None, None, None, None),
+    };
 
     Ok(ExtractedFeatures {
         judge_severity,
@@ -596,6 +654,7 @@ pub(crate) async fn extract_features_from_text(
         ideology_source,
         ideology_release,
         ideology_cfscore,
+        ideology_term,
     })
 }
 

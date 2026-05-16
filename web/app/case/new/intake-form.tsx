@@ -148,12 +148,14 @@ type ExtractionContext = {
   judgeCasesAnalyzed: number | null;
   caseTypeHint: string;
   outcomeFor: string | null;
-  /** S7 — provenance for the ideology_distance prefill ("bonica_dime"). */
+  /** Provenance for the ideology_distance prefill ("bonica_dime" | "martin_quinn"). */
   ideologySource: string | null;
-  /** S7 — DIME release tag the cfscore came from. */
+  /** Release tag the score came from. */
   ideologyRelease: string | null;
-  /** S7 — raw cfscore in DIME's native [-2, 2] scale (tooltip surface). */
+  /** Raw score in the source's native scale (DIME [-2,2], MQ ~[-6,6]). */
   ideologyCfscore: number | null;
+  /** S8 — MQ term (year). null for DIME. */
+  ideologyTerm: number | null;
 };
 
 export function IntakeForm() {
@@ -288,6 +290,7 @@ export function IntakeForm() {
         ideologySource: ef.ideologySource,
         ideologyRelease: ef.ideologyRelease,
         ideologyCfscore: ef.ideologyCfscore,
+        ideologyTerm: ef.ideologyTerm,
       });
       setFieldErrors({});
     } catch (e) {
@@ -540,8 +543,32 @@ export function IntakeForm() {
             <div className="space-y-1.5">
               <div className="flex flex-wrap items-center gap-2">
                 <Label htmlFor="ideologyDistance">Ideology distance</Label>
-                {/* S7 — DIME-sourced ideology badge. Surfaces the release
-                    tag + raw cfscore so the operator can audit the prefill. */}
+                {/* Source-specific ideology badges. Only one renders — the
+                    one that actually drove the prefill. MQ is preferred
+                    when both are available (voting-record beats
+                    campaign-finance proxy). */}
+                {prefilled.ideologyDistance && extractCtx?.ideologySource === "martin_quinn" && (
+                  <span
+                    className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-emerald-800"
+                    title={
+                      "Martin-Quinn dynamic ideal-point (voting-record-based). " +
+                      (extractCtx.ideologyCfscore != null
+                        ? `Posterior mean: ${extractCtx.ideologyCfscore.toFixed(2)} (lower = more liberal). `
+                        : "") +
+                      (extractCtx.ideologyTerm != null
+                        ? `Most recent term with a public score: ${extractCtx.ideologyTerm}. `
+                        : "") +
+                      `Release: ${extractCtx.ideologyRelease ?? "unknown"}.`
+                    }
+                  >
+                    Martin-Quinn
+                    {extractCtx.ideologyTerm != null && (
+                      <span className="font-mono normal-case tracking-normal">
+                        {extractCtx.ideologyTerm}
+                      </span>
+                    )}
+                  </span>
+                )}
                 {prefilled.ideologyDistance && extractCtx?.ideologySource === "bonica_dime" && (
                   <span
                     className="inline-flex items-center gap-1 rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-blue-700"

@@ -362,6 +362,7 @@ export const EXTRACT_FEATURES = gql`
       ideologySource
       ideologyRelease
       ideologyCfscore
+      ideologyTerm
     }
   }
 `;
@@ -381,14 +382,16 @@ export interface ExtractedFeatures {
   outcomeFor: string | null;
   /** Suggested form jurisdiction value (e.g. us-federal). */
   jurisdictionSuggestion: string | null;
-  /** S7 — suggested ideologyDistance [0, 1] derived from DIME cfscore. */
+  /** Suggested ideologyDistance [0, 1] derived from a Tier-A source. */
   ideologyDistance: number | null;
-  /** S7 — provenance for ideologyDistance ("bonica_dime" today). */
+  /** Provenance for ideologyDistance: "bonica_dime" or "martin_quinn". */
   ideologySource: string | null;
-  /** S7 — DIME release tag (e.g. "dime-2014-judges-v1.0"). */
+  /** Release tag (e.g. "dime-2014-judges-v1.0", "mqs-2023-v1"). */
   ideologyRelease: string | null;
-  /** S7 — raw cfscore (DIME native scale, roughly [-2, 2]). */
+  /** Raw score in source's native scale: cfscore for DIME, post_mean for MQ. */
   ideologyCfscore: number | null;
+  /** S8 — MQ term (year) the score corresponds to; null for DIME. */
+  ideologyTerm: number | null;
 }
 
 export interface ExtractFeaturesData {

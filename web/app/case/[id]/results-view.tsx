@@ -409,15 +409,36 @@ function ResultsLayout({ caseResult }: ResultsLayoutProps) {
             opinion text was supplied at intake.
           </li>
           <li>
-            <strong>Ideology distance:</strong> Bonica DIME 2014 release
-            (`judges.bio.dime.cfscore`), scaled from the [-2, 2]
-            campaign-finance space to [0, 1] around a neutral anchor.
-            Falls back to operator-typed when the judge isn&apos;t in DIME.
-            Methodology:{" "}
-            <a className="underline" href="https://data.stanford.edu/dime" rel="noreferrer">
-              Bonica, Adam. DIME, Stanford
-            </a>
-            .
+            <strong>Ideology distance:</strong> two Tier-A sources, in
+            precedence order:
+            <ul className="mt-1 list-[circle] space-y-1 pl-5">
+              <li>
+                <strong>Martin-Quinn</strong> dynamic ideal-points
+                (`judges.bio.mqs.latest_score`), scaled from the
+                roughly [-6, 6] voting-record space to [0, 1] around a
+                neutral anchor. <em>Preferred when available</em> —
+                voting-record-based, closer to &ldquo;how the judge
+                rules&rdquo;.
+                Methodology:{" "}
+                <a className="underline" href="https://mqscores.lsa.umich.edu/" rel="noreferrer">
+                  Martin &amp; Quinn (2002), updated annually
+                </a>
+                .
+              </li>
+              <li>
+                <strong>Bonica DIME</strong>{" "}
+                (`judges.bio.dime.cfscore`), scaled from the
+                campaign-finance [-2, 2] space to [0, 1]. Used when MQ
+                isn&apos;t available for the judge.
+                Methodology:{" "}
+                <a className="underline" href="https://data.stanford.edu/dime" rel="noreferrer">
+                  Bonica, Adam. DIME, Stanford
+                </a>
+                .
+              </li>
+            </ul>
+            Falls back to operator-typed when neither source has the
+            judge.
           </li>
           <li>
             <strong>Attorney win rate, materiality score, procedural

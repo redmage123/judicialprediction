@@ -1,0 +1,26 @@
+justice_name,term,post_mean,post_sd,justiceID
+"Marshall, Thurgood",1967,-1.41,0.14,mq-marshall
+"Marshall, Thurgood",1968,-1.38,0.13,mq-marshall
+"Marshall, Thurgood",1969,-1.45,0.12,mq-marshall
+"Marshall, Thurgood",1970,-1.49,0.11,mq-marshall
+"Marshall, Thurgood",1971,-1.52,0.10,mq-marshall
+"Marshall, Thurgood",1972,-1.55,0.10,mq-marshall
+"Tannenwald, Theodore",1989,-0.32,0.18,mq-tannenwald
+"Tannenwald, Theodore",1990,-0.36,0.16,mq-tannenwald
+"Tannenwald, Theodore",1991,-0.41,0.15,mq-tannenwald
+"Roberts, John G.",2005,0.65,0.20,mq-roberts
+"Roberts, John G.",2006,0.71,0.16,mq-roberts
+"Roberts, John G.",2007,0.74,0.14,mq-roberts
+"Roberts, John G.",2008,0.78,0.13,mq-roberts
+"Ginsburg, Ruth Bader",1993,-0.88,0.18,mq-ginsburg
+"Ginsburg, Ruth Bader",1994,-0.91,0.16,mq-ginsburg
+"Ginsburg, Ruth Bader",1995,-0.94,0.14,mq-ginsburg
+"Ginsburg, Ruth Bader",2018,-1.15,0.10,mq-ginsburg
+"Ginsburg, Ruth Bader",2019,,0.12,mq-ginsburg
+"O'Connor, Sandra Day",1981,0.18,0.22,mq-oconnor
+"O'Connor, Sandra Day",1982,0.21,0.18,mq-oconnor
+"O'Connor, Sandra Day",1983,0.24,0.16,mq-oconnor
+"Holmes, Oliver Wendell",1902,-0.06,0.30,mq-holmes
+"Anon, Anonymous",2024,NA,NA,
+"Duplicate, Dee",1990,0.1,0.10,mq-dup
+"Duplicate, Dee",1990,0.2,0.10,mq-dup
