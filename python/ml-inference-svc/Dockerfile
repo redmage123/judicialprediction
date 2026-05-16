@@ -25,7 +25,9 @@ FROM python:3.12-slim AS runner
 # libgomp1 = OpenMP runtime; required by LightGBM (loaded via ctypes at import).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends libgomp1 \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 1000 appgroup \
+    && useradd --uid 1000 --gid appgroup --no-create-home --shell /usr/sbin/nologin appuser
 
 WORKDIR /app
 
@@ -38,6 +40,12 @@ COPY --from=builder /build/src /app/src
 # Put venv on PATH.
 ENV PATH="/app/.venv/bin:$PATH"
 ENV PYTHONPATH="/app/src"
+
+# Run as UID 1000 so the bind-mounted mlruns/ stays writable by both the
+# container (training, eval) AND the host operator running scripts/train*.py
+# directly. UID 1000 matches the default host developer UID we provision on
+# all dev boxes; K8s pods in prod use the same UID in their PodSecurityContext.
+USER appuser
 
 # Liveness / readiness ports.
 EXPOSE 8001

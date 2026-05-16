@@ -21,10 +21,15 @@
 # non-zero only on real errors (network, DB, build) from any court.
 set -uo pipefail
 
-JP=/opt/ai-elevate/gigforge/projects/judicialpredict
-# LOG override: lets a smoke test write to a scratch file instead of the
-# production log.  Defaults to the production log.
-LOG="${LOG:-/var/log/jp-courtlistener-daily.log}"
+# JP root: auto-detect from this script's location so the same file works on
+# the prod host (/opt/ai-elevate/...), dev VMs (/home/<user>/judicialpredict),
+# and CI checkouts.  An explicit JP env var still overrides for smoke tests.
+JP="${JP:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+
+# LOG path: default to <JP>/logs/ which the operator user can write to without
+# sudo. Prod can still point at /var/log/... by exporting LOG explicitly.
+mkdir -p "$JP/logs" 2>/dev/null || true
+LOG="${LOG:-$JP/logs/courtlistener-daily.log}"
 
 # S6.9: each day runs `tax` plus one rotating minor court so cafc/bia/scotus
 # all keep growing.  Selector is day-of-week mod 3; over a 7-day week the
@@ -44,14 +49,29 @@ TARGET="${TARGET:-50}"  # see header: 2 courts x ~55 calls = ~110, under the 125
 # live CourtListener quota.  Defaults to the release binary.
 FETCHER="${FETCHER:-./rust/target/release/ingest-fetcher}"
 
-# Source the API token from the credentials file (auto-rotation lives here).
-if [ ! -r /opt/ai-elevate/credentials/courtlistener.env ]; then
-    echo "$(date -u +%FT%TZ) FATAL no /opt/ai-elevate/credentials/courtlistener.env" >> "$LOG"
+# Source the API token from the first readable credentials file. Prod keeps
+# this under /opt/ai-elevate/credentials/ with auto-rotation; dev boxes can
+# drop a one-line `export COURTLISTENER_TOKEN=...` at any of these paths, or
+# export the variable directly in the cron entry / shell environment.
+CRED_CANDIDATES=(
+    "${COURTLISTENER_ENV_FILE:-}"
+    "/opt/ai-elevate/credentials/courtlistener.env"
+    "$JP/.secrets/courtlistener.env"
+    "$HOME/.config/judicialpredict/courtlistener.env"
+)
+for cred in "${CRED_CANDIDATES[@]}"; do
+    if [ -n "$cred" ] && [ -r "$cred" ]; then
+        set -a
+        . "$cred"
+        set +a
+        break
+    fi
+done
+
+if [ -z "${COURTLISTENER_TOKEN:-}" ]; then
+    echo "$(date -u +%FT%TZ) FATAL COURTLISTENER_TOKEN not set; tried: ${CRED_CANDIDATES[*]}" >> "$LOG"
     exit 2
 fi
-set -a
-. /opt/ai-elevate/credentials/courtlistener.env
-set +a
 
 export DATABASE_URL="postgres://judicialpredict:judicialpredict_dev_pwd@127.0.0.1:5454/judicialpredict_dev"
 export RUST_LOG="${RUST_LOG:-info}"

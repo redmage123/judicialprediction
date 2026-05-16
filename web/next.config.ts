@@ -1,14 +1,33 @@
 import type { NextConfig } from "next";
 
-// Security headers applied to every response.  HSTS is intentionally short
-// (60 days, no preload) until we have a stable HTTPS deployment.
-// CSP allows inline styles because Tailwind + shadcn/ui inject runtime classes;
-// `'unsafe-eval'` is required by Next.js's dev runtime and stripped in prod
-// builds (Next sets a stricter prod CSP when `dev` is false).
+const IS_PROD = process.env.NODE_ENV === "production";
+
+// CSP — strict by default. Dev mode keeps `'unsafe-eval'` because Next.js's
+// fast-refresh + RSC runtime needs eval(). Prod drops it.
+// Tailwind/shadcn inject style classes at runtime, so `'unsafe-inline'` for
+// styles stays in both modes.
+const CSP_SCRIPT_SRC = IS_PROD
+  ? "'self' 'unsafe-inline'"
+  : "'self' 'unsafe-inline' 'unsafe-eval'";
+
+const CSP = [
+  "default-src 'self'",
+  `script-src ${CSP_SCRIPT_SRC}`,
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob:",
+  "font-src 'self' data:",
+  "connect-src 'self'",
+  "frame-ancestors 'none'",
+  "form-action 'self'",
+  "base-uri 'self'",
+  "object-src 'none'",
+].join("; ");
+
+// HSTS — only meaningful over HTTPS. Set it always (browsers ignore it on
+// http://) so the header is correct as soon as we terminate TLS upstream.
 const SECURITY_HEADERS: { key: string; value: string }[] = [
-  { key: "Content-Security-Policy",
-    value: "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'self'; object-src 'none'" },
-  { key: "Strict-Transport-Security", value: "max-age=5184000; includeSubDomains" },
+  { key: "Content-Security-Policy", value: CSP },
+  { key: "Strict-Transport-Security", value: "max-age=15552000; includeSubDomains" },
   { key: "X-Content-Type-Options", value: "nosniff" },
   { key: "X-Frame-Options", value: "DENY" },
   { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },

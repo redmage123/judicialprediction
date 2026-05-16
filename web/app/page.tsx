@@ -26,19 +26,19 @@ export default async function HomePage() {
       </header>
 
       {/* ── Hero ──────────────────────────────────────────────────────────── */}
-      <section className="container mx-auto px-6 py-20 text-center">
+      <section className="container mx-auto px-6 pt-20 pb-12 text-center">
         <p className="mx-auto mb-4 inline-block rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium uppercase tracking-wide text-slate-600">
           Case evaluation for litigation teams
         </p>
         <h1 className="mx-auto max-w-3xl text-4xl font-bold tracking-tight sm:text-5xl">
-          Settle, try, or borderline — backed by data, not gut feel.
+          Should you settle, try, or fold? Decide with data, not gut feel.
         </h1>
         <p className="mx-auto mt-6 max-w-2xl text-lg text-muted-foreground">
           JudicialPredict gives law firms an explainable P(win) probability,
           a conformal confidence interval, and a settle-versus-try expected-value
           comparison for every case — in seconds, with a signed audit trail.
         </p>
-        <div className="mt-10 flex flex-wrap items-center justify-center gap-3">
+        <div className="mx-auto mt-10 flex max-w-xs flex-col items-stretch gap-3 sm:max-w-none sm:flex-row sm:items-center sm:justify-center">
           <Button asChild size="lg">
             <Link href="/login">Sign in to your workspace</Link>
           </Button>
@@ -47,6 +47,33 @@ export default async function HomePage() {
           </Button>
         </div>
       </section>
+
+      {/* Scroll cue — animated chevron pointing to "How it works" so users
+          know there's more below the hero on tall screens. */}
+      <div className="flex justify-center pb-8">
+        <Link
+          href="#how-it-works"
+          aria-label="Scroll to how it works"
+          className="group inline-flex flex-col items-center gap-1 text-xs text-slate-700 hover:text-slate-900"
+        >
+          <span>Learn more</span>
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="20"
+            height="20"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+            className="animate-bounce"
+          >
+            <polyline points="6 9 12 15 18 9" />
+          </svg>
+        </Link>
+      </div>
 
       {/* ── Value props ───────────────────────────────────────────────────── */}
       <section className="border-t bg-slate-50/50">
@@ -141,12 +168,21 @@ export default async function HomePage() {
 
       {/* ── Footer ────────────────────────────────────────────────────────── */}
       <footer className="border-t bg-slate-50/50">
-        <div className="container mx-auto flex flex-wrap items-center justify-between gap-3 px-6 py-6 text-xs text-muted-foreground">
-          <span>© {new Date().getFullYear()} JudicialPredict</span>
-          <span>
-            Hosted on the AI Elevate platform · API gateway in Rust ·
-            ML inference in Python · Audit trail in Postgres
-          </span>
+        <div className="container mx-auto flex flex-col gap-4 px-6 py-8 sm:flex-row sm:items-center sm:justify-between">
+          <p className="text-sm text-muted-foreground">
+            © {new Date().getFullYear()} JudicialPredict
+          </p>
+          <nav className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm" aria-label="Footer">
+            <Link href="/privacy" className="text-muted-foreground hover:text-foreground">
+              Privacy
+            </Link>
+            <Link href="/cookies" className="text-muted-foreground hover:text-foreground">
+              Cookies
+            </Link>
+            <Link href="/login" className="text-muted-foreground hover:text-foreground">
+              Sign in
+            </Link>
+          </nav>
         </div>
       </footer>
     </main>

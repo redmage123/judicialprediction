@@ -61,6 +61,22 @@ async fn main() -> Result<()> {
         {
             Ok(pool) => {
                 tracing::info!("cases store connected (DATABASE_URL set)");
+                // Run schema migrations on startup so a fresh DB (dev or prod)
+                // comes up with the cases / predictions / case_documents / kg
+                // tables already present.  Migrations live in the feature-store
+                // crate which owns the schema; sqlx::migrate! reads them at
+                // compile time so the binary is self-contained.
+                //
+                // Idempotent: sqlx tracks applied migrations in _sqlx_migrations
+                // and skips anything already at the target version.
+                if let Err(e) = sqlx::migrate!("../feature-store/migrations")
+                    .run(&pool)
+                    .await
+                {
+                    tracing::error!("schema migration failed: {e}");
+                    return Err(e.into());
+                }
+                tracing::info!("schema migrations applied");
                 Some(Arc::new(pool))
             }
             Err(e) => {

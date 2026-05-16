@@ -23,7 +23,7 @@ tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8" }
 async-graphql = { version = "7" }
 async-graphql-axum = { version = "7" }
-sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "macros", "uuid", "json"] }
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "macros", "migrate", "uuid", "json"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
