@@ -53,8 +53,16 @@ def _get_operator(request):
     Return the active ``Operator`` for the current request, or ``None``.
     Always queries the ``default`` alias regardless of the active routing
     alias — mirrors the pattern in core/admin.py.
+
+    Django invokes ``has_module_permission`` for every registered ModelAdmin
+    on the admin login page itself (to build the sidebar) — at which point
+    ``request.user`` is ``AnonymousUser`` and has no ``email`` attribute.
+    Guard against that so the login page renders instead of 500-ing.
     """
     from operators.models import Operator
+
+    if not request.user.is_authenticated:
+        return None
 
     try:
         return Operator.objects.using("default").get(

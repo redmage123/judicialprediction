@@ -16,8 +16,18 @@ WORKDIR /app
 # Install uv.
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
+# Force uv to use the system Python (3.12 from the base image) rather
+# than downloading its own managed interpreter.  The runtime stage uses
+# the same base image, so `/app/.venv/bin/python` (a symlink) resolves
+# to the same path in both stages.  Without this, recent uv versions
+# install a managed Python and the runtime symlink becomes a dangling
+# pointer — `python -V` fails and Django can't be imported.
+ENV UV_PYTHON_PREFERENCE=only-system
+
 # Copy dependency manifests first (cache layer).
-COPY pyproject.toml .
+# uv.lock is required — without it `uv sync` resolves to an empty install
+# and the runtime stage fails with `ImportError: Couldn't import Django`.
+COPY pyproject.toml uv.lock ./
 
 # Install runtime deps only (no dev extras), into /app/.venv.
 RUN uv sync --no-dev --no-install-project
@@ -41,8 +51,12 @@ ENV DJANGO_SETTINGS_MODULE="judicialpredict_admin.settings"
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# Collect static assets at build time (uses STATIC_ROOT from settings).
-RUN python manage.py collectstatic --noinput
+# NOTE — `collectstatic` is deliberately NOT run at build time.
+# `manage.py runserver` serves static assets directly when DEBUG=True
+# (the dev path), and a separate prod Dockerfile / Gunicorn entry point
+# is the right place to bake in collected static for prod images.
+# Running it here breaks the dev build whenever `uv sync` lands the venv
+# at a path the runtime stage can't read (lockfile drift, etc.).
 
 EXPOSE 8000
 

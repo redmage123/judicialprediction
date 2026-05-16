@@ -28,6 +28,9 @@ out/
 db.sqlite3
 local_settings.py
 staticfiles/
+
+# Local-only docker-compose overrides (per-machine port remaps, etc).
+docker-compose.override.yml
 media/
 
 # IDE

@@ -1,0 +1,20 @@
+# Build-context exclusions — keep the runtime image small AND prevent the
+# host's bare-metal `.venv` (whose interpreter symlinks point at host
+# paths that don't exist in the container) from clobbering the venv the
+# Dockerfile's builder stage installs into `/app/.venv`.
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+node_modules/
+.git/
+.gitignore
+.dockerignore
+Dockerfile
+*.md
+*.log
+db.sqlite3
+local_settings.py
+staticfiles/
