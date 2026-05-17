@@ -82,6 +82,38 @@ pub(crate) enum MlCallOutcome {
 /// the JP-70 Python server contract (`grpc_server.py`).  The `x-tenant-id`
 /// metadata header is set from `tenant_id` so the ML service's own
 /// `audit_recorder` fires with the correct tenant context.
+/// Sprint-10: walk a `bio.mqs.scores` JSONB array for the highest term
+/// `<= target_year` with a non-null `post_mean`.  Returns
+/// `(score, term)` when an eligible row exists, `None` otherwise.
+///
+/// `target_year` is typically the year component of a case's `as_of_date`.
+/// The Martin-Quinn release stores one row per justice per Supreme Court
+/// term (calendar year-ish), so per-term lookup amounts to a single linear
+/// scan of a ~30-row array — cheap.
+pub(crate) fn resolve_mqs_for_year(
+    scores: &serde_json::Value,
+    target_year: i32,
+) -> Option<(f64, Option<i32>)> {
+    let arr = scores.as_array()?;
+    let mut best: Option<(i32, f64)> = None;
+    for entry in arr {
+        let term = entry.get("term").and_then(|v| v.as_i64()).map(|n| n as i32)?;
+        if term > target_year {
+            continue;
+        }
+        // post_mean may be null on sparse terms; skip those.
+        let Some(pm) = entry.get("post_mean").and_then(|v| v.as_f64()) else {
+            continue;
+        };
+        match best {
+            None => best = Some((term, pm)),
+            Some((best_term, _)) if term > best_term => best = Some((term, pm)),
+            _ => {}
+        }
+    }
+    best.map(|(term, score)| (score, Some(term)))
+}
+
 /// Canonicalise a wire-format jurisdiction slug to the value the ML
 /// service's `_JURISDICTION_MAP` expects.  Audit 2026-05-17 found that the
 /// front end emits `us-federal` / `ca-state` / `nj-state` while the encoder
@@ -306,6 +338,13 @@ pub struct Case {
     /// `input_features` (the operator's final values) so NLP-vs-operator
     /// accuracy can be evaluated later.
     pub nlp_suggestion: Option<Json<ExtractedFeatures>>,
+    /// S10.4 — snapshot of the Tier-A ideology source that fired at
+    /// prediction time.  Lets the case detail page name the exact source
+    /// + release + term used, rather than describing the menu of sources
+    /// available today.  `None` when no source fired (operator typed
+    /// ideologyDistance manually) or when the case was created before
+    /// Sprint 10.  Shape: see migration 20260722100000_cases_ideology_provenance.
+    pub ideology_provenance: Option<Json<serde_json::Value>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -503,6 +542,7 @@ pub(crate) async fn extract_features_from_text(
     pool: &PgPool,
     tenant_id: Uuid,
     text: &str,
+    as_of_year: Option<i32>,
 ) -> async_graphql::Result<ExtractedFeatures> {
     use ingest_fetcher::{
         classify_case_type, detect_outcome, extract_judge_names, normalize_judge_name,
@@ -552,6 +592,11 @@ pub(crate) async fn extract_features_from_text(
         mqs_score:      Option<f64>,
         mqs_term:       Option<i32>,
         mqs_release:    Option<String>,
+        // Sprint-10 — full per-term series for the date-aware resolver
+        // (S10.3). NULL when judge has no MQ data or only a latest
+        // snapshot. We fetch this only when `as_of_year` is supplied so
+        // the hot path stays cheap.
+        mqs_scores_raw: Option<serde_json::Value>,
         jcs_score:      Option<f64>,
         jcs_release:    Option<String>,
     }
@@ -574,6 +619,10 @@ pub(crate) async fn extract_features_from_text(
                     async_graphql::Error::new(format!("SET LOCAL failed: {e}"))
                 })?;
 
+                // Sprint-10: include the full `bio.mqs.scores` array so the
+                // date-aware MQ resolver can walk it when `as_of_year` is
+                // supplied. NULL-coalesce so existing callers (no as_of_year)
+                // pay no extra JSONB cost beyond an extra column read.
                 let row = sqlx::query(
                     "SELECT full_name,
                             (bio->'severity_proxy'->>'severity')::float8    AS severity,
@@ -583,6 +632,7 @@ pub(crate) async fn extract_features_from_text(
                             (bio->'mqs'->>'latest_score')::float8            AS mqs_score,
                             (bio->'mqs'->>'latest_term')::int                AS mqs_term,
                             (bio->'mqs'->>'release')                         AS mqs_release,
+                            (bio->'mqs'->'scores')                           AS mqs_scores_raw,
                             (bio->'jcs'->>'score')::float8                   AS jcs_score,
                             (bio->'jcs'->>'release')                         AS jcs_release
                      FROM judges
@@ -609,6 +659,7 @@ pub(crate) async fn extract_features_from_text(
                     mqs_score:      r.try_get("mqs_score").ok(),
                     mqs_term:       r.try_get("mqs_term").ok(),
                     mqs_release:    r.try_get("mqs_release").ok(),
+                    mqs_scores_raw: r.try_get("mqs_scores_raw").ok(),
                     jcs_score:      r.try_get("jcs_score").ok(),
                     jcs_release:    r.try_get("jcs_release").ok(),
                 })
@@ -649,15 +700,31 @@ pub(crate) async fn extract_features_from_text(
             mqs_score: Some(score),
             mqs_term,
             mqs_release,
+            mqs_scores_raw,
             ..
         }) => {
-            let distance = (score.abs() / 6.0).clamp(0.0, 1.0);
+            // Sprint-10: when `as_of_year` is supplied, prefer the highest
+            // term in `bio.mqs.scores[]` that is `<= as_of_year` AND has a
+            // non-null `post_mean`. Falls back to the precomputed
+            // `latest_*` snapshot when:
+            //   - as_of_year is None (the hot path), or
+            //   - the array is absent (legacy judges without `scores[]`), or
+            //   - no eligible term exists at or before as_of_year.
+            //
+            // The model still consumes a single scalar; this only changes
+            // WHICH term gets surfaced (and stamped in provenance).
+            let (effective_score, effective_term) = match (as_of_year, mqs_scores_raw) {
+                (Some(target_year), Some(scores_val)) => resolve_mqs_for_year(scores_val, target_year)
+                    .unwrap_or((*score, *mqs_term)),
+                _ => (*score, *mqs_term),
+            };
+            let distance = (effective_score.abs() / 6.0).clamp(0.0, 1.0);
             (
                 Some(distance),
                 Some("martin_quinn".to_string()),
                 mqs_release.clone(),
-                Some(*score),
-                *mqs_term,
+                Some(effective_score),
+                effective_term,
             )
         }
         Some(JudgeRow {
@@ -973,9 +1040,14 @@ impl Mutation {
         // (same code path as the extractFeatures query) and persist its
         // suggestion next to the operator's final values.  Done before the
         // INSERT tx because the extractor opens its own short transaction.
+        //
+        // S10.3 — createCase doesn't take an as-of-date yet (`cases.date_filed`
+        // arrives in Sprint 11); pass None so the resolver uses the MQ
+        // latest snapshot. When the column lands the call-site swaps None
+        // for the case's filing year — no other resolver change needed.
         let nlp_suggestion: Option<ExtractedFeatures> = match opinion_text.as_deref() {
             Some(text) if !text.trim().is_empty() => {
-                Some(extract_features_from_text(pool, tenant_id, text).await?)
+                Some(extract_features_from_text(pool, tenant_id, text, None).await?)
             }
             _ => None,
         };
@@ -1003,14 +1075,32 @@ impl Mutation {
         // Sprint-5: accept `title` from the operator case-intake form.
         let title = format!("{} case", input.case_type);
 
+        // S10.4 — build the ideology provenance snapshot. We pull it from
+        // `nlp_suggestion` because that's the path that actually consulted
+        // the Tier-A sources; when no opinion text was supplied (or no
+        // source fired) this stays NULL and the UI falls back to the
+        // legacy "available sources" footer.
+        let ideology_provenance_val: Option<serde_json::Value> =
+            nlp_suggestion.as_ref().and_then(|ef| {
+                let source = ef.ideology_source.as_ref()?;
+                Some(serde_json::json!({
+                    "source":      source,
+                    "release":     ef.ideology_release,
+                    "raw_score":   ef.ideology_cfscore,
+                    "term":        ef.ideology_term,
+                    "as_of_date":  chrono::Utc::now().format("%Y-%m-%d").to_string(),
+                    "resolved_at": chrono::Utc::now().to_rfc3339(),
+                }))
+            });
+
         let row = sqlx::query(
             r#"
             INSERT INTO cases
                 (tenant_id, title, jurisdiction,
                  input_features, prediction, recommendation, created_by,
-                 nlp_suggestion)
+                 nlp_suggestion, ideology_provenance)
             VALUES
-                ($1, $2, $3, $4, $5, $6, $7, $8)
+                ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             RETURNING id, created_at::text AS created_at_s
             "#,
         )
@@ -1022,6 +1112,7 @@ impl Mutation {
         .bind(&recommendation_val)
         .bind(operator_id)
         .bind(&nlp_suggestion_val)
+        .bind(&ideology_provenance_val)
         .fetch_one(&mut *tx)
         .await
         .map_err(|e| async_graphql::Error::new(format!("case insert failed: {e}")))?;
@@ -1070,6 +1161,9 @@ impl Mutation {
             created_by:     operator_id.map(|id| ID::from(id.to_string())),
             created_at:     created_at_s,
             nlp_suggestion: nlp_suggestion.map(Json),
+            // S10.4 — surface the just-persisted provenance back to the
+            // caller. Same value we wrote to `cases.ideology_provenance`.
+            ideology_provenance: ideology_provenance_val.map(Json),
         })
     }
 
@@ -1375,6 +1469,9 @@ impl Mutation {
             created_by:     created_by.map(|u| ID::from(u.to_string())),
             created_at,
             nlp_suggestion: nlp_suggestion.map(Json),
+            // S10.4 — repredictCase doesn't re-resolve ideology yet; the
+            // operator-supplied scalar stays. Sprint 11 may add re-resolve.
+            ideology_provenance: None,
         })
     }
 }

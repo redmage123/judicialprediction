@@ -158,6 +158,22 @@ export interface CounterRecommendation {
   note: string;
 }
 
+/** S10.4 — snapshot of the Tier-A ideology source used at prediction time. */
+export interface IdeologyProvenance {
+  /** "bonica_dime" | "martin_quinn" | "judicial_common_space" */
+  source: string;
+  /** Release tag of the upstream drop, e.g. "mqs-2023-v1". */
+  release: string | null;
+  /** Raw score in source's native scale. */
+  raw_score: number | null;
+  /** MQ term (year) if source is martin_quinn; null otherwise. */
+  term: number | null;
+  /** ISO date the resolver used for as-of-date (defaults to today). */
+  as_of_date: string;
+  /** ISO timestamp the snapshot was taken at. */
+  resolved_at: string;
+}
+
 /** A persisted case returned by createCase or the case(id) query. */
 export interface CaseResult {
   id: string;
@@ -167,6 +183,8 @@ export interface CaseResult {
   recommendation: RecommendationResult;
   createdBy: string | null;
   createdAt: string;
+  /** S10.4 — NULL for pre-Sprint-10 cases or operator-typed-only predictions. */
+  ideologyProvenance: IdeologyProvenance | null;
 }
 
 export interface PredictCaseOutcomeData {

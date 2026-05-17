@@ -62,6 +62,7 @@ async function fetchCase(id: string): Promise<CaseResult | null> {
           expectedValueTry
           expectedValueSettle
         }
+        ideologyProvenance
         createdBy
         createdAt
       }

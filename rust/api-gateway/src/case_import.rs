@@ -167,7 +167,9 @@ pub async fn do_create_case(
 
     let nlp_suggestion: Option<ExtractedFeatures> = match opinion_text.as_deref() {
         Some(text) if !text.trim().is_empty() => {
-            Some(extract_features_from_text(pool, tenant_id, text).await?)
+            // Sprint-10: bulk import has no per-row as-of-date; resolver
+            // uses the MQ latest snapshot.
+            Some(extract_features_from_text(pool, tenant_id, text, None).await?)
         }
         _ => None,
     };
@@ -250,6 +252,10 @@ pub async fn do_create_case(
         created_by:     operator_id.map(|id| ID::from(id.to_string())),
         created_at:     created_at_s,
         nlp_suggestion: nlp_suggestion.map(Json),
+        // S10.4 — importCases doesn't persist provenance yet (bulk path
+        // shares the gateway resolver but the per-row insert in
+        // case_import.rs doesn't pipe it through). Sprint 11 candidate.
+        ideology_provenance: None,
     })
 }
 

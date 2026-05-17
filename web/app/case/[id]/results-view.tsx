@@ -388,12 +388,13 @@ function ResultsLayout({ caseResult }: ResultsLayoutProps) {
       {/* Prediction history disclosure (S4.7) */}
       <PredictionHistoryDisclosure caseId={id} />
 
-      {/* S7.6 — Tier-A sources used disclosure.
-          This is the compliance footer the partner can hand to a client or
-          drop into a discovery response.  It states what data the system MAY
-          have drawn on, since per-case provenance persistence lands in
-          Sprint 8 (along with Martin-Quinn).  Tier-C is explicitly absent
-          here because the system never accepts those features. */}
+      {/* S10.5 — Tier-A sources used disclosure.
+          When `ideologyProvenance` is non-null (cases predicted after
+          Sprint 10 landed), the ideology section names the exact source +
+          release + term that fired at prediction time, frozen for this
+          case. When null (legacy cases or operator-typed-only flows), it
+          falls back to the S7.6 "available sources" copy. Tier-C is
+          explicitly absent — the system never accepts those features. */}
       <section
         aria-labelledby="sources-heading"
         className="mt-8 rounded-md border bg-muted/20 p-4 text-xs leading-relaxed text-muted-foreground"
@@ -408,6 +409,48 @@ function ResultsLayout({ caseResult }: ResultsLayoutProps) {
             corpus (`judges.bio.severity_proxy`). Operator-typed when no
             opinion text was supplied at intake.
           </li>
+          {caseResult.ideologyProvenance ? (
+            <li>
+              <strong>Ideology distance:</strong>{" "}
+              {(() => {
+                const p = caseResult.ideologyProvenance!;
+                const label =
+                  p.source === "martin_quinn"
+                    ? "Martin-Quinn dynamic ideal-point"
+                    : p.source === "judicial_common_space"
+                    ? "Judicial Common Space (JCS)"
+                    : p.source === "bonica_dime"
+                    ? "Bonica DIME cfscore"
+                    : p.source;
+                return (
+                  <>
+                    <strong>{label}</strong>
+                    {p.raw_score != null && (
+                      <>
+                        {" "}— raw score{" "}
+                        <span className="font-mono">{p.raw_score.toFixed(3)}</span>
+                      </>
+                    )}
+                    {p.term != null && (
+                      <>
+                        {" "}— term <span className="font-mono">{p.term}</span>
+                      </>
+                    )}
+                    {p.release && (
+                      <>
+                        {" "}— release{" "}
+                        <span className="font-mono">{p.release}</span>
+                      </>
+                    )}
+                    . Snapshot taken{" "}
+                    <span className="font-mono">{p.as_of_date}</span>; this
+                    case&apos;s recommendation will continue to cite this
+                    vintage even after the source updates.
+                  </>
+                );
+              })()}
+            </li>
+          ) : (
           <li>
             <strong>Ideology distance:</strong> three Tier-A sources, in
             precedence order:
@@ -452,6 +495,7 @@ function ResultsLayout({ caseResult }: ResultsLayoutProps) {
             </ul>
             Falls back to operator-typed when no source has the judge.
           </li>
+          )}
           <li>
             <strong>Attorney win rate, materiality score, procedural
             motions:</strong> operator-typed.

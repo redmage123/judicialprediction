@@ -267,6 +267,9 @@ impl Query {
                 // nlp_suggestion column.  Clients that need it use the
                 // single-case `case(id)` query.
                 nlp_suggestion: None,
+                // S10.5 — same rationale: ideology_provenance is fetched
+                // only by the single-case query for the compliance footer.
+                ideology_provenance: None,
             });
         }
 
@@ -315,7 +318,8 @@ impl Query {
         let row_opt = sqlx::query(
             r#"
             SELECT id, tenant_id, input_features, prediction, recommendation,
-                   created_by, created_at::text AS created_at_s, nlp_suggestion
+                   created_by, created_at::text AS created_at_s, nlp_suggestion,
+                   ideology_provenance
             FROM   cases
             WHERE  id = $1 AND tenant_id = $2
             "#,
@@ -364,6 +368,11 @@ impl Query {
             .transpose()
             .map_err(|e| async_graphql::Error::new(format!("case {row_id}: nlp_suggestion parse: {e}")))?;
 
+        // S10.5 — read the ideology provenance snapshot too (nullable;
+        // NULL for cases created before Sprint 10).
+        let ideology_provenance_val: Option<serde_json::Value> = row.try_get("ideology_provenance")
+            .map_err(|e| async_graphql::Error::new(format!("case {row_id}: ideology_provenance: {e}")))?;
+
         Ok(Some(Case {
             id: async_graphql::ID::from(row_id.to_string()),
             tenant_id: async_graphql::ID::from(tenant_id_col.to_string()),
@@ -373,6 +382,7 @@ impl Query {
             created_by: created_by.map(|u| async_graphql::ID::from(u.to_string())),
             created_at,
             nlp_suggestion: nlp_suggestion.map(Json),
+            ideology_provenance: ideology_provenance_val.map(Json),
         }))
     }
 
@@ -538,10 +548,15 @@ impl Query {
     /// suggestion and the persisted suggestion cannot drift.
     ///
     /// Pure-read; no audit row.  Requires a valid JWT but no special role.
+    ///
+    /// Sprint-10: optional `asOfYear` — when supplied, the MQ branch
+    /// resolves to the highest term `<= asOfYear` instead of the
+    /// latest-snapshot. JCS / DIME are single-point and ignore the param.
     async fn extract_features(
         &self,
         ctx: &Context<'_>,
         text: String,
+        #[graphql(name = "asOfYear")] as_of_year: Option<i32>,
     ) -> async_graphql::Result<crate::graphql_predict::ExtractedFeatures> {
         let TenantId(tenant_id) = *ctx
             .data::<TenantId>()
@@ -555,7 +570,7 @@ impl Query {
                 async_graphql::Error::new("cases store not configured (DATABASE_URL missing)")
             })?;
 
-        crate::graphql_predict::extract_features_from_text(pool, tenant_id, &text).await
+        crate::graphql_predict::extract_features_from_text(pool, tenant_id, &text, as_of_year).await
     }
 
     /// S6.12 — operator-facing read of the `audit_log` table, most-recent-first.

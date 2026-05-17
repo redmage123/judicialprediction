@@ -34,6 +34,9 @@ reqwest = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
+# S10.4 — chrono for the createCase provenance snapshot (resolved_at /
+# as_of_date timestamps).  Already in the workspace via ingest crates.
+chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
