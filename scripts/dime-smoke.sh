@@ -29,6 +29,24 @@ OPERATOR_PASSWORD="${OPERATOR_PASSWORD:-tenant1-pw}"
 echo "==> 1) Build dime-ingest"
 cargo build --release --manifest-path rust/Cargo.toml -p dime-ingest >/dev/null
 
+echo "==> 1.5) Seed a DIME-only judge (Foley on tax court). Used in step 4 below"
+echo "         to probe the DIME-only branch — MQ + JCS fixtures don't include Foley."
+docker exec -i judicialpredict_postgres psql -U judicialpredict -d judicialpredict_dev -q <<SQL >/dev/null
+INSERT INTO courts (id, tenant_id, name, jurisdiction, source, source_id)
+SELECT gen_random_uuid(), '$TENANT_ID',
+       'United States Tax Court', 'us-federal', 'courtlistener', 'tax'
+WHERE NOT EXISTS (
+  SELECT 1 FROM courts WHERE tenant_id='$TENANT_ID' AND source_id='tax'
+);
+WITH c AS (SELECT id FROM courts WHERE tenant_id='$TENANT_ID' AND source_id='tax')
+INSERT INTO judges (id, tenant_id, full_name, normalized_name, primary_court_id, bio, source)
+SELECT gen_random_uuid(), '$TENANT_ID', 'FOLEY', 'foley', c.id, '{}'::jsonb, 'courtlistener-test'
+FROM c
+WHERE NOT EXISTS (
+  SELECT 1 FROM judges WHERE tenant_id='$TENANT_ID' AND normalized_name='foley'
+);
+SQL
+
 echo "==> 2) Run ingest against the synthetic fixture"
 DATABASE_URL="$DB_URL" RUST_LOG=info \
   ./rust/target/release/dime-ingest ingest \
@@ -46,10 +64,24 @@ if [ "$COUNT" -lt 1 ]; then
 fi
 echo "    $COUNT judge(s) enriched"
 
-echo "==> 4) Pick a DIME-enriched judge for the extractFeatures probe"
+echo "==> 4) Pick a DIME-ONLY judge for the extractFeatures probe (the gateway's"
+echo "       MQ > JCS > DIME precedence means a judge with multiple sources"
+echo "       wouldn't surface DIME; we need to exercise the DIME-only branch)."
 PROBE_JUDGE=$(docker exec judicialpredict_postgres psql -U judicialpredict -d judicialpredict_dev -tA \
-  -c "SELECT upper(full_name) FROM judges WHERE tenant_id='$TENANT_ID' AND bio ? 'dime' LIMIT 1;" \
-  | tr -d ' ')
+  -c "SELECT upper(full_name)
+        FROM judges
+       WHERE tenant_id='$TENANT_ID'
+         AND bio ? 'dime'
+         AND NOT (bio ? 'mqs')
+         AND NOT (bio ? 'jcs')
+       LIMIT 1;" | tr -d ' ')
+if [ -z "$PROBE_JUDGE" ]; then
+    echo "FAIL: no judge has DIME-only enrichment (all DIME judges also have"
+    echo "      MQ or JCS data, so the DIME branch isn't exercised). Either"
+    echo "      ingest a DIME-only judge first, or rely on the dime parser"
+    echo "      tests for parser-level coverage."
+    exit 1
+fi
 echo "    probing with '$PROBE_JUDGE'"
 
 echo "==> 5) Authenticate via BFF"

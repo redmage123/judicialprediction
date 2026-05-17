@@ -82,6 +82,28 @@ pub(crate) enum MlCallOutcome {
 /// the JP-70 Python server contract (`grpc_server.py`).  The `x-tenant-id`
 /// metadata header is set from `tenant_id` so the ML service's own
 /// `audit_recorder` fires with the correct tenant context.
+/// Canonicalise a wire-format jurisdiction slug to the value the ML
+/// service's `_JURISDICTION_MAP` expects.  Audit 2026-05-17 found that the
+/// front end emits `us-federal` / `ca-state` / `nj-state` while the encoder
+/// expects `Federal` / `California` / `New_Jersey`.  Without this map the
+/// ML side silently dropped jurisdiction to the unknown-value sentinel for
+/// every prediction.
+///
+/// Accepts both the wire-format slugs AND the canonical names so older
+/// callers that already pass `Federal` keep working.
+fn canonicalise_jurisdiction(raw: &str) -> &str {
+    match raw {
+        "us-federal" | "us_federal" | "Federal" => "Federal",
+        "ca-state" | "California" => "California",
+        "nj-state" | "New_Jersey" => "New_Jersey",
+        // Unknown → pass through verbatim; the ML service still has its
+        // own unknown-value sentinel, but we want it to fire on values
+        // we genuinely don't recognise rather than ones we just failed
+        // to translate.
+        other => other,
+    }
+}
+
 pub(crate) async fn call_ml(
     ml: &MlInferenceClient,
     tenant_id: &uuid::Uuid,
@@ -99,7 +121,7 @@ pub(crate) async fn call_ml(
         format!("materiality_score:{}", features.materiality_score),
         format!("procedural_motion_count:{}", features.procedural_motion_count),
         format!("case_type:{}", features.case_type),
-        format!("jurisdiction:{}", features.jurisdiction),
+        format!("jurisdiction:{}", canonicalise_jurisdiction(&features.jurisdiction)),
     ];
 
     let mut req = tonic::Request::new(PredictCaseOutcomeRequest {
@@ -514,13 +536,13 @@ pub(crate) async fn extract_features_from_text(
         None
     };
 
-    // ── Judge lookup (severity proxy + S7 DIME + S8 MQ ideology) ────────────
+    // ── Judge lookup (severity + S7 DIME + S8 MQ + S9 JCS ideology) ─────────
     // Take the first extracted candidate as the primary judge (opinion header
     // order is "writer first" in CourtListener exports).  If none, all
     // judge-derived fields stay None.
     //
-    // Single round-trip — the same row carries severity_proxy + DIME +
-    // Martin-Quinn enrichment if any of them were previously written.
+    // Single round-trip — the same row carries severity_proxy + DIME + MQ +
+    // JCS enrichment if any of them were previously written.
     struct JudgeRow {
         full_name:      Option<String>,
         severity:       Option<f64>,
@@ -530,6 +552,8 @@ pub(crate) async fn extract_features_from_text(
         mqs_score:      Option<f64>,
         mqs_term:       Option<i32>,
         mqs_release:    Option<String>,
+        jcs_score:      Option<f64>,
+        jcs_release:    Option<String>,
     }
 
     let judge_row: Option<JudgeRow> = match judge_candidates.first() {
@@ -558,7 +582,9 @@ pub(crate) async fn extract_features_from_text(
                             (bio->'dime'->>'release')                        AS dime_release,
                             (bio->'mqs'->>'latest_score')::float8            AS mqs_score,
                             (bio->'mqs'->>'latest_term')::int                AS mqs_term,
-                            (bio->'mqs'->>'release')                         AS mqs_release
+                            (bio->'mqs'->>'release')                         AS mqs_release,
+                            (bio->'jcs'->>'score')::float8                   AS jcs_score,
+                            (bio->'jcs'->>'release')                         AS jcs_release
                      FROM judges
                      WHERE tenant_id = $1 AND normalized_name = $2",
                 )
@@ -583,6 +609,8 @@ pub(crate) async fn extract_features_from_text(
                     mqs_score:      r.try_get("mqs_score").ok(),
                     mqs_term:       r.try_get("mqs_term").ok(),
                     mqs_release:    r.try_get("mqs_release").ok(),
+                    jcs_score:      r.try_get("jcs_score").ok(),
+                    jcs_release:    r.try_get("jcs_release").ok(),
                 })
             }
         }
@@ -594,15 +622,22 @@ pub(crate) async fn extract_features_from_text(
         .map(|r| (r.severity, r.full_name.clone(), r.cases_analyzed))
         .unwrap_or((None, None, None));
 
-    // Precedence: MQ > DIME. MQ is voting-record-derived (closer to "how
-    // the judge rules") while DIME is a campaign-finance proxy. The UI
-    // surfaces only the source that actually fed the score, so two chips
-    // are never shown for the same field.
+    // Precedence: MQ > JCS > DIME.
+    //
+    //   * MQ  — voting-record-derived, SCOTUS-only. Most direct signal
+    //           when available.
+    //   * JCS — joint-scaled voting-record, federal Circuit + District.
+    //           Fills MQ's coverage gap for lower courts.
+    //   * DIME — campaign-finance proxy; broadest coverage including
+    //           state high courts.
+    //
+    // Only one chip rendered in the UI per the Sprint-7 convention.
     //
     // Scaling rationale:
     //   DIME cfscore runs roughly [-2, 2]; divide by 2.
     //   MQ post_mean runs roughly [-6, 6]; divide by 6.
-    // Both clamp to [0, 1] for the model.
+    //   JCS score  runs roughly [-1, 1];  divide by 1 (already on [0, 1] absvalue).
+    // All clamp to [0, 1] for the model.
     let (
         ideology_distance,
         ideology_source,
@@ -623,6 +658,20 @@ pub(crate) async fn extract_features_from_text(
                 mqs_release.clone(),
                 Some(*score),
                 *mqs_term,
+            )
+        }
+        Some(JudgeRow {
+            jcs_score: Some(score),
+            jcs_release,
+            ..
+        }) => {
+            let distance = score.abs().clamp(0.0, 1.0);
+            (
+                Some(distance),
+                Some("judicial_common_space".to_string()),
+                jcs_release.clone(),
+                Some(*score),
+                None,
             )
         }
         Some(JudgeRow {

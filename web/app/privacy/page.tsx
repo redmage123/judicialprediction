@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { PolicyShell } from "@/components/layout/policy-shell";
 
 export const metadata: Metadata = {
   title: "Privacy Policy — JudicialPredict",
@@ -13,6 +14,7 @@ export const metadata: Metadata = {
 // cookie banner's deep links don't break.
 export default function PrivacyPage() {
   return (
+    <PolicyShell>
     <main className="mx-auto max-w-3xl px-6 py-12 text-sm leading-relaxed">
       <h1 className="mb-2 text-3xl font-bold tracking-tight">Privacy Policy</h1>
       <p className="text-xs text-muted-foreground">
@@ -231,5 +233,6 @@ export default function PrivacyPage() {
         </p>
       </section>
     </main>
+    </PolicyShell>
   );
 }

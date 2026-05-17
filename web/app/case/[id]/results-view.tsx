@@ -409,7 +409,7 @@ function ResultsLayout({ caseResult }: ResultsLayoutProps) {
             opinion text was supplied at intake.
           </li>
           <li>
-            <strong>Ideology distance:</strong> two Tier-A sources, in
+            <strong>Ideology distance:</strong> three Tier-A sources, in
             precedence order:
             <ul className="mt-1 list-[circle] space-y-1 pl-5">
               <li>
@@ -418,7 +418,7 @@ function ResultsLayout({ caseResult }: ResultsLayoutProps) {
                 roughly [-6, 6] voting-record space to [0, 1] around a
                 neutral anchor. <em>Preferred when available</em> —
                 voting-record-based, closer to &ldquo;how the judge
-                rules&rdquo;.
+                rules&rdquo;. SCOTUS only.
                 Methodology:{" "}
                 <a className="underline" href="https://mqscores.lsa.umich.edu/" rel="noreferrer">
                   Martin &amp; Quinn (2002), updated annually
@@ -426,10 +426,23 @@ function ResultsLayout({ caseResult }: ResultsLayoutProps) {
                 .
               </li>
               <li>
+                <strong>Judicial Common Space (JCS)</strong>{" "}
+                (`judges.bio.jcs.score`). Extends Martin-Quinn beyond
+                SCOTUS to federal Circuit and District judges via
+                Epstein/Martin/Quinn/Segal joint-scaling. Used when MQ
+                isn&apos;t available.
+                Methodology:{" "}
+                <a className="underline" href="https://epstein.wustl.edu/judicial-common-space" rel="noreferrer">
+                  Epstein, Martin, Quinn &amp; Segal (2007)
+                </a>
+                .
+              </li>
+              <li>
                 <strong>Bonica DIME</strong>{" "}
                 (`judges.bio.dime.cfscore`), scaled from the
-                campaign-finance [-2, 2] space to [0, 1]. Used when MQ
-                isn&apos;t available for the judge.
+                campaign-finance [-2, 2] space to [0, 1]. Used when
+                neither MQ nor JCS has the judge. Broadest coverage,
+                including state high courts.
                 Methodology:{" "}
                 <a className="underline" href="https://data.stanford.edu/dime" rel="noreferrer">
                   Bonica, Adam. DIME, Stanford
@@ -437,8 +450,7 @@ function ResultsLayout({ caseResult }: ResultsLayoutProps) {
                 .
               </li>
             </ul>
-            Falls back to operator-typed when neither source has the
-            judge.
+            Falls back to operator-typed when no source has the judge.
           </li>
           <li>
             <strong>Attorney win rate, materiality score, procedural

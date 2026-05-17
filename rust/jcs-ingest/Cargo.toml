@@ -1,0 +1,29 @@
+[package]
+name = "jcs-ingest"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "jcs_ingest"
+path = "src/lib.rs"
+
+[[bin]]
+name = "jcs-ingest"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+uuid = { workspace = true }
+csv = "1.3"
+# Re-use the Sprint-7 matcher + name preprocessing so all three ingests
+# stay in lockstep on judge-row resolution.
+dime-ingest = { path = "../dime-ingest" }
+ingest-fetcher = { path = "../ingest-fetcher" }

@@ -58,6 +58,19 @@ export function CaseStatsCards({ stats }: { stats: CaseStats }) {
   // ---- populated state: 4-card summary row --------------------------------
   return (
     <section className="container mx-auto pt-8 px-4 max-w-5xl">
+      {/* Audit finding (2026-05-17): the champion model was trained on
+          synthetic data, which is why early dashboards show every case
+          collapsing to 50% / Settle.  Show this disclosure until S11
+          retrains on a real corpus. */}
+      <div
+        role="status"
+        className="mb-6 rounded-md border border-amber-300 bg-amber-50 px-4 py-3 text-xs text-amber-900"
+      >
+        <strong>Beta model:</strong> the current champion was trained on{" "}
+        <span className="font-mono">synthetic_cases_v0.parquet</span>. Treat
+        predictions as directional until the real-corpus retrain ships
+        (tracked as Sprint&nbsp;11).
+      </div>
       <div className="flex flex-wrap items-end justify-between gap-3 mb-6">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Dashboard</h1>

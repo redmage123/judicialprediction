@@ -866,14 +866,32 @@ pub async fn build_app(
         crate::graphql_predict::MlInferenceClient { inner: InferenceServiceClient::new(channel) }
     };
 
-    let schema = Schema::build(Query, crate::graphql_predict::Mutation, EmptySubscription)
-        // gRPC client for ml-inference-svc (S5.4 / JP-71).  connect_lazy lets the
-        // gateway start even if ml-inference is briefly unreachable.
-        .data(ml_client.clone())
-        .data(cases_pool.clone())
-        .data(audit_recorder.clone())
-        .data(fs_client)
-        .finish();
+    // Audit finding (2026-05-17): GraphQL introspection should be disabled
+    // in prod (OWASP A05).  Gate on JP_ENV / NODE_ENV — when neither says
+    // "development" we treat the deployment as prod-grade.  Dev / CI keep
+    // introspection on so GraphiQL + tooling still work.
+    let is_dev_env = std::env::var("JP_ENV")
+        .or_else(|_| std::env::var("NODE_ENV"))
+        .map(|v| v.eq_ignore_ascii_case("development") || v.eq_ignore_ascii_case("dev"))
+        .unwrap_or(true);
+
+    let mut schema_builder = Schema::build(
+        Query,
+        crate::graphql_predict::Mutation,
+        EmptySubscription,
+    )
+    // gRPC client for ml-inference-svc (S5.4 / JP-71).  connect_lazy lets the
+    // gateway start even if ml-inference is briefly unreachable.
+    .data(ml_client.clone())
+    .data(cases_pool.clone())
+    .data(audit_recorder.clone())
+    .data(fs_client);
+
+    if !is_dev_env {
+        schema_builder = schema_builder.disable_introspection();
+        tracing::info!("GraphQL introspection disabled (JP_ENV / NODE_ENV not in dev)");
+    }
+    let schema = schema_builder.finish();
 
     let rate_store: Arc<dyn RateLimitStore> =
         Arc::new(MemoryStore::new(rate_config.requests_per_min));

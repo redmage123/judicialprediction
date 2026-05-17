@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { PolicyShell } from "@/components/layout/policy-shell";
 
 export const metadata: Metadata = {
   title: "Cookie Policy — JudicialPredict",
@@ -11,6 +12,7 @@ export const metadata: Metadata = {
 // though they aren't strictly "cookies".
 export default function CookiesPage() {
   return (
+    <PolicyShell>
     <main className="mx-auto max-w-3xl px-6 py-12 text-sm leading-relaxed">
       <h1 className="mb-2 text-3xl font-bold tracking-tight">Cookie Policy</h1>
       <p className="text-xs text-muted-foreground">
@@ -128,5 +130,6 @@ export default function CookiesPage() {
         </p>
       </section>
     </main>
+    </PolicyShell>
   );
 }

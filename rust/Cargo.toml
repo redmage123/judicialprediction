@@ -11,6 +11,7 @@ members = [
     "ingest-fetcher",
     "dime-ingest",
     "mqs-ingest",
+    "jcs-ingest",
     "feature-deriver",
     "event-broker",
     "partner-gateway",

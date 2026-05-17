@@ -569,6 +569,26 @@ export function IntakeForm() {
                     )}
                   </span>
                 )}
+                {prefilled.ideologyDistance && extractCtx?.ideologySource === "judicial_common_space" && (
+                  <span
+                    className="inline-flex items-center gap-1 rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-indigo-800"
+                    title={
+                      "Judicial Common Space (Epstein/Martin/Quinn/Segal joint-scaling). " +
+                      "Voting-record-based; extends Martin-Quinn beyond SCOTUS to federal Circuit + District judges. " +
+                      (extractCtx.ideologyCfscore != null
+                        ? `Score: ${extractCtx.ideologyCfscore.toFixed(2)} (range ≈ -1 to +1; lower = more liberal). `
+                        : "") +
+                      `Release: ${extractCtx.ideologyRelease ?? "unknown"}.`
+                    }
+                  >
+                    JCS
+                    {extractCtx.ideologyCfscore != null && (
+                      <span className="font-mono normal-case tracking-normal">
+                        {extractCtx.ideologyCfscore.toFixed(2)}
+                      </span>
+                    )}
+                  </span>
+                )}
                 {prefilled.ideologyDistance && extractCtx?.ideologySource === "bonica_dime" && (
                   <span
                     className="inline-flex items-center gap-1 rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-blue-700"

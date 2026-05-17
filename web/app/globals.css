@@ -86,4 +86,17 @@
     color: hsl(var(--foreground));
     font-family: Arial, Helvetica, sans-serif;
   }
+  /* Audit finding UX-1 (2026-05-17): the cookie banner is fixed bottom-0
+     and used to overlap the last rows of long pages (cases list, audit
+     log).  The banner toggles this class on <body> while open; we
+     reserve enough page-bottom space for it on phone (taller, two-line
+     banner) and desktop (shorter). */
+  body.has-cookie-banner {
+    padding-bottom: 12rem;
+  }
+  @media (min-width: 640px) {
+    body.has-cookie-banner {
+      padding-bottom: 7rem;
+    }
+  }
 }

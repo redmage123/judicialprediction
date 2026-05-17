@@ -1,0 +1,26 @@
+judge_name,court,jcs,judge_id
+"Marshall, Thurgood",scotus,-0.73,emqs-marshall
+"Roberts, John G.",scotus,0.46,emqs-roberts
+"Ginsburg, Ruth Bader",scotus,-0.57,emqs-ginsburg
+"Tannenwald, Theodore",tax,-0.18,emqs-tannenwald
+"Posner, Richard",ca7,0.21,emqs-posner
+"Easterbrook, Frank",ca7,0.43,emqs-easterbrook
+"Wood, Diane",ca7,-0.32,emqs-wood
+"Hand, Learned",ca2,0.04,emqs-hand
+"Brown, Janice Rogers",cadc,0.61,emqs-brownjr
+"Williams, Stephen",cadc,0.38,emqs-williamsst
+"Sotomayor, Sonia",scotus,-0.69,emqs-sotomayor
+"Kagan, Elena",scotus,-0.55,emqs-kagan
+"Alito, Samuel",scotus,0.59,emqs-alito
+"Thomas, Clarence",scotus,0.75,emqs-thomas
+"Breyer, Stephen",scotus,-0.41,emqs-breyer
+"Scalia, Antonin",scotus,0.66,emqs-scalia
+"Souter, David",scotus,-0.12,emqs-souter
+"Kennedy, Anthony",scotus,0.22,emqs-kennedy
+"Stevens, John Paul",scotus,-0.39,emqs-stevens
+"Estrada, Miguel",cadc,,emqs-estrada
+"Anon, Anonymous",tax,NA,emqs-anon
+"Sutton, Jeffrey",ca6,0.35,emqs-sutton
+"Lipez, Kermit",ca1,-0.27,emqs-lipez
+"Howard, Jeffrey",ca1,0.18,emqs-howardjef
+"Wilkinson, J. Harvie",ca4,0.48,emqs-wilkinson

@@ -45,6 +45,19 @@ export function CookieBanner() {
     setOpen(readChoice() === null);
   }, []);
 
+  // Push page-bottom padding so the banner doesn't overlap the
+  // last rows of long pages (audit finding UX-1). We add the class to
+  // <body> rather than each page so every route picks it up — pages
+  // that don't end in a scrollable area just gain harmless padding.
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    if (open) {
+      document.body.classList.add("has-cookie-banner");
+      return () => document.body.classList.remove("has-cookie-banner");
+    }
+    document.body.classList.remove("has-cookie-banner");
+  }, [open]);
+
   if (!open) return null;
 
   const close = (choice: Exclude<Choice, null>) => {
