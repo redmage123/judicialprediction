@@ -1,12 +1,32 @@
 """
-Train XGBoost + LightGBM + CatBoost on synthetic case data.
-Calibrates predictions via Platt scaling (LogisticRegression on model scores).
-Logs each run to MLflow (local file backend at mlruns/).
-Tags the lowest-Brier-score model as 'champion'.
-Saves conformal calibration residuals as an MLflow artifact.
+Train base GBMs + LR baseline + stacking blender on synthetic case data.
+
+Base models:
+  - XGBoost   (gradient-boosted trees)
+  - LightGBM  (gradient-boosted trees)
+  - CatBoost  (gradient-boosted trees)
+  - Logistic regression (architecturally-diverse baseline — different
+    inductive bias from the trees; catches when trees overfit and gives
+    the stacker a non-tree signal to blend)
+
+Stacking blender (Sprint 12.5):
+  - Out-of-fold (K=5) predictions from each base model on the training
+    set form a (n_train, 4) feature matrix.
+  - Logistic regression meta-learner trained on (OOF_probs, y_train)
+    learns optimal per-model blending weights.
+  - At inference: each base model predicts on the input, the meta-learner
+    blends those four probabilities.
+
+Each model is Platt-calibrated (LogisticRegression on its raw scores) and
+logged to MLflow (local file backend at mlruns/).  Lowest-Brier-score
+model is tagged 'champion' and written to mlruns/champion.json — the
+gateway's predict.py reads this on every prediction.
+
+Conformal calibration residuals from each model's cal split are saved as
+an MLflow artifact for the gateway's split-conformal CI machinery.
 
 Usage:
-    uv run python scripts/train_first_models.py --data data/synthetic_cases_v0.parquet
+    uv run python scripts/train_first_models.py --data data/synthetic_cases_v1.parquet
 """
 from __future__ import annotations
 
@@ -23,8 +43,9 @@ from catboost import CatBoostClassifier
 from lightgbm import LGBMClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import brier_score_loss, log_loss
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import OrdinalEncoder
+from sklearn.model_selection import StratifiedKFold, train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OrdinalEncoder, StandardScaler
 from xgboost import XGBClassifier
 
 CATEGORICAL_FEATURES = ["case_type", "jurisdiction"]
@@ -66,7 +87,7 @@ def encode_features(df: pd.DataFrame, encoder: OrdinalEncoder | None = None):
 
 class PlattCalibratedModel:
     """
-    Thin wrapper: a pre-fit GBM + a LogisticRegression Platt scaler.
+    Thin wrapper: a pre-fit base model + a LogisticRegression Platt scaler.
     Exposes predict_proba so it works with mlflow.sklearn.log_model.
     """
 
@@ -75,7 +96,7 @@ class PlattCalibratedModel:
         self.platt = platt
 
     def _raw_scores(self, X: np.ndarray) -> np.ndarray:
-        """Raw (uncalibrated) positive-class probabilities from the GBM."""
+        """Raw (uncalibrated) positive-class probabilities from the base."""
         return self.base_model.predict_proba(X)[:, 1].reshape(-1, 1)
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
@@ -94,7 +115,53 @@ class PlattCalibratedModel:
         return self
 
 
-def train_and_evaluate(
+class StackedEnsemble:
+    """
+    Sprint 12.5 stacking blender.
+
+    Holds N already-fit + Platt-calibrated base models plus a logistic-
+    regression meta-learner trained on out-of-fold base probabilities.
+    Inference: each base model produces a calibrated probability; the
+    meta-learner blends them.
+
+    Why stacking instead of simple averaging:
+      - Equal-weight averaging is dominated by stacking on most tabular
+        benchmarks because base models have wildly different per-row
+        accuracy.
+      - LR on top stays interpretable (one coefficient per base model =
+        how much that model is trusted).
+      - Calibration stays sensible because the base inputs are already
+        calibrated (Platt) — the meta-LR is blending probabilities, not
+        raw scores.
+    """
+
+    def __init__(self, base_models: list, meta: LogisticRegression) -> None:
+        # `base_models` is a list of PlattCalibratedModel instances; we
+        # rely on each having predict_proba(X) -> (n, 2).
+        self.base_models = base_models
+        self.meta = meta
+
+    def _base_probs(self, X: np.ndarray) -> np.ndarray:
+        """Stack each base model's P(class=1) into shape (n_samples, n_base)."""
+        cols = [m.predict_proba(X)[:, 1] for m in self.base_models]
+        return np.column_stack(cols)
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        Z = self._base_probs(X)
+        p1 = self.meta.predict_proba(Z)[:, 1]
+        return np.column_stack([1 - p1, p1])
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        return (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
+
+    def get_params(self, deep=True):
+        return {}
+
+    def set_params(self, **params):
+        return self
+
+
+def train_and_evaluate_v2(
     X_train: np.ndarray,
     y_train: np.ndarray,
     X_test: np.ndarray,
@@ -103,7 +170,12 @@ def train_and_evaluate(
     base_model,
     tracking_uri: str,
     seed: int = 42,
-) -> dict:
+):
+    """
+    Sprint 12.5: returns (result_dict, calibrated_model) so the stacker
+    can reuse the already-trained + Platt-calibrated model without
+    refitting. Otherwise identical to the original train_and_evaluate.
+    """
     mlflow.set_tracking_uri(tracking_uri)
     mlflow.set_experiment("judicialpredict-gbm-ensemble")
 
@@ -147,13 +219,16 @@ def train_and_evaluate(
         f"  {model_name:10s}  Brier={brier:.4f}  ECE={ece_val:.4f}"
         f"  LogLoss={logloss:.4f}  run_id={run_id}"
     )
-    return {
-        "model_name": model_name,
-        "brier": brier,
-        "ece": ece_val,
-        "log_loss": logloss,
-        "run_id": run_id,
-    }
+    return (
+        {
+            "model_name": model_name,
+            "brier": brier,
+            "ece": ece_val,
+            "log_loss": logloss,
+            "run_id": run_id,
+        },
+        calibrated,
+    )
 
 
 def main(data_path: str, seed: int = 42) -> None:
@@ -169,6 +244,10 @@ def main(data_path: str, seed: int = 42) -> None:
         X, y, test_size=0.2, random_state=seed, stratify=y
     )
 
+    # Sprint 12.5 — four base models with intentionally diverse inductive
+    # biases.  The three GBMs find non-linear interactions; the LR
+    # baseline catches the linear-additive signal and disagrees with the
+    # trees enough to give the stacker something to blend.
     models = [
         (
             "xgboost",
@@ -201,14 +280,40 @@ def main(data_path: str, seed: int = 42) -> None:
                 verbose=0,
             ),
         ),
+        (
+            "logistic_regression",
+            # Pipeline so the scaler is fit on training data and the
+            # standardised features land in the LR without separate
+            # preprocessing plumbing.  LR is the architecturally-diverse
+            # member of the ensemble (linear inductive bias).
+            Pipeline(
+                steps=[
+                    ("scaler", StandardScaler()),
+                    (
+                        "lr",
+                        LogisticRegression(
+                            max_iter=2000,
+                            C=1.0,
+                            solver="lbfgs",
+                            random_state=seed,
+                        ),
+                    ),
+                ]
+            ),
+        ),
     ]
 
     print(f"\nTracking URI : {tracking_uri}")
     print(f"Train/test   : {len(X_train)} / {len(X_test)} samples\n")
 
     results = []
+    # Hold each model's PlattCalibratedModel reference too, so the
+    # stacker can re-use them at the end without retraining.  Same
+    # objects MLflow already logged inside train_and_evaluate.
+    calibrated_by_name: dict[str, PlattCalibratedModel] = {}
+
     for name, model in models:
-        r = train_and_evaluate(
+        r, calibrated = train_and_evaluate_v2(
             X_train, y_train, X_test, y_test,
             model_name=name,
             base_model=model,
@@ -216,7 +321,107 @@ def main(data_path: str, seed: int = 42) -> None:
             seed=seed,
         )
         results.append(r)
+        calibrated_by_name[name] = calibrated
 
+    # ── Sprint 12.5 — stacking blender ────────────────────────────────────
+    # Standard practice for tabular stacking:
+    #   1. Out-of-fold (K=5) predictions on the training set form the
+    #      meta-features.  We can't use in-sample base predictions
+    #      because they'd leak the labels into the meta-learner.
+    #   2. Logistic regression on (OOF_probs, y_train) learns the
+    #      blending weights.
+    #   3. The "production" stacker bundles the already-fit base models
+    #      (trained on the full training set during step (1) below) with
+    #      the meta-LR for inference.
+    print("\nTraining stacking blender (K=5 OOF + LR meta)...")
+    base_names = [n for n, _ in models]
+    n_train = len(X_train)
+    n_base = len(base_names)
+    oof_probs = np.zeros((n_train, n_base), dtype=float)
+
+    kf = StratifiedKFold(n_splits=5, shuffle=True, random_state=seed)
+    for fold_idx, (fit_idx, val_idx) in enumerate(kf.split(X_train, y_train)):
+        for col, (name, model_template) in enumerate(models):
+            # `clone` keeps the original templates intact so the
+            # subsequent "final fit on full train" loop below isn't
+            # contaminated.
+            from sklearn.base import clone
+            fold_model = clone(model_template)
+            fold_model.fit(X_train[fit_idx], y_train[fit_idx])
+            oof_probs[val_idx, col] = fold_model.predict_proba(X_train[val_idx])[:, 1]
+
+    meta = LogisticRegression(max_iter=2000, random_state=seed)
+    meta.fit(oof_probs, y_train)
+
+    # Build the production stacker: it needs each base model trained on
+    # the FULL training set (not just K-1 folds), so we just reuse the
+    # already-fit calibrated models from above. They were fit on a
+    # train/cal split, so the "fit" portion is ~80% of X_train rather
+    # than 100% — acceptable, and consistent with how the gateway sees
+    # them when they're champion individually.
+    stacker = StackedEnsemble(
+        base_models=[calibrated_by_name[n] for n in base_names],
+        meta=meta,
+    )
+
+    # Evaluate + log the stacker as its own MLflow run so champion
+    # selection treats it as a peer of the four base models.
+    p_test_stacker = stacker.predict_proba(X_test)[:, 1]
+    stacker_brier = brier_score_loss(y_test, p_test_stacker)
+    stacker_ece = ece(y_test, p_test_stacker)
+    stacker_logloss = log_loss(y_test, p_test_stacker)
+
+    mlflow.set_tracking_uri(tracking_uri)
+    mlflow.set_experiment("judicialpredict-gbm-ensemble")
+    with mlflow.start_run(run_name="stacked_ensemble") as run:
+        mlflow.log_params({
+            "model": "stacked_ensemble",
+            "base_models": ",".join(base_names),
+            "meta": "logistic_regression",
+            "cv_folds": 5,
+            "seed": seed,
+        })
+        mlflow.log_metrics({
+            "brier_score": stacker_brier,
+            "ece": stacker_ece,
+            "log_loss": stacker_logloss,
+        })
+        # Log the meta-LR coefficients so the audit story can show how
+        # much each base model is trusted ("CatBoost weighted 0.6, LR
+        # weighted 0.2, ..."). Useful for the compliance footer story.
+        for name, coef in zip(base_names, meta.coef_[0]):
+            mlflow.log_metric(f"meta_coef_{name}", float(coef))
+        mlflow.set_tag("model_name", "stacked_ensemble")
+        mlflow.sklearn.log_model(stacker, artifact_path="model")
+
+        # Conformal residuals — re-use the test-set predictions as the
+        # calibration source. (We don't have a separate cal split for
+        # the stacker because the base models already consumed one.)
+        residuals = np.abs(y_test.astype(float) - p_test_stacker)
+        with tempfile.TemporaryDirectory() as tmp:
+            res_path = os.path.join(tmp, "conformal_residuals.npy")
+            np.save(res_path, residuals)
+            mlflow.log_artifact(res_path)
+
+        stacker_run_id = run.info.run_id
+
+    print(
+        f"  {'stacked':10s}  Brier={stacker_brier:.4f}  ECE={stacker_ece:.4f}"
+        f"  LogLoss={stacker_logloss:.4f}  run_id={stacker_run_id}"
+    )
+    print(f"    meta coefs: " + " ".join(
+        f"{n}={c:+.2f}" for n, c in zip(base_names, meta.coef_[0])
+    ))
+
+    results.append({
+        "model_name": "stacked_ensemble",
+        "brier": stacker_brier,
+        "ece": stacker_ece,
+        "log_loss": stacker_logloss,
+        "run_id": stacker_run_id,
+    })
+
+    # ── Champion selection (now across 5 candidates) ──────────────────────
     champion = min(results, key=lambda r: r["brier"])
     mlflow.set_tracking_uri(tracking_uri)
     client = mlflow.tracking.MlflowClient()

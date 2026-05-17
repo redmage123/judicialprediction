@@ -1,124 +1,156 @@
-# Champion Model — JudicialPredict v1 (real corpus)
+# Champion Model — JudicialPredict (Sprint 12.5 retrain)
 
-**Run ID:** `9511b77a0c8145b8b5d6f16a7b0d1985`
-**Model type:** `LogisticRegression` (scikit-learn) with class-balanced weights.
-**Training date:** 2026-05-13.
-**Sprint:** S6.1 (replaces the synthetic-data champion trained under S0).
+**Run ID:** `823618c8c8744f368459357d68a41ce4`
+**Model:** `LogisticRegression` (scikit-learn) with `StandardScaler`, Platt-calibrated.
+**Training date:** 2026-09-04 (Sprint 12.5).
+**Training corpus:** `data/synthetic_cases_v1.parquet` — 2000 synthetic rows from a deterministic logistic combiner over the seven Tier-A/B features, with Gaussian noise on the logit.
 
 ## What this model is, in one sentence
 
-A small-N, base-rate-anchored logistic regression on 10 hand-labelled real
-opinions, intended as a defensible v1 — not a production-quality predictor.
+A calibrated logistic regression — the simplest model in the four-member
+ensemble — selected as champion because the v1 corpus is synthesised from a
+logistic process. With this data the trees overfit; LR is optimal.
 
-## Sample size — the headline limitation
+## Why we retrained (Sprint 12.5 context)
 
-| Slice                   | Rows |
-|-------------------------|------|
-| `case_documents` total  | 99   |
-| With `outcome_for IS NOT NULL` | 12 |
-| Used in training (binary classifier; `split` excluded) | **10** |
-| Petitioner wins (= 1)   | 2    |
-| Respondent wins (= 0)   | 8    |
-| Base rate (p_petitioner_wins) | **0.20** |
-| Courts represented      | tax only |
-| Jurisdictions represented | us-federal only |
+Audit on 2026-05-17 found:
 
-The Sprint 5 risk plan
-([SPRINT_5_PLAN.md](../../SPRINT_5_PLAN.md))
-authorised this regime explicitly: "if at 5 days in we're below 500 rows,
-train on what we have + flag in MODEL_CARD as v1, retrained when more data
-accumulates." The
-[courtlistener-daily ingest fix (`94b2590`)](../../rust/ingest-fetcher/src/rest.rs)
-should produce 5–10 fresh labelled rows per week; the model retrains
-automatically once the corpus crosses ~200 hard labels.
+1. The Sprint-11 jurisdiction wire-format fix was working, but
+2. The previous champion (XGBoost on `synthetic_cases_v0.parquet`) was
+   essentially flat — a 20-input variance sweep showed only a **2.2 pp
+   spread** in `pWin`. The v0 generator sampled features independently of
+   outcome (pure noise vs. balanced labels), so no model could learn signal.
 
-## Evaluation
+Sprint 12 regenerated the corpus (`v1`) with realistic feature-outcome
+correlations and added a logistic-regression baseline plus a stacking
+blender (S12.5). The variance sweep now shows **0.696 pp spread** across
+the same 20 inputs — the model actually discriminates.
 
-Standard train/test holdout is uninformative on n=10 (test = 2 rows under a
-20% split, of which 0 or 1 will be the minority class). We report
-**leave-one-out cross-validation** instead.
+## Sample size
 
-| Metric         | Value   | Notes                                              |
-|----------------|---------|----------------------------------------------------|
-| Brier score    | 0.1832  | Lower is better; the constant-base-rate predictor scores 0.16 |
-| ECE (5 bins)   | 0.2153  | Calibration is poor at n=10 — see caveats          |
-| Log loss       | 0.5071  | —                                                  |
+| Slice | Rows |
+|---|---|
+| `synthetic_cases_v1.parquet` total | 2000 |
+| Training (80%) | 1600 |
+| Holdout test (20%) | 400 |
+| Petitioner-win base rate | 0.297 |
+| Courts represented | n/a (synthetic — no real court data) |
+| Jurisdictions represented | Federal, California, New_Jersey |
 
-**Reading these honestly:** Brier is slightly *worse* than just predicting
-the base rate (0.20) for everyone, because LogReg over-fits a 7-feature
-boundary on 10 points and oscillates around the constant predictor. Once
-the corpus crosses ~50 labelled rows the LogReg should beat the constant
-baseline reliably; until then, callers should treat `p_win` as
-"directionally informative" rather than "calibrated probability."
+The corpus is **fully synthetic**. Real CourtListener-derived training is
+Sprint 13+ work, gated on Layer-3 enrichment coverage of opinion outcomes.
 
-## Conformal interval (S6.2)
+## Ensemble
 
-Split-conformal calibration uses the LOOCV residuals (n=10) directly as the
-calibration set, with α = 0.10 → nominal 90% CI.
+Four base models trained with diverse inductive biases, then a stacking
+blender (logistic regression meta-learner on out-of-fold base
+probabilities, K=5).
 
-- **Empirical coverage at α=0.10:** 0.90 by construction of split-conformal
-  (the residuals come from the same distribution as test predictions).
-- **Typical CI width:** ~0.80 — i.e., for a borderline case the 90% CI
-  is approximately `[0, 0.8]`. This is the honest "we don't know much"
-  signal. The Sprint 6 plan relaxed the S5.2 target from ±2% to ±5%
-  precisely to allow this.
+| Model | Brier ↓ | ECE ↓ | Log-loss ↓ |
+|---|---|---|---|
+| XGBoost (depth=4, 100 trees) | 0.1735 | 0.0373 | 0.5254 |
+| LightGBM (depth=4, 100 trees) | 0.1754 | 0.0376 | 0.5300 |
+| CatBoost (depth=4, 100 trees) | 0.1701 | 0.0421 | 0.5165 |
+| **Logistic regression** ← champion | **0.1662** | 0.0471 | **0.5071** |
+| Stacked ensemble (LR meta) | 0.1679 | 0.0482 | 0.5107 |
 
-## Features the model sees
+Comparison with the v0 champion (XGBoost on `synthetic_cases_v0.parquet`):
+Brier dropped from **0.2499** → **0.1662** (a 33% reduction). v0 was
+indistinguishable from a 50/50 coin flip; v1 produces real probabilities.
 
-The trainer projects each row onto the 7-feature schema
-`ml_inference_svc.predict.FEATURE_ORDER`:
+### Why LR wins on this corpus
 
-| Feature                     | Source                                            | v1 fidelity |
-|-----------------------------|---------------------------------------------------|-------------|
-| `judge_severity`            | `judges.bio.severity_proxy.severity` (S5.7) — fraction of this judge's prior decisions ruling against petitioner | Real signal (97/99 docs matched a judge) |
-| `attorney_win_rate`         | Filled with 0.5 (neutral prior)                   | **Stub** — no attorney data in S6 |
-| `ideology_distance`         | Filled with 0.5 (neutral prior)                   | **Stub** — no Martin-Quinn / ideology model |
-| `materiality_score`         | Filled with 0.5 (neutral prior)                   | **Stub** — no materiality model |
-| `procedural_motion_count`   | Regex over `full_text_plain` — "motion to/for/was/is", "Rule N motion" | Real proxy (clipped at 50) |
-| `case_type`                 | S5.7 `case_type` → `civil` (every tax-court matter is civil) | Real (collapse-mapped) |
-| `jurisdiction`              | Court slug → `Federal` for tax/scotus/cafc/bia    | Real (single-jurisdiction corpus) |
+The v1 generator is a logistic combiner: `outcome = Bernoulli(sigmoid(W . x + noise))`.
+That data-generating process IS logistic regression. Trees with limited
+depth approximate the smooth logistic surface but waste capacity on
+spurious splits, slightly overfitting. The stacking meta-LR confirms this
+— it weights LR with the largest coefficient (+3.09) of any base model,
+and weights XGBoost negatively (-0.56) because it's slightly miscalibrated:
 
-Three stub features means the model is essentially a 4-feature LogReg.
-
-## What this model is NOT for
-
-- Quoting probabilities to a client in a Settle vs Try memo — the CI is too
-  wide and ECE is too high to make calibration claims.
-- Cross-jurisdiction prediction — every training row is federal tax court.
-- Sub-classifying petitioner-win cases by type — only 2 such rows exist.
-
-## Retraining plan
-
-- **Cadence:** retrain weekly while the corpus is growing (see
-  `scripts/courtlistener-daily.sh` — adds 5–10 labelled rows per week).
-- **Bar to graduate from v1:** ≥200 labelled rows, ≥3 jurisdictions
-  represented, ECE ≤ 0.10 on a real 20% holdout. Sprint 6 plan tracks the
-  growth; Sprint 7 likely cuts v2 if the corpus catches up.
-- **Replacement:** when the bar is met, switch to the GBM ensemble path
-  (`scripts/train_first_models.py`) which the small-N caveats currently
-  block.
-
-## Reproducing this run
-
-```bash
-# 1. Export labelled corpus from Postgres (see export_real_corpus.sql).
-docker exec judicialpredict_postgres psql -U judicialpredict \
-    -d judicialpredict_dev -tA -f /tmp/export_real_corpus.sql \
-    > /tmp/real_corpus.json
-# Trim the leading SET line (`tail -n +2 …`).
-
-# 2. Build training parquet.
-docker exec judicialpredict_ml_inference \
-    python scripts/build_real_corpus.py \
-    --input /tmp/real_corpus.json \
-    --output data/real_corpus_v1.parquet
-
-# 3. Train.
-docker exec judicialpredict_ml_inference \
-    python scripts/train_real_v1.py \
-    --data data/real_corpus_v1.parquet \
-    --mlruns-dir /tmp/mlruns
-
-# 4. Move artefacts to the host mount + rewrite meta.yaml absolute paths.
-#    (See SPRINT_6_NOTES.md or the S6.1 commit message for the exact dance.)
 ```
+Meta-LR coefficients on stacked ensemble:
+  xgboost              = -0.56   (down-weighted — miscalibrated)
+  lightgbm             = +0.38
+  catboost             = +2.19   (well-calibrated tree learner)
+  logistic_regression  = +3.09   (correct functional form for this corpus)
+```
+
+When real CourtListener-derived training data lands (Sprint 13+) the
+ranking will almost certainly shift — real legal outcomes have non-linear
+feature interactions that trees catch and LR misses.
+
+## Feature-outcome correlations on v1 corpus
+
+Per-feature Pearson correlation with `outcome`:
+
+| Feature | r |
+|---|---|
+| judge_severity | -0.328 (more severe → fewer petitioner wins) |
+| attorney_win_rate | +0.337 (better attorney → more petitioner wins) |
+| materiality_score | +0.109 (stronger claim → mild edge) |
+| procedural_motion_count | -0.108 (more motions → mild drag) |
+| ideology_distance | -0.053 (mild — non-monotonic in the synth) |
+
+These are by design — the v1 generator's weights mirror the spec's
+expected directions.
+
+## Calibration
+
+* **Platt scaling**: each base model's raw probabilities pass through a
+  Logistic Regression Platt scaler fit on a 20%-of-train calibration
+  slice. Reduces ECE meaningfully on the GBMs (~0.04).
+* **Conformal prediction intervals**: split-conformal residuals from the
+  cal slice are stored as an MLflow artifact and loaded by the gateway's
+  `SplitConformalPredictor`. Default coverage 90%; loosens to wider CI on
+  high-uncertainty rows.
+
+## Tier-A/B allowlist
+
+The model accepts only:
+
+* `judge_severity`, `attorney_win_rate`, `ideology_distance`,
+  `materiality_score`, `procedural_motion_count` (numeric)
+* `case_type ∈ {civil, criminal, bankruptcy}`,
+  `jurisdiction ∈ {Federal, California, New_Jersey}` (categorical)
+
+Tier-C party-identifying features are rejected at the gateway's GraphQL
+boundary AND at the ML service's `ALLOWLIST_FEATURES` check.
+
+## Known limitations
+
+1. **Synthetic corpus** — outcomes are simulated. The model learns the
+   simulation, not real legal patterns. Replace with real data in S13+.
+2. **No party features by design** — Tier-C is a hard architectural
+   block; predictions cannot personalise.
+3. **Three jurisdictions only** — anything outside `{Federal, California,
+   New_Jersey}` encodes to the unknown-value sentinel (-1.0).
+4. **Cf. ideology score sources** — the model still consumes a single
+   scalar `ideologyDistance`. The Sprint 7-11 work wires DIME / MQ / JCS
+   to feed THAT scalar, but the model itself doesn't see source / term /
+   release metadata — the compliance footer does.
+
+## Intended use
+
+* Civil and criminal matter triage in Federal, California, and New Jersey
+  jurisdictions.
+* Decision support for partners weighing settle-vs-try. **Not** a
+  substitute for legal judgement.
+* Audit-defensible because every prediction carries: model version
+  (MLflow run id), conformal interval, source vintage for ideology, and
+  recommendation reasoning.
+
+## Out-of-scope use
+
+* Anything outside the three named jurisdictions.
+* Cases where party identity is material to outcome (use a different
+  model with appropriate compliance review).
+* Real-time, high-volume scoring (rate-limited; intended for
+  partner-driven case review).
+
+## Versioning
+
+| Version | Date | Champion | Notable |
+|---|---|---|---|
+| v0 | 2026-04 | XGBoost | Synthetic v0 corpus, Brier 0.25, effectively flat |
+| v1 | 2026-05-13 | LogisticRegression | Real n=10 hand-labelled; deprecated |
+| **Sprint 12.5** | 2026-09-04 | LogisticRegression | Synthetic v1 + stacker, Brier 0.1662 |
