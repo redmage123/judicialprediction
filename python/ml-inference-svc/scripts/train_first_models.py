@@ -60,6 +60,26 @@ FEATURE_COLS = NUMERIC_FEATURES + CATEGORICAL_FEATURES
 TARGET_COL = "outcome"
 
 
+def _detect_gpu() -> bool:
+    """
+    True iff the host advertises an NVIDIA GPU via `nvidia-smi -L`.
+    Used by the GBM builders to pick CUDA vs CPU kwargs.  Intentionally
+    fail-safe: any exception (binary missing, driver not loaded, container
+    without device passthrough) → False.
+    """
+    import shutil, subprocess
+    if shutil.which("nvidia-smi") is None:
+        return False
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "-L"],
+            capture_output=True, text=True, timeout=3,
+        )
+        return out.returncode == 0 and "GPU" in out.stdout
+    except Exception:
+        return False
+
+
 def ece(y_true: np.ndarray, y_prob: np.ndarray, n_bins: int = 10) -> float:
     """Expected Calibration Error — equal-width bins."""
     bins = np.linspace(0.0, 1.0, n_bins + 1)
@@ -248,38 +268,61 @@ def main(data_path: str, seed: int = 42) -> None:
     # biases.  The three GBMs find non-linear interactions; the LR
     # baseline catches the linear-additive signal and disagrees with the
     # trees enough to give the stacker something to blend.
+    #
+    # Sprint 13 — GPU acceleration: each GBM picks its CUDA path when the
+    # host advertises a GPU via `nvidia-smi`. CPU fallback is intentionally
+    # silent (xgboost.tree_method="hist" runs identically; lightgbm device
+    # "cpu" is the default; catboost.task_type="CPU" is the default), so
+    # this script stays portable to laptops without changes.
+    gpu_available = _detect_gpu()
+    if gpu_available:
+        print("GPU detected — training with CUDA (xgb hist+device=cuda, "
+              "lgbm device=gpu, catboost task_type=GPU)")
+    else:
+        print("No GPU — training on CPU (use a host with nvidia-smi for the GPU path)")
+
+    xgb_kwargs = {
+        "n_estimators": 100,
+        "max_depth": 4,
+        "learning_rate": 0.1,
+        "eval_metric": "logloss",
+        "random_state": seed,
+        "verbosity": 0,
+    }
+    if gpu_available:
+        # xgboost 2.x: tree_method='hist' + device='cuda' is the supported
+        # CUDA path. tree_method='gpu_hist' is the deprecated older form.
+        xgb_kwargs["tree_method"] = "hist"
+        xgb_kwargs["device"] = "cuda"
+
+    lgbm_kwargs = {
+        "n_estimators": 100,
+        "max_depth": 4,
+        "learning_rate": 0.1,
+        "random_state": seed,
+        "verbose": -1,
+    }
+    if gpu_available:
+        # LightGBM's GPU path is opt-in and needs a wheel compiled with
+        # OpenCL+CUDA. Most pip wheels don't ship with GPU support; we try
+        # but the script still works if LightGBM falls back at fit time.
+        lgbm_kwargs["device"] = "gpu"
+
+    cat_kwargs = {
+        "iterations": 100,
+        "depth": 4,
+        "learning_rate": 0.1,
+        "random_seed": seed,
+        "verbose": 0,
+    }
+    if gpu_available:
+        cat_kwargs["task_type"] = "GPU"
+        cat_kwargs["devices"] = "0"
+
     models = [
-        (
-            "xgboost",
-            XGBClassifier(
-                n_estimators=100,
-                max_depth=4,
-                learning_rate=0.1,
-                eval_metric="logloss",
-                random_state=seed,
-                verbosity=0,
-            ),
-        ),
-        (
-            "lightgbm",
-            LGBMClassifier(
-                n_estimators=100,
-                max_depth=4,
-                learning_rate=0.1,
-                random_state=seed,
-                verbose=-1,
-            ),
-        ),
-        (
-            "catboost",
-            CatBoostClassifier(
-                iterations=100,
-                depth=4,
-                learning_rate=0.1,
-                random_seed=seed,
-                verbose=0,
-            ),
-        ),
+        ("xgboost", XGBClassifier(**xgb_kwargs)),
+        ("lightgbm", LGBMClassifier(**lgbm_kwargs)),
+        ("catboost", CatBoostClassifier(**cat_kwargs)),
         (
             "logistic_regression",
             # Pipeline so the scaler is fit on training data and the

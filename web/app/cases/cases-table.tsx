@@ -54,8 +54,24 @@ function getCaseType(features: Record<string, unknown>): string {
   return String(features.case_type ?? features.caseType ?? "");
 }
 
+// Friendly labels for the dashboard table. Cases were persisted with the
+// wire-format slug (us-federal / us_federal — historical accidents from
+// pre- and post-Sprint-9 ingest paths). Sprint 13 audit flagged the
+// inconsistent display; this maps any known variant to a human label and
+// leaves anything else unchanged so future jurisdictions render verbatim.
+const JURISDICTION_LABELS: Record<string, string> = {
+  "us-federal": "US Federal",
+  "us_federal": "US Federal",
+  "Federal":    "US Federal",
+  "ca-state":   "California State",
+  "California": "California State",
+  "nj-state":   "New Jersey State",
+  "New_Jersey": "New Jersey State",
+};
+
 function getJurisdiction(features: Record<string, unknown>): string {
-  return String(features.jurisdiction ?? "");
+  const raw = String(features.jurisdiction ?? "");
+  return JURISDICTION_LABELS[raw] ?? raw;
 }
 
 // ---------------------------------------------------------------------------

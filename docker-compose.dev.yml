@@ -224,6 +224,19 @@ services:
     image: jp-ml-inference-svc:dev
     container_name: judicialpredict_ml_inference
     restart: unless-stopped
+    # Sprint 13 — expose the dev box's GPU to the container so future
+    # NN / OOD-detection sidecars can use CUDA. The current sklearn
+    # champion is CPU-bound (7-feature LR), so this is a future-proofing
+    # change, not a latency optimisation. Compose tolerates the device
+    # reservation gracefully on hosts without an NVIDIA runtime —
+    # docker just skips the reservation.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     depends_on:
       postgres:
         condition: service_healthy

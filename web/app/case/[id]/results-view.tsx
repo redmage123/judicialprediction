@@ -395,11 +395,14 @@ function ResultsLayout({ caseResult }: ResultsLayoutProps) {
           case. When null (legacy cases or operator-typed-only flows), it
           falls back to the S7.6 "available sources" copy. Tier-C is
           explicitly absent — the system never accepts those features. */}
+      {/* Sprint 13 audit UI/UX finding: footer was rendering at text-xs
+          (12px) which read as fine print. Bumped to text-sm (14px) so it
+          stays readable in a printed memo. */}
       <section
         aria-labelledby="sources-heading"
-        className="mt-8 rounded-md border bg-muted/20 p-4 text-xs leading-relaxed text-muted-foreground"
+        className="mt-8 rounded-md border bg-muted/20 p-4 text-sm leading-relaxed text-muted-foreground"
       >
-        <h2 id="sources-heading" className="text-sm font-semibold text-foreground">
+        <h2 id="sources-heading" className="text-base font-semibold text-foreground">
           Tier-A sources used
         </h2>
         <ul className="mt-2 list-disc space-y-1 pl-5">
