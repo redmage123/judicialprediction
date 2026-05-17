@@ -174,6 +174,14 @@ export function IntakeForm() {
   const [extractCtx, setExtractCtx] = useState<ExtractionContext | null>(null);
   const [prefilled, setPrefilled] = useState<Partial<Record<keyof FormState, true>>>({});
 
+  // S11.4 — filing date. Default to today. Year is fed to the gateway's
+  // MQ resolver so historical cases pull the term snapshot that was
+  // current when they were filed.
+  const [dateFiled, setDateFiled] = useState<string>(() => {
+    const today = new Date();
+    return `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+  });
+
   // S6.13 — PDF upload state.  pdfStatus surfaces "Parsing…" while pdfjs-dist
   // is reading the file, and a one-line confirmation ("Loaded N pages") after.
   const [pdfStatus, setPdfStatus] = useState<string | null>(null);
@@ -340,10 +348,15 @@ export function IntakeForm() {
       // possibly hand-edited, values.  Omitted entirely when the field is
       // blank, leaving the server-side nlp_suggestion NULL.
       const trimmedOpinion = opinionText.trim();
+      // S11.4 — forward the operator-supplied filing date so the gateway
+      // can derive as_of_year for the MQ resolver AND persist date_filed
+      // to the cases row.  Omit when blank.
+      const trimmedDate = dateFiled.trim();
       const result = await createCase({
         variables: {
           input,
           ...(trimmedOpinion ? { opinionText: trimmedOpinion } : {}),
+          ...(trimmedDate ? { dateFiled: trimmedDate } : {}),
         },
       });
 
@@ -747,6 +760,22 @@ export function IntakeForm() {
                   </option>
                 ))}
               </select>
+            </div>
+
+            {/* S11.4 — Filing date. Optional; defaults to today. */}
+            <div className="space-y-1.5 sm:col-span-2">
+              <Label htmlFor="dateFiled">Filing date (optional)</Label>
+              <Input
+                id="dateFiled"
+                name="dateFiled"
+                type="date"
+                value={dateFiled}
+                onChange={(e) => setDateFiled(e.target.value)}
+              />
+              <p id="dateFiled-help" className="text-xs text-muted-foreground">
+                Used to pick the Martin-Quinn term snapshot that was current
+                when the case was filed. Defaults to today.
+              </p>
             </div>
           </div>
 

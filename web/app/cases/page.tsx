@@ -57,6 +57,7 @@ async function fetchPage(offset: number): Promise<{ connection: CaseConnection; 
           prediction { pWin }
           recommendation { kind }
           createdAt
+          dateFiled
           createdBy
         }
         totalCount

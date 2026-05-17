@@ -123,6 +123,8 @@ const VALID_CASE: import("@/lib/queries/predict").CaseResult = {
   createdAt: "2026-05-10T12:00:00Z",
   // S10.5 — fixture predates Sprint 10; legacy "available sources" footer.
   ideologyProvenance: null,
+  // S11.5 — fixture predates Sprint 11; dashboard falls back to createdAt.
+  dateFiled: null,
 };
 
 // ---------------------------------------------------------------------------

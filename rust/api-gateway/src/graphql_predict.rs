@@ -345,6 +345,13 @@ pub struct Case {
     /// ideologyDistance manually) or when the case was created before
     /// Sprint 10.  Shape: see migration 20260722100000_cases_ideology_provenance.
     pub ideology_provenance: Option<Json<serde_json::Value>>,
+    /// S11.4 — operator-supplied filing date (ISO-8601 YYYY-MM-DD).
+    /// When non-NULL, the dashboard displays this instead of
+    /// `created_at` for the "DATE FILED" column, and the gateway used
+    /// `year(date_filed)` as the as-of-year for the MQ resolver.
+    /// `None` for Sprint-10-and-earlier cases or when operator omitted
+    /// the field.
+    pub date_filed: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -926,7 +933,34 @@ impl Mutation {
                           feature suggestion is persisted alongside the \
                           operator's final values.")]
         opinion_text: Option<String>,
+        // S11.3 — operator-supplied filing date.  When provided:
+        //   - persisted to cases.date_filed,
+        //   - year() fed into extract_features_from_text(as_of_year=...)
+        //     so the MQ branch (S10) picks the term that was current
+        //     at filing time, not today's snapshot.
+        // ISO-8601 calendar date (YYYY-MM-DD); GraphQL maps NaiveDate → String.
+        #[graphql(
+            name = "dateFiled",
+            desc = "Optional ISO-8601 filing date (YYYY-MM-DD). \
+                    Persisted to cases.date_filed and used to pick the \
+                    Martin-Quinn term snapshot that was current at \
+                    filing time."
+        )]
+        date_filed: Option<String>,
     ) -> async_graphql::Result<Case> {
+        // Sprint-11: parse the date once, up-front. Bad input is a 400-
+        // class error.  Year extraction is the only thing the resolver
+        // needs; we keep the full date for the DB write.
+        use chrono::Datelike;
+        let date_filed_parsed: Option<chrono::NaiveDate> = match date_filed.as_deref() {
+            Some(s) if !s.trim().is_empty() => Some(
+                chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").map_err(|e| {
+                    async_graphql::Error::new(format!("invalid dateFiled: {e}"))
+                })?,
+            ),
+            _ => None,
+        };
+        let as_of_year: Option<i32> = date_filed_parsed.map(|d| d.year());
         let start = Instant::now();
 
         // ── 1. Extract identity from JWT claims ──────────────────────────────
@@ -1041,13 +1075,13 @@ impl Mutation {
         // suggestion next to the operator's final values.  Done before the
         // INSERT tx because the extractor opens its own short transaction.
         //
-        // S10.3 — createCase doesn't take an as-of-date yet (`cases.date_filed`
-        // arrives in Sprint 11); pass None so the resolver uses the MQ
-        // latest snapshot. When the column lands the call-site swaps None
-        // for the case's filing year — no other resolver change needed.
+        // S11.3 — feed the operator-supplied filing year into the resolver
+        // so the MQ branch (S10) picks the term that was current at filing
+        // time, not today's snapshot. When dateFiled is omitted, as_of_year
+        // is None and the resolver falls back to the latest-MQ snapshot.
         let nlp_suggestion: Option<ExtractedFeatures> = match opinion_text.as_deref() {
             Some(text) if !text.trim().is_empty() => {
-                Some(extract_features_from_text(pool, tenant_id, text, None).await?)
+                Some(extract_features_from_text(pool, tenant_id, text, as_of_year).await?)
             }
             _ => None,
         };
@@ -1098,9 +1132,9 @@ impl Mutation {
             INSERT INTO cases
                 (tenant_id, title, jurisdiction,
                  input_features, prediction, recommendation, created_by,
-                 nlp_suggestion, ideology_provenance)
+                 nlp_suggestion, ideology_provenance, date_filed)
             VALUES
-                ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             RETURNING id, created_at::text AS created_at_s
             "#,
         )
@@ -1113,6 +1147,7 @@ impl Mutation {
         .bind(operator_id)
         .bind(&nlp_suggestion_val)
         .bind(&ideology_provenance_val)
+        .bind(date_filed_parsed)
         .fetch_one(&mut *tx)
         .await
         .map_err(|e| async_graphql::Error::new(format!("case insert failed: {e}")))?;
@@ -1164,6 +1199,9 @@ impl Mutation {
             // S10.4 — surface the just-persisted provenance back to the
             // caller. Same value we wrote to `cases.ideology_provenance`.
             ideology_provenance: ideology_provenance_val.map(Json),
+            // S11.4 — echo the operator-supplied date back to the caller
+            // (None when omitted).
+            date_filed: date_filed_parsed.map(|d| d.format("%Y-%m-%d").to_string()),
         })
     }
 
@@ -1472,6 +1510,9 @@ impl Mutation {
             // S10.4 — repredictCase doesn't re-resolve ideology yet; the
             // operator-supplied scalar stays. Sprint 11 may add re-resolve.
             ideology_provenance: None,
+            // S11.4 — repredictCase doesn't fetch date_filed from the
+            // existing row; keep None for now. Sprint 12 candidate.
+            date_filed: None,
         })
     }
 }

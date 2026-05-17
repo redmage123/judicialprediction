@@ -56,6 +56,10 @@ function makeSummary(overrides: Partial<CaseSummary> = {}): CaseSummary {
     prediction: { pWin: 0.72 },
     recommendation: { kind: "Try" },
     createdAt: "2026-05-09T10:00:00Z",
+    // S11.5 — fixtures default to NULL so dashboard renders the legacy
+    // createdAt-fallback path. Test cases that want to exercise the
+    // date_filed display pass it via overrides.
+    dateFiled: null,
     createdBy: null,
     ...overrides,
   };

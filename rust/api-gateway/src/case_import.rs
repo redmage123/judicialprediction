@@ -256,6 +256,9 @@ pub async fn do_create_case(
         // shares the gateway resolver but the per-row insert in
         // case_import.rs doesn't pipe it through). Sprint 11 candidate.
         ideology_provenance: None,
+        // S11.4 — bulk import has no per-row date_filed yet; CSV column
+        // would be additive in a later sprint.
+        date_filed: None,
     })
 }
 

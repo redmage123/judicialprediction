@@ -126,9 +126,12 @@ export function CasesTable({ connection, offset, pageSize }: CasesTableProps) {
               {nodes.map((c) => {
                 const features = (c.inputFeatures ?? {}) as Record<string, unknown>;
                 const badgeClass = BADGE_CLASS[c.recommendation.kind] ?? BADGE_CLASS.Borderline;
+                // S11.5 — prefer the operator-supplied filing date when
+                // present, fall back to created_at for legacy rows.
+                const displayDate = c.dateFiled ?? c.createdAt;
                 return (
                   <tr key={c.id} className="border-b last:border-0 hover:bg-slate-50 transition-colors">
-                    <td className="px-4 py-3 text-slate-700 whitespace-nowrap">{formatDate(c.createdAt)}</td>
+                    <td className="px-4 py-3 text-slate-700 whitespace-nowrap">{formatDate(displayDate)}</td>
                     <td className="px-4 py-3 capitalize">{getCaseType(features) || "—"}</td>
                     <td className="px-4 py-3">{getJurisdiction(features)}</td>
                     <td className="px-4 py-3 text-right font-mono tabular-nums">{Math.round(c.prediction.pWin * 100)}%</td>
@@ -158,6 +161,8 @@ export function CasesTable({ connection, offset, pageSize }: CasesTableProps) {
         {nodes.map((c) => {
           const features = (c.inputFeatures ?? {}) as Record<string, unknown>;
           const badgeClass = BADGE_CLASS[c.recommendation.kind] ?? BADGE_CLASS.Borderline;
+          // S11.5 — mobile cards use the same date-filed-first display.
+          const displayDate = c.dateFiled ?? c.createdAt;
           return (
             <li key={c.id}>
               <Link
@@ -166,7 +171,7 @@ export function CasesTable({ connection, offset, pageSize }: CasesTableProps) {
               >
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <p className="text-xs text-slate-500">{formatDate(c.createdAt)}</p>
+                    <p className="text-xs text-slate-500">{formatDate(displayDate)}</p>
                     <p className="mt-1 text-sm font-medium capitalize">
                       {getCaseType(features) || "Case"} · {getJurisdiction(features)}
                     </p>

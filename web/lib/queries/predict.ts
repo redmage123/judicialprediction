@@ -26,8 +26,8 @@ export const PREDICT_CASE_OUTCOME = gql`
  * suggestion next to the operator's final values.
  */
 export const CREATE_CASE = gql`
-  mutation CreateCase($input: PredictInput!, $opinionText: String) {
-    createCase(input: $input, opinionText: $opinionText) {
+  mutation CreateCase($input: PredictInput!, $opinionText: String, $dateFiled: String) {
+    createCase(input: $input, opinionText: $opinionText, dateFiled: $dateFiled) {
       id
       tenantId
       inputFeatures
@@ -54,6 +54,8 @@ export const CREATE_CASE = gql`
       }
       createdBy
       createdAt
+      ideologyProvenance
+      dateFiled
     }
   }
 `;
@@ -185,6 +187,8 @@ export interface CaseResult {
   createdAt: string;
   /** S10.4 — NULL for pre-Sprint-10 cases or operator-typed-only predictions. */
   ideologyProvenance: IdeologyProvenance | null;
+  /** S11.4 — operator-supplied filing date (YYYY-MM-DD); NULL for legacy cases. */
+  dateFiled: string | null;
 }
 
 export interface PredictCaseOutcomeData {
@@ -207,6 +211,12 @@ export interface CreateCaseVars {
    * final values for later accuracy evaluation.
    */
   opinionText?: string;
+  /**
+   * S11.4 — optional ISO-8601 filing date (YYYY-MM-DD). When supplied the
+   * gateway persists it to cases.date_filed AND feeds year(date) into the
+   * MQ resolver as the as-of-year — so a 1969 case pulls the 1969 term.
+   */
+  dateFiled?: string;
 }
 
 export interface GetCaseData {
@@ -235,6 +245,7 @@ export const LIST_CASES = gql`
           kind
         }
         createdAt
+        dateFiled
         createdBy
       }
       totalCount
@@ -250,6 +261,8 @@ export interface CaseSummary {
   prediction: Pick<PredictResult, "pWin">;
   recommendation: Pick<RecommendationResult, "kind">;
   createdAt: string;
+  /** S11.5 — operator-supplied filing date (YYYY-MM-DD); null for legacy rows. */
+  dateFiled: string | null;
   createdBy: string | null;
 }
 

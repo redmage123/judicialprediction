@@ -210,13 +210,17 @@ impl Query {
                 .await
                 .map_err(|e| async_graphql::Error::new(format!("count query failed: {e}")))?;
 
+        // S11.5 — pull date_filed and sort by COALESCE(date_filed, created_at)
+        // so the dashboard displays operator-supplied filing dates when
+        // present, ordering still consistent for legacy NULL rows.
         let rows = sqlx::query(
             r#"
             SELECT id, tenant_id, input_features, prediction, recommendation,
-                   created_by, created_at::text AS created_at_s
+                   created_by, created_at::text AS created_at_s,
+                   date_filed::text AS date_filed_s
             FROM   cases
             WHERE  tenant_id = $1
-            ORDER BY created_at DESC
+            ORDER BY COALESCE(date_filed, created_at::date) DESC, created_at DESC
             LIMIT $2 OFFSET $3
             "#,
         )
@@ -255,6 +259,9 @@ impl Query {
             let recommendation: RecommendationDto = serde_json::from_value(recommendation_val)
                 .map_err(|e| async_graphql::Error::new(format!("case {id}: recommendation parse: {e}")))?;
 
+            let date_filed: Option<String> = row.try_get("date_filed_s")
+                .map_err(|e| async_graphql::Error::new(format!("row.date_filed: {e}")))?;
+
             nodes.push(Case {
                 id: ID::from(id.to_string()),
                 tenant_id: ID::from(tenant_id_col.to_string()),
@@ -270,6 +277,9 @@ impl Query {
                 // S10.5 — same rationale: ideology_provenance is fetched
                 // only by the single-case query for the compliance footer.
                 ideology_provenance: None,
+                // S11.5 — date_filed IS fetched here; powers the dashboard
+                // "DATE FILED" column.
+                date_filed,
             });
         }
 
@@ -319,7 +329,7 @@ impl Query {
             r#"
             SELECT id, tenant_id, input_features, prediction, recommendation,
                    created_by, created_at::text AS created_at_s, nlp_suggestion,
-                   ideology_provenance
+                   ideology_provenance, date_filed::text AS date_filed_s
             FROM   cases
             WHERE  id = $1 AND tenant_id = $2
             "#,
@@ -373,6 +383,10 @@ impl Query {
         let ideology_provenance_val: Option<serde_json::Value> = row.try_get("ideology_provenance")
             .map_err(|e| async_graphql::Error::new(format!("case {row_id}: ideology_provenance: {e}")))?;
 
+        // S11.5 — operator-supplied filing date.
+        let date_filed: Option<String> = row.try_get("date_filed_s")
+            .map_err(|e| async_graphql::Error::new(format!("case {row_id}: date_filed: {e}")))?;
+
         Ok(Some(Case {
             id: async_graphql::ID::from(row_id.to_string()),
             tenant_id: async_graphql::ID::from(tenant_id_col.to_string()),
@@ -383,6 +397,7 @@ impl Query {
             created_at,
             nlp_suggestion: nlp_suggestion.map(Json),
             ideology_provenance: ideology_provenance_val.map(Json),
+            date_filed,
         }))
     }
 

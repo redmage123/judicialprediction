@@ -25,6 +25,7 @@ const LOADED: CaseConnection = {
       prediction: { pWin: 0.72 },
       recommendation: { kind: "Try" },
       createdAt: "2026-05-09T10:00:00Z",
+      dateFiled: null,
       createdBy: null,
     },
     {
@@ -33,6 +34,7 @@ const LOADED: CaseConnection = {
       prediction: { pWin: 0.38 },
       recommendation: { kind: "Settle" },
       createdAt: "2026-05-08T09:30:00Z",
+      dateFiled: null,
       createdBy: null,
     },
     {
@@ -41,6 +43,7 @@ const LOADED: CaseConnection = {
       prediction: { pWin: 0.5 },
       recommendation: { kind: "Borderline" },
       createdAt: "2026-05-07T14:00:00Z",
+      dateFiled: null,
       createdBy: null,
     },
   ],
