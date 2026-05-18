@@ -157,6 +157,7 @@ boundary AND at the ML service's `ALLOWLIST_FEATURES` check.
 | Sprint 14 (probe) | 2026-05-18 | _not promoted_ | Real n=41 (CourtListener cafc + tax) — see below |
 | Sprint 15 (probe) | 2026-05-18 | _not promoted_ | Real n=623 (+CAP SCOTUS) — see below |
 | Sprint 16 (probe) | 2026-05-18 | _not promoted_ | Real n=630 + 4 features de-neutralised — see below |
+| Sprint 17 (probe) | 2026-05-18 | _not promoted_ | Modern detector fix + per-court diagnostic — see below |
 
 ## Sprint 14 retrain probe (not promoted)
 
@@ -425,3 +426,90 @@ the real corpus so much weaker?
    on the SCDB-labelled cases and use it as a feature in the main
    ensemble.
 4. **Pull more CAP jurisdictions** so `us` isn't 93% of the corpus.
+
+## Sprint 17 retrain probe (not promoted)
+
+Sprint 17 attacked the Sprint-16 era-mismatch diagnostic. Three code
+changes landed:
+
+* **`aa18c41`** — CAP ingest sorts volumes descending so the
+  limit-bounded ingest pulls the LATEST 5,000 opinions per
+  jurisdiction (was the OLDEST).
+* **`37cbfa3`** — SCOTUS detector anchors on the canonical
+  `"It is so ordered."` marker rather than scanning only the last 800
+  chars. Modern CAP files concatenate majority + concurrences +
+  dissents; the majority's disposition sits at ~40% through the text,
+  not at the end.
+* (No new features — the detector + ensemble are unchanged.)
+
+Effect on outcome detection coverage (modern slice):
+
+| Slice | Pre-Sprint-17 | Post-Sprint-17 |
+|---|---|---|
+| Modern SCOTUS (`us` ≥ 2000) | **0/59** | **33/105 (31.4%)** |
+| Pre-1900 SCOTUS | 11.8% | 11.8% (unchanged) |
+
+`data/real_corpus_v6.parquet` (n=666, base rate 35.6%) trained on the
+full four-model ensemble + stacked blender:
+
+| Model | Brier ↓ | ECE ↓ | LogLoss ↓ |
+|---|---|---|---|
+| XGBoost | 0.2266 | 0.0339 | 0.6454 |
+| LightGBM | 0.2274 | 0.0003 | 0.6471 |
+| CatBoost | 0.2272 | 0.0007 | 0.6466 |
+| Logistic Regression | 0.2299 | 0.0003 | 0.6524 |
+| Stacked | 0.2287 | 0.0035 | 0.6499 |
+
+**Brier got worse (0.2266 vs Sprint 16's 0.2209).** The mixed-era
+corpus is *harder*, not easier, despite the modern detector fix.
+
+**Decisive diagnostic — per-court correlation:**
+
+| Court | n labelled | judge_severity ↔ outcome r |
+|---|---|---|
+| CAFC | 36 | **−0.369** ← strong, useful |
+| Tax | 7 | **−0.583** (small n; suggestive) |
+| SCOTUS (us) | 623 | **−0.017** ← noise |
+| Synthetic v1 (target) | 2000 | −0.328 |
+
+**The SCOTUS slice is structurally wrong for our feature schema.**
+`judge_severity` is defined as a per-judge `wins_for_respondent /
+cases_analyzed` rollup. That works on courts where the named author IS
+the decision-maker (Tax Court single judge, CAFC single-author panel
+opinion). But SCOTUS opinions are 9-justice panel votes; the
+materialized "primary_judge_name" is one justice out of nine and the
+outcome reflects the panel, not the author. Result: 623 rows of
+correlation ≈ 0 dilute the corpus to flat-signal.
+
+This is **NOT** a corpus-size problem (we have 5,067 SCOTUS rows now
+across both eras and the correlation is still noise). It's a feature
+**definition** problem on multi-judge appellate panels.
+
+**Decision:** champion remains Sprint 12.5 LR
+(`run_id 4539e88454d64c7fbce2091be1195bf7`). The
+`data/real_corpus_v6.parquet` artifact and the Sprint 17 MLflow runs
+are retained for reference.
+
+**The remaining work to clear the gate is now clearly scoped:**
+
+1. **More CAFC + circuit data** (Sprint 18). Bandwidth-limited at the
+   current sequential reqwest pace. Options:
+   * Parallelize CAP downloads in `cap.rs` (10 concurrent reqwest
+     futures = 10× throughput).
+   * Pull from govinfo's per-court bulk endpoints (faster than CAP).
+   * Use the existing CourtListener `cafc` slice (50 opinions) plus
+     a daily backfill expansion to ~5,000.
+2. **Panel-mean weighting for SCOTUS** (Sprint 18 alt). Compute the
+   feature as the MEAN of the panel's severities, not just the
+   primary author's. Defines a multi-judge generalization of
+   severity that's not pathologically noisy.
+3. **Learned outcome classifier on SCDB labels** (Sprint 18 alt).
+   Train a tfidf-LR or small transformer on the 9,252 SCDB-labelled
+   SCOTUS opinions; use as a meta-feature in the main ensemble.
+
+Sprint 17 was net-positive: the detector fix is real (modern recall
+0% → 31.4%), the volume-order fix is shipped, and the per-court
+diagnostic now tells us EXACTLY which slice of the corpus moves the
+model. The actual promotion comes when we have ≥ 1,000 CAFC /
+circuit rows in `case_documents` — single-author appellate
+dispositions where `judge_severity` is meaningful.
