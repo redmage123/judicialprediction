@@ -155,6 +155,7 @@ boundary AND at the ML service's `ALLOWLIST_FEATURES` check.
 | v1 | 2026-05-13 | LogisticRegression | Real n=10 hand-labelled; deprecated |
 | **Sprint 12.5** | 2026-09-04 | LogisticRegression | Synthetic v1 + stacker, Brier 0.1662 |
 | Sprint 14 (probe) | 2026-05-18 | _not promoted_ | Real n=41 (CourtListener cafc + tax) — see below |
+| Sprint 15 (probe) | 2026-05-18 | _not promoted_ | Real n=623 (+CAP SCOTUS) — see below |
 
 ## Sprint 14 retrain probe (not promoted)
 
@@ -187,3 +188,76 @@ materiality signals derivable from opinion text yet) doesn't out-fit a
 `data/real_corpus_v2.parquet` artifact are retained for reference;
 predict.py is unchanged. The CourtListener daily backfill continues so
 the corpus grows past where a real-data champion is competitive.
+
+## Sprint 15 retrain probe (not promoted)
+
+Sprint 15 added four new data sources (SCDB labels for SCOTUS, FJC
+Biographical Directory for ~6,300 federal judges, CAP federal-slice
+opinions, and the existing CourtListener slice) plus federal-court
+outcome detection (scotus / circuit / district scanners under a
+`CourtFamily` dispatch). Net corpus:
+
+| Source | case_documents | hard binary labels |
+|---|---|---|
+| CourtListener tax + cafc | 109 | 41 |
+| CAP us (SCOTUS) | 4,958 | 582 (76 + 506 from post-fix re-extract) |
+| **total** | **5,067** | **623** (207 pet / 416 resp) |
+
+Base petitioner-win rate climbed to 33.2% (vs Sprint 14's 24.4%);
+corpus grew **15×** over Sprint 14. The full four-model ensemble +
+K=5 stacked blender was retrained:
+
+| Model | Brier ↓ | ECE ↓ | LogLoss ↓ |
+|---|---|---|---|
+| XGBoost (GPU) | 0.2231 | 0.0027 | 0.6384 |
+| LightGBM (GPU) | 0.2232 | 0.0026 | 0.6385 |
+| CatBoost (GPU) | 0.2231 | 0.0027 | 0.6384 |
+| Logistic Regression | 0.2231 | 0.0027 | 0.6384 |
+| Stacked (meta-LR) | 0.2231 | 0.0045 | 0.6384 |
+
+All five base/blended models converged to nearly identical metrics —
+diagnostic of **flat feature signal**. The meta-LR weights split
+roughly evenly across CatBoost (+0.39), LR (+0.36), XGBoost (+0.01)
+and lightly negative on LightGBM (-0.04); no model finds a distinct
+signal because four of the seven features are pinned to NEUTRAL_FILL:
+
+* `attorney_win_rate` — no extractor.
+* `ideology_distance` — DIME / MQ / JCS judge ideology is wired in
+  the gateway resolver, but the LATERAL join from CAP opinions to
+  the judges KG matches < 5% of SCOTUS panels today (FJC ingest
+  added ~6,300 judges but the panel-name extractor in `kg.rs` only
+  reads tax-court markers; circuit and SCOTUS panel headers need
+  separate parsers — Sprint 16).
+* `materiality_score` — not defined yet.
+
+**Promotion gate result:**
+* Brier 0.2231 > 0.18 ceiling → **FAIL**
+* ECE 0.0027 ≤ 0.08 → pass
+* Source-stratified parity → not material; SCOTUS is 95% of corpus.
+
+**Decision:** champion remains Sprint 12.5 (`run_id
+4539e88454d64c7fbce2091be1195bf7`). Sprint 15 MLflow runs
+(XGB/LGB/Cat/LR/Stacked under experiment `judicialpredict-models`,
+created on 2026-05-18) and `data/real_corpus_v3.parquet` are
+retained.
+
+**Sprint 15 was still net-positive:** the corpus is now 15× larger,
+detector accuracy is validated across the federal family, FJC judges
+are in the KG, and the gap that blocks promotion is now diagnosed
+clearly (feature engineering, not data volume). Sprint 16 candidates:
+
+1. **Real `judge_severity`** — fix the panel-name extractor in
+   `rust/ingest-fetcher/src/kg.rs` to read SCOTUS / circuit headers
+   so the FJC-populated KG actually matches. Should lift
+   `judge_severity` from mostly-0.5 to a real distribution.
+2. **Real `ideology_distance`** — feed the FJC `appointing_president`
+   field as a coarse ideology proxy when DIME / MQ / JCS don't have
+   the judge.
+3. **Attorney-side features** — extract attorney names from CAP /
+   CL opinion headers, build per-attorney win-rate rollups.
+4. **Bigger CAP pull** — expand from 5k SCOTUS to 30k across f3d /
+   f4th / f-supp (Sprint 15 ran only the `us` jurisdiction because
+   `f3d`/`f4th`/`f-supp` returned 404 from static.case.law on the
+   first try; URL or path adjustment needed).
+5. **Learned outcome classifier** — train on SCDB-labelled SCOTUS,
+   apply to CAP body. Better recall than the regex detector.
