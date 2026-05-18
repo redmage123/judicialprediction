@@ -646,15 +646,28 @@ pub async fn run_extraction(pool: &PgPool, tenant_id: Uuid) -> Result<ExtractSta
         let case_type = classify_case_type(text);
         let outcome = detect_outcome_for_court(court_slug, text);
 
+        // S16.5: pick the FIRST signature-line judge as the opinion's
+        // primary author, so the export query can do a clean equality join
+        // against `judges.normalized_name` instead of the noisy substring
+        // LATERAL. We compute this once here and reuse it below for both
+        // the case_documents write and the severity tally.
+        let extracted = crate::kg::extract_judge_names(text);
+        let primary_judge_name: Option<String> = extracted
+            .iter()
+            .map(|raw| crate::kg::normalize_judge_name(raw))
+            .find(|n| !n.is_empty());
+
         sqlx::query(
             "UPDATE case_documents
              SET case_type = $1,
                  outcome_for = $2,
+                 primary_judge_name = $3,
                  features_extracted_at = now()
-             WHERE id = $3",
+             WHERE id = $4",
         )
         .bind(case_type)
         .bind(outcome)
+        .bind(primary_judge_name.as_deref())
         .bind(doc_id)
         .execute(&mut *tx)
         .await
@@ -669,8 +682,8 @@ pub async fn run_extraction(pool: &PgPool, tenant_id: Uuid) -> Result<ExtractSta
         // S5.6 extractor (re-imported here to avoid a circular dep) — only
         // judges from the opinion header are counted, so dicta references
         // to other judges don't bias severity.
-        for judge_raw in crate::kg::extract_judge_names(text) {
-            let normalized = crate::kg::normalize_judge_name(&judge_raw);
+        for judge_raw in &extracted {
+            let normalized = crate::kg::normalize_judge_name(judge_raw);
             if normalized.is_empty() {
                 continue;
             }
@@ -729,6 +742,17 @@ pub async fn run_extraction(pool: &PgPool, tenant_id: Uuid) -> Result<ExtractSta
     // (tenant_id, normalized_name), and use jsonb_set semantics by simply
     // overwriting the `severity_proxy` key — extraction reruns recompute
     // from scratch.
+    //
+    // S16.5: many opinion authors (especially early-SCOTUS justices like
+    // Nelson, Clifford, Miller, Field, Davis...) sign with a bare surname
+    // but the FJC seeder only created full-name rows like "Samuel Nelson".
+    // Previously the rollup UPDATE no-op'd on those tallies and the severity
+    // never landed, so the export-side join couldn't find it via
+    // `case_documents.primary_judge_name`. We now UPSERT the surname-alias
+    // row so the severity_proxy is durable. The alias row carries the
+    // surname in both `normalized_name` and `full_name` (uppercase, matching
+    // the existing 4 alias rows like "marshall|MARSHALL") and `source` is
+    // set to 'extract' so it's distinguishable from FJC-seeded rows.
     for ((_court_slug, normalized), tally) in &tallies {
         let severity = if tally.analyzed == 0 {
             0.0
@@ -744,16 +768,17 @@ pub async fn run_extraction(pool: &PgPool, tenant_id: Uuid) -> Result<ExtractSta
         });
 
         let res = sqlx::query(
-            "UPDATE judges
-             SET bio = bio || $1::jsonb
-             WHERE tenant_id = $2 AND normalized_name = $3",
+            "INSERT INTO judges (tenant_id, full_name, normalized_name, bio, source)
+             VALUES ($2, upper($3), $3, $1::jsonb, 'extract')
+             ON CONFLICT (tenant_id, normalized_name) DO UPDATE
+             SET bio = judges.bio || $1::jsonb",
         )
         .bind(&bio_patch)
         .bind(tenant_id)
         .bind(normalized)
         .execute(&mut *tx)
         .await
-        .context("update judges.bio severity_proxy")?;
+        .context("upsert judges.bio severity_proxy")?;
 
         if res.rows_affected() > 0 {
             stats.judges_updated += 1;

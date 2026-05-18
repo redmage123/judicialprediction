@@ -2,8 +2,9 @@
 --
 -- One row per case_document with:
 --   * the S5.7 extraction outputs (case_type, outcome_for)
---   * the first matched judge's severity_proxy (LATERAL join — picks the
---     judge whose normalized_name appears first in the opinion header)
+--   * the materialized opinion-author edge (S16.5) — joined directly to
+--     `judges.normalized_name` so the severity_proxy attaches to the actual
+--     author rather than a random surname collision in the body text
 --   * full_text_plain for the motion-count regex in build_real_corpus.py
 --
 -- Runs unbounded over all of case_documents — caller is responsible for
@@ -12,16 +13,22 @@
 SET app.current_tenant_id = '00000000-0000-0000-0000-000000000001';
 
 WITH cd_judges AS (
-    -- Sprint 16 / S16.2 — prefer normalized_name matching so the early-SCOTUS
-    -- corpus (which signs opinions "Taney, Ch. J." rather than "Roger Brooke
-    -- Taney") joins to the FJC-populated KG. Only judges with severity_proxy
-    -- data are eligible: this filters out FJC rows for never-matched judges
-    -- and avoids picking an unrelated FJC judge whose surname collides with
-    -- a word in the opinion body. Falls back to NULL when no judge matches.
+    -- Sprint 16 / S16.5 — the ingest extractor now writes
+    -- `case_documents.primary_judge_name` (the normalized name of the first
+    -- signature-line judge per `crate::kg::extract_judge_names`). That lets
+    -- us drop the substring LATERAL entirely and equality-join to `judges`.
     --
-    -- Substring strategy: insist on word-boundary tokens via the ' <name> '
-    -- form. Surrounding spaces avoid collisions like "ney" matching inside
-    -- "money".
+    -- This fixes two failure modes the LATERAL had:
+    --   1. Common-word collisions ("Marshall" / "Brown" / "White" appearing
+    --      in unrelated body text caused random judges' severity to attach).
+    --   2. Coverage in the early-CAP SCOTUS slice where the surname only
+    --      appeared on the signature line — `extract_judge_names` already
+    --      handles those signature patterns, so the materialized edge is
+    --      strictly better-recall than `position()` lookups against
+    --      `full_text_plain`.
+    --
+    -- We still gate on `bio ? 'severity_proxy'` so rows whose author has no
+    -- computed severity drop to NULL (the build pipeline neutral-fills).
     SELECT
         cd.id              AS doc_id,
         cd.opinion_id,
@@ -49,22 +56,13 @@ WITH cd_judges AS (
         cd.citation_count  AS citation_count,
         length(cd.full_text_plain) AS text_length
     FROM case_documents cd
-    LEFT JOIN LATERAL (
-        SELECT *
-        FROM judges jj
-        WHERE jj.bio ? 'severity_proxy'
-          AND (
-            -- Prefer the FJC-aliased lowercase last-name match.
-            position(' ' || jj.normalized_name || ' '   IN lower(cd.full_text_plain)) > 0
-            OR position(' ' || jj.normalized_name || ',' IN lower(cd.full_text_plain)) > 0
-            OR position(' ' || jj.normalized_name || '.' IN lower(cd.full_text_plain)) > 0
-            -- Then fall through to full_name for any judges whose normalized
-            -- form is a multi-word string (e.g. "william cushing").
-            OR position(jj.full_name IN cd.full_text_plain) > 0
-          )
-        ORDER BY (jj.bio->'severity_proxy'->>'cases_analyzed')::int DESC NULLS LAST
-        LIMIT 1
-    ) j ON true
+    -- S16.5 — judges joined via the materialized opinion-author edge,
+    -- replacing the body-substring LATERAL that suffered surname collisions.
+    LEFT JOIN judges j
+        ON j.normalized_name = cd.primary_judge_name
+       AND j.tenant_id       = current_setting('app.current_tenant_id')::uuid
+       AND j.bio ? 'severity_proxy'
+    -- S16.3 attorney LATERAL (kept; no materialized edge for attorneys yet).
     LEFT JOIN LATERAL (
         SELECT *
         FROM attorneys aa
