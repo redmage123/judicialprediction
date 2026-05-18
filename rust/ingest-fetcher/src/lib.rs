@@ -6,6 +6,7 @@
 //!
 //! Sprint-2 scope is fixture-only. Real-network smoke is Sprint-3.
 
+pub mod cap;
 pub mod citations;
 pub mod db;
 pub mod extract;

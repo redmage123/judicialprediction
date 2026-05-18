@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use ingest_fetcher::{citations, db, extract, fetch, kg, parse_tarball, rest};
+use ingest_fetcher::{cap, citations, db, extract, fetch, kg, parse_tarball, rest};
 use uuid::Uuid;
 
 #[derive(Parser)]
@@ -74,6 +74,31 @@ enum Command {
     /// `case_document_citations` edges.  Idempotent.  No tenant arg — the
     /// public corpus has no RLS.
     PopulateCitations {
+        #[arg(long)]
+        database_url: Option<String>,
+    },
+    /// Sprint 15 / S15.5: stream CAP (Caselaw Access Project) per-case JSONs
+    /// from static.case.law into `case_documents` with `source = 'cap'`.
+    ///
+    /// Pragmatic federal slice: SCOTUS (`us`), Federal Reporter 3d (`f3d`),
+    /// Federal Reporter 4th (`f4th` — currently 404; gracefully skipped),
+    /// and Federal Supplement (`f-supp`). Cap defaults to 30k opinions per
+    /// run; raise for larger pulls.
+    ///
+    /// On a static.case.law outage the run exits cleanly with `ingested=0`
+    /// and a logged warning — it never blocks the rest of the pipeline.
+    Cap {
+        /// Federal jurisdiction slugs to fetch (default: all four).
+        #[arg(
+            long,
+            value_delimiter = ',',
+            default_values_t = vec!["us".to_string(), "f3d".to_string(), "f4th".to_string(), "f-supp".to_string()],
+        )]
+        jurisdictions: Vec<String>,
+        /// Max opinions to ingest in this run (default: 30000).
+        #[arg(long, default_value_t = 30000)]
+        limit: usize,
+        /// Postgres DSN. Defaults to $DATABASE_URL.
         #[arg(long)]
         database_url: Option<String>,
     },
@@ -209,6 +234,19 @@ async fn main() -> Result<()> {
                 stats.cites_dangling,
                 stats.edges_inserted,
                 stats.edges_existing,
+            );
+        }
+        Command::Cap { jurisdictions, limit, database_url } => {
+            let dsn = database_url
+                .or_else(|| std::env::var("DATABASE_URL").ok())
+                .context("provide --database-url or set DATABASE_URL")?;
+            let pool = sqlx::PgPool::connect(&dsn)
+                .await
+                .context("connect to Postgres")?;
+            let stats = cap::run_ingest(&pool, &jurisdictions, limit).await?;
+            println!(
+                "cap-ingest jurisdictions={:?} limit={} ingested={} skipped={} errors={}",
+                jurisdictions, limit, stats.ingested, stats.skipped, stats.errors,
             );
         }
     }
