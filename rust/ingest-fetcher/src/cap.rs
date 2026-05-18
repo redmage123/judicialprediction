@@ -281,7 +281,13 @@ async fn list_volumes(client: &reqwest::Client, jurisdiction: &str) -> Result<Ve
             rest.parse::<u32>().ok()
         })
         .collect();
-    vols.sort_unstable();
+    // Sprint 16 diagnostic (2026-05-18): CAP volumes are chronological, so
+    // sorting ascending pulled the OLDEST 5000 opinions (1754-1875 era for
+    // `us`).  Modern legal practice has 2x stronger feature correlation
+    // with outcomes than pre-1900 doctrine — see MODEL_CARD Sprint 16 probe.
+    // Sort DESCENDING so the limit-bounded ingest grabs the latest volumes
+    // first.  Inside each volume the case ordering is preserved (page order).
+    vols.sort_unstable_by(|a, b| b.cmp(a));
     vols.dedup();
     Ok(vols)
 }
