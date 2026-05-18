@@ -42,7 +42,12 @@ WITH cd_judges AS (
         -- the one with the largest `cases_analyzed` so the corpus row
         -- gets the attorney with the richest signal.
         a.full_name        AS attorney_name,
-        (a.bio->'win_rate_proxy'->>'win_rate')::float8 AS attorney_win_rate
+        (a.bio->'win_rate_proxy'->>'win_rate')::float8 AS attorney_win_rate,
+        -- S16.6: materiality_score inputs. citation_count is sparse (mostly
+        -- populated on CL ingest, not on CAP); length(full_text_plain) is
+        -- always set on a real opinion.
+        cd.citation_count  AS citation_count,
+        length(cd.full_text_plain) AS text_length
     FROM case_documents cd
     LEFT JOIN LATERAL (
         SELECT *

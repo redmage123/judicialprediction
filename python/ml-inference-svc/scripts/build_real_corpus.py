@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 from pathlib import Path
 
@@ -100,7 +101,79 @@ def attorney_win_rate_from_record(record: dict) -> float:
         return NEUTRAL_FILL
 
 
-def project_row(record: dict) -> dict | None:
+# ── S16.6: materiality_score ─────────────────────────────────────────────────
+#
+# Coarse proxy for "how material / influential is this opinion?".  We don't
+# have a canonical materiality signal; we combine two cheap proxies that are
+# real on most rows:
+#   * citation_count — how many later opinions cite this one (sparse on CAP)
+#   * length(full_text_plain) — text length as proxy for complexity
+# raw = log1p(citation_count) + log1p(text_length / 1000)
+# materiality_score = clamp((raw - corpus_min) / (corpus_max - corpus_min), 0, 1)
+# Per-corpus min/max are persisted to data/materiality_calibration.json so
+# rerun + inference use the same scale.
+
+MATERIALITY_CALIBRATION_PATH = (
+    Path(__file__).resolve().parent.parent / "data" / "materiality_calibration.json"
+)
+
+
+def _raw_materiality(citation_count: int, text_length: int) -> float:
+    cc = max(0, int(citation_count or 0))
+    tl = max(0, int(text_length or 0))
+    return math.log1p(cc) + math.log1p(tl / 1000.0)
+
+
+def compute_materiality(citation_count: int, text_length: int, calibration: dict) -> float:
+    """
+    Combine citation count + opinion length into a [0, 1] importance proxy.
+
+    Calibration dict: {"min": float, "max": float} computed by min-max
+    sweep over the corpus on first run; persisted to data/materiality_calibration.json
+    so the same scale applies across reruns / inference.
+    """
+    raw = math.log1p(max(0, int(citation_count or 0))) + math.log1p(
+        max(0, int(text_length or 0)) / 1000.0
+    )
+    lo = float(calibration.get("min", 0.0))
+    hi = float(calibration.get("max", 0.0))
+    if hi - lo < 1e-6:
+        return NEUTRAL_FILL
+    val = (raw - lo) / (hi - lo)
+    return max(0.0, min(1.0, val))
+
+
+def compute_calibration(records: list[dict]) -> dict:
+    """Min-max sweep over the corpus to set the [0, 1] scale."""
+    raws: list[float] = []
+    for rec in records:
+        raws.append(
+            _raw_materiality(
+                rec.get("citation_count") or 0,
+                rec.get("text_length") or 0,
+            )
+        )
+    if not raws:
+        return {"min": 0.0, "max": 0.0}
+    return {"min": float(min(raws)), "max": float(max(raws))}
+
+
+def load_or_build_calibration(records: list[dict], path: Path) -> dict:
+    """Read sidecar JSON if present; else compute from corpus and persist."""
+    if path.exists():
+        try:
+            cal = json.loads(path.read_text())
+            if "min" in cal and "max" in cal:
+                return {"min": float(cal["min"]), "max": float(cal["max"])}
+        except (json.JSONDecodeError, ValueError, TypeError):
+            pass
+    cal = compute_calibration(records)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(cal, indent=2) + "\n")
+    return cal
+
+
+def project_row(record: dict, materiality_calibration: dict | None = None) -> dict | None:
     """Project one DB row to the trainer's feature dict.  Returns None when
     the row has no usable target (split / null)."""
     outcome_raw = record.get("outcome_for")
@@ -123,11 +196,22 @@ def project_row(record: dict) -> dict | None:
         record.get("appointing_president"),
         neutral=NEUTRAL_FILL,
     )
+    # S16.6: materiality_score from citation_count + text_length, normalised
+    # against the per-corpus calibration. When the caller hasn't supplied a
+    # calibration we fall back to the neutral prior (legacy behaviour).
+    if materiality_calibration is not None:
+        materiality = compute_materiality(
+            record.get("citation_count") or 0,
+            record.get("text_length") or 0,
+            materiality_calibration,
+        )
+    else:
+        materiality = NEUTRAL_FILL
     return {
         "judge_severity": float(severity_raw),
         "attorney_win_rate": attorney_win_rate_from_record(record),
         "ideology_distance": float(ideology),
-        "materiality_score": NEUTRAL_FILL,
+        "materiality_score": materiality,
         "procedural_motion_count": count_motions(record.get("full_text_plain")),
         "case_type": CASE_TYPE_MAP.get(case_type_raw, "civil"),
         "jurisdiction": JURISDICTION_MAP.get(court_id, "Federal"),
@@ -138,15 +222,31 @@ def project_row(record: dict) -> dict | None:
         "_raw_case_type": case_type_raw,
         "_raw_outcome": outcome_raw,
         "_appointing_president": record.get("appointing_president"),
+        # S16.6: raw inputs preserved for downstream auditing.
+        "_citation_count": int(record.get("citation_count") or 0),
+        "_text_length": int(record.get("text_length") or 0),
     }
 
 
-def main(input_path: Path, output_path: Path) -> None:
+def main(
+    input_path: Path,
+    output_path: Path,
+    calibration_path: Path | None = None,
+) -> None:
     raw = json.loads(input_path.read_text())
     if not isinstance(raw, list):
         raise SystemExit("input must be a JSON array of rows")
 
-    rows = [r for r in (project_row(rec) for rec in raw) if r is not None]
+    # S16.6: load or compute the materiality calibration BEFORE projecting
+    # rows. The sidecar pins the [0, 1] scale across reruns / inference.
+    cal_path = calibration_path or MATERIALITY_CALIBRATION_PATH
+    materiality_calibration = load_or_build_calibration(raw, cal_path)
+
+    rows = [
+        r
+        for r in (project_row(rec, materiality_calibration) for rec in raw)
+        if r is not None
+    ]
     if not rows:
         raise SystemExit("no usable rows — every row had outcome=split/null")
 
@@ -159,11 +259,29 @@ def main(input_path: Path, output_path: Path) -> None:
     print(f"Base win-rate (petitioner): {win_rate:.3f}")
     print(f"Court breakdown: {df['_court_id'].value_counts().to_dict()}")
     print(f"Outcome breakdown: {df['_raw_outcome'].value_counts().to_dict()}")
+    # S16.6: surface the calibration + materiality distribution for the
+    # operator running the build.
+    print(
+        f"Materiality calibration: min={materiality_calibration['min']:.4f} "
+        f"max={materiality_calibration['max']:.4f} (sidecar: {cal_path})"
+    )
+    non_neutral = int((df["materiality_score"] != NEUTRAL_FILL).sum())
+    print(
+        f"materiality_score non-neutral: {non_neutral}/{len(df)} "
+        f"(mean={df['materiality_score'].mean():.3f})"
+    )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument(
+        "--materiality-calibration",
+        type=Path,
+        default=None,
+        help="Path to materiality calibration JSON sidecar (default: "
+        "data/materiality_calibration.json next to this script).",
+    )
     args = parser.parse_args()
-    main(args.input, args.output)
+    main(args.input, args.output, args.materiality_calibration)
