@@ -42,6 +42,14 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// without measurably slowing a 30k-opinion run.
 const PER_CASE_DELAY: Duration = Duration::from_millis(50);
 
+/// Sprint 17 (post-mortem): the serial fetcher was ~15 cases/min on the
+/// modern volumes because each case JSON is 100-200 KB and Cloudflare's
+/// TCP-handshake overhead dominated. With N concurrent in-flight fetches
+/// we get N× throughput up to whatever upstream rate-limit kicks in.
+/// 10 is conservative — static.case.law is Cloudflare-cached and has not
+/// rate-limited us at this level in spot-checks.
+const CONCURRENT_FETCHES: usize = 10;
+
 #[derive(Debug, Default, Clone)]
 pub struct CapStats {
     /// Rows where INSERT actually persisted a new row.
@@ -389,36 +397,79 @@ pub async fn run_ingest(
                 }
             };
 
-            for url in case_urls {
+            // Parallel fetch within a volume: keep N fetches in flight via
+            // a tokio JoinSet. Each completed fetch is processed
+            // sequentially (project + DB insert are both fast and the DB
+            // wants serial inserts for clear stats).
+            let mut url_iter = case_urls.into_iter();
+            let mut joinset: tokio::task::JoinSet<(String, Result<CapCase>)> =
+                tokio::task::JoinSet::new();
+
+            // Seed up to N initial fetches.
+            for _ in 0..CONCURRENT_FETCHES {
                 if (stats.ingested + stats.skipped) as usize >= limit {
                     break;
                 }
-                let case = match fetch_case(&client, &url).await {
-                    Ok(c) => c,
+                let Some(url) = url_iter.next() else { break };
+                let client_c = client.clone();
+                joinset.spawn(async move {
+                    let result = fetch_case(&client_c, &url).await;
+                    (url, result)
+                });
+            }
+
+            // Drain + replenish.
+            while let Some(join_result) = joinset.join_next().await {
+                let (url, case_result) = match join_result {
+                    Ok(pair) => pair,
                     Err(e) => {
-                        tracing::warn!(error = %e, url = %url, "skipping bad case JSON");
+                        tracing::warn!(error = %e, "fetch task panicked");
                         stats.errors += 1;
                         continue;
                     }
                 };
-                let Some(row) = project_case(case, jurisdiction, &url) else {
-                    // No opinion text — not an error, just an empty record
-                    // (e.g. a stub page). Don't count as error.
-                    continue;
-                };
-                match insert_row(pool, &row).await {
-                    Ok(true) => stats.ingested += 1,
-                    Ok(false) => stats.skipped += 1,
+
+                match case_result {
+                    Ok(case) => {
+                        if let Some(row) = project_case(case, jurisdiction, &url) {
+                            match insert_row(pool, &row).await {
+                                Ok(true) => stats.ingested += 1,
+                                Ok(false) => stats.skipped += 1,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        error = %e,
+                                        opinion_id = row.opinion_id,
+                                        "insert failed"
+                                    );
+                                    stats.errors += 1;
+                                }
+                            }
+                        }
+                        // project_case returning None is a stub page — not
+                        // counted as error.
+                    }
                     Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            opinion_id = row.opinion_id,
-                            "insert failed"
-                        );
+                        tracing::warn!(error = %e, url = %url, "skipping bad case JSON");
                         stats.errors += 1;
                     }
                 }
-                tokio::time::sleep(PER_CASE_DELAY).await;
+
+                // Pull the next URL in to keep N inflight.
+                if (stats.ingested + stats.skipped) as usize >= limit {
+                    // Abort outstanding fetches so we don't waste bandwidth.
+                    joinset.abort_all();
+                    break;
+                }
+                if let Some(next_url) = url_iter.next() {
+                    let client_c = client.clone();
+                    joinset.spawn(async move {
+                        let result = fetch_case(&client_c, &next_url).await;
+                        (next_url, result)
+                    });
+                }
+                // Tiny global politeness sleep (much smaller than the
+                // serial 50ms because we're not the bottleneck anymore).
+                tokio::time::sleep(PER_CASE_DELAY / 10).await;
             }
         }
     }
