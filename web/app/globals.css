@@ -86,17 +86,26 @@
     color: hsl(var(--foreground));
     font-family: Arial, Helvetica, sans-serif;
   }
-  /* Audit finding UX-1 (2026-05-17): the cookie banner is fixed bottom-0
-     and used to overlap the last rows of long pages (cases list, audit
-     log).  The banner toggles this class on <body> while open; we
-     reserve enough page-bottom space for it on phone (taller, two-line
-     banner) and desktop (shorter). */
+  /* Audit findings UX-1 (2026-05-17) + Sprint 13 follow-up: the cookie
+     banner is fixed bottom-0 and would overlap mid-page form fields
+     (Jurisdiction on /case/new) and last rows of long tables. The
+     banner toggles `has-cookie-banner` while open; if the operator
+     expands the Details disclosure it adds `-expanded`.  Padding
+     reserves enough page-bottom space for each rendered height. */
   body.has-cookie-banner {
-    padding-bottom: 12rem;
+    padding-bottom: 6rem;
   }
   @media (min-width: 640px) {
     body.has-cookie-banner {
-      padding-bottom: 7rem;
+      padding-bottom: 4rem;
+    }
+  }
+  body.has-cookie-banner.has-cookie-banner-expanded {
+    padding-bottom: 12rem;
+  }
+  @media (min-width: 640px) {
+    body.has-cookie-banner.has-cookie-banner-expanded {
+      padding-bottom: 9rem;
     }
   }
 }

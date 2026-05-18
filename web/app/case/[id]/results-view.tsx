@@ -298,6 +298,24 @@ function ResultsLayout({ caseResult }: ResultsLayoutProps) {
               <li key={i}>{formatBulletAmounts(bullet)}</li>
             ))}
           </ul>
+          {/* Sprint 13 audit UI/UX finding: when the recommendation is
+              Settle and confidence is Low, surface a one-line nudge
+              that the current synthetic-data tilt skews predictions
+              toward Settle. Helps operators read low-confidence Settles
+              as "near the decision boundary" rather than confident
+              advice.  The dashboard banner already covers the global
+              caveat; this is the per-case-card variant. */}
+          {recommendation.kind === "Settle" && recommendation.confidence === "Low" && (
+            <p
+              className="text-xs italic text-muted-foreground"
+              aria-label="Recommendation context"
+            >
+              Note: the v1 synthetic training corpus is petitioner-friendly
+              about 30% of the time, so low-confidence Settle outputs are
+              often near the boundary rather than a strong call. See the
+              model version banner on the dashboard.
+            </p>
+          )}
           {/* S6.4 — Counter-recommendation panel.  Only rendered when the
               backend marked confidence as "Low" (CI width ≥ 0.20); see
               decision-arith::recommend.  Operators see what the call would
