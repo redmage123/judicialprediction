@@ -18,6 +18,7 @@ dependencies = [
     "pandas>=2.3.3",
     "numpy>=2.4.4",
     "pyarrow>=23.0.1",
+    "psycopg2-binary>=2.9.12",
 ]
 
 [dependency-groups]
