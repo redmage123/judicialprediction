@@ -154,3 +154,36 @@ boundary AND at the ML service's `ALLOWLIST_FEATURES` check.
 | v0 | 2026-04 | XGBoost | Synthetic v0 corpus, Brier 0.25, effectively flat |
 | v1 | 2026-05-13 | LogisticRegression | Real n=10 hand-labelled; deprecated |
 | **Sprint 12.5** | 2026-09-04 | LogisticRegression | Synthetic v1 + stacker, Brier 0.1662 |
+| Sprint 14 (probe) | 2026-05-18 | _not promoted_ | Real n=41 (CourtListener cafc + tax) — see below |
+
+## Sprint 14 retrain probe (not promoted)
+
+Sprint 14 retrained `logreg-v1-real` on a real-corpus parquet built from
+41 hard-labelled CourtListener opinions (36 cafc + 5 tax, 10 petitioner /
+31 respondent, base rate 0.244). The detection pipeline was extended in
+this sprint to handle appellate dispositions
+(`AFFIRMED`/`REVERSED`/`VACATED` + IN-PART forms) and the plural form
+`Decisions will be entered for …` — that lifted outcome-label coverage
+from **5/109 → 52/109** opinions before this train, with 41 of those 52
+resolving to a hard binary outcome.
+
+The retrained model came in materially worse than the Sprint-12.5
+champion:
+
+| Metric (lower better) | Sprint 12.5 (synth n=2000) | Sprint 14 (real n=41) |
+|---|---|---|
+| Brier | **0.1662** | 0.2571 |
+| ECE | **0.0471** | 0.2524 |
+| LogLoss | **0.5071** | 0.7088 |
+
+This is not a surprise: 41 rows with 76%/24% class imbalance and four of
+the seven features pinned to the neutral prior (no attorney/ideology/
+materiality signals derivable from opinion text yet) doesn't out-fit a
+2000-row synthetic corpus with consistent feature-outcome structure.
+
+**Decision:** champion remains Sprint 12.5 (`run_id
+4539e88454d64c7fbce2091be1195bf7`). The Sprint 14 MLflow run
+(`run_id dfe701f41fd842c5a4e8ca68530d9703`) and the
+`data/real_corpus_v2.parquet` artifact are retained for reference;
+predict.py is unchanged. The CourtListener daily backfill continues so
+the corpus grows past where a real-data champion is competitive.

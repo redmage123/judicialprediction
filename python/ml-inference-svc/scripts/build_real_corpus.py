@@ -90,8 +90,14 @@ def project_row(record: dict) -> dict | None:
 
     court_id = record.get("court_id", "")
     case_type_raw = record.get("case_type", "")
+    # judge_severity is NULL when no judge matched the opinion's LATERAL
+    # join (especially common on cafc opinions where the panel names don't
+    # appear in our small KG yet). Fall through to the neutral prior.
+    severity_raw = record.get("judge_severity")
+    if severity_raw is None:
+        severity_raw = NEUTRAL_FILL
     return {
-        "judge_severity": float(record.get("judge_severity", NEUTRAL_FILL)),
+        "judge_severity": float(severity_raw),
         "attorney_win_rate": NEUTRAL_FILL,
         "ideology_distance": NEUTRAL_FILL,
         "materiality_score": NEUTRAL_FILL,

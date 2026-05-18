@@ -131,57 +131,145 @@ pub fn classify_case_type(text: &str) -> &'static str {
 /// Detect the disposition outcome.  Returns:
 /// * `Some("petitioner")` — clear petitioner win
 /// * `Some("respondent")` — clear respondent (IRS) win
-/// * `Some("split")` — both phrases appear in the same disposition window
+/// * `Some("split")` — mixed disposition
 /// * `None` — Rule 155, dismissal-only, or no disposition phrase found
 ///
-/// The disposition window is the text matched by "Decision will be entered…"
-/// up to the first period (or 400 chars, whichever comes first) so that
-/// later mentions of "petitioner" or "respondent" elsewhere in the opinion
-/// don't pollute the signal.
+/// Tax-court (and any court that uses the "decision will be entered" idiom)
+/// is handled by [`detect_outcome_taxcourt`]; federal-circuit appellate
+/// dispositions (`AFFIRMED`/`REVERSED`/`VACATED` blocks) are handled by
+/// [`detect_outcome_appellate`].  Use [`detect_outcome_for_court`] when the
+/// court_id is known — it picks the right scanner.  The bare entry point
+/// still tries both in fallback order so older call sites and tests don't
+/// regress.
 pub fn detect_outcome(text: &str) -> Option<&'static str> {
+    detect_outcome_taxcourt(text).or_else(|| detect_outcome_appellate(text))
+}
+
+/// Same as [`detect_outcome`] but dispatches by court_id.  CAFC is appellate-only,
+/// tax is "decision will be entered"-only; everything else falls back to the
+/// generic [`detect_outcome`].  Routing keeps tax-court appellate-style
+/// affirmance language (which occurs in dicta about prior appeals) from
+/// leaking into the outcome.
+pub fn detect_outcome_for_court(court_id: &str, text: &str) -> Option<&'static str> {
+    match court_id {
+        "cafc" => detect_outcome_appellate(text),
+        "tax" => detect_outcome_taxcourt(text),
+        _ => detect_outcome(text),
+    }
+}
+
+/// Tax-court disposition scanner.  Matches both singular ("Decision will be
+/// entered") and plural ("Decisions will be entered") forms — the plural form
+/// is common when a single opinion resolves several taxable years.
+///
+/// The disposition window is the text matched by the phrase up to the first
+/// period (or 400 chars, whichever comes first) so that later mentions of
+/// "petitioner" or "respondent" elsewhere in the opinion don't pollute the
+/// signal.
+fn detect_outcome_taxcourt(text: &str) -> Option<&'static str> {
     // Whitespace-normalize so newline-wrapped phrases match.  We don't
     // lowercase yet because the lowercase pass happens inside the disposition
     // window only.
     let normalized: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let lower = normalized.to_ascii_lowercase();
 
-    // Find the disposition sentence.  The phrase appears 1-3× in tax-court
-    // opinions; we scan all occurrences and prefer the most specific one
-    // (petitioner+respondent > respondent > petitioner > rule 155).
     let mut best: Option<&'static str> = None;
-    for (idx, _) in lower.match_indices("decision will be entered") {
-        let window_end = (idx + 400).min(lower.len());
-        let window = &lower[idx..window_end];
-        // First period closes the sentence.
-        let stop = window.find('.').map_or(window.len(), |p| p);
-        let window = &window[..stop];
+    // Scan both "decision will be entered" and "decisions will be entered".
+    // The plural form is the only added case; everything else is unchanged.
+    for anchor in ["decision will be entered", "decisions will be entered"] {
+        for (idx, _) in lower.match_indices(anchor) {
+            let window_end = (idx + 400).min(lower.len());
+            let window = &lower[idx..window_end];
+            let stop = window.find('.').map_or(window.len(), |p| p);
+            let window = &window[..stop];
 
-        let has_pet = window.contains("for petitioner");
-        let has_resp = window.contains("for respondent");
-        let has_rule155 = window.contains("under rule 155") || window.contains("pursuant to rule 155");
+            let has_pet = window.contains("for petitioner");
+            let has_resp = window.contains("for respondent");
+            let has_rule155 = window.contains("under rule 155") || window.contains("pursuant to rule 155");
 
-        let candidate: Option<&'static str> = match (has_pet, has_resp, has_rule155) {
-            (true, true, _) => Some("split"),
-            (false, true, _) => Some("respondent"),
-            (true, false, _) => Some("petitioner"),
-            (false, false, true) => None, // Rule 155 → unresolved
-            (false, false, false) => None,
-        };
+            let candidate: Option<&'static str> = match (has_pet, has_resp, has_rule155) {
+                (true, true, _) => Some("split"),
+                (false, true, _) => Some("respondent"),
+                (true, false, _) => Some("petitioner"),
+                (false, false, true) => None,
+                (false, false, false) => None,
+            };
 
-        // "Split" wins over single-party wins; single-party wins over None.
-        if let Some(c) = candidate {
-            match (best, c) {
-                (_, "split") => best = Some("split"),
-                (None, x) => best = Some(x),
-                (Some("petitioner"), "respondent") | (Some("respondent"), "petitioner") => {
-                    best = Some("split")
+            if let Some(c) = candidate {
+                match (best, c) {
+                    (_, "split") => best = Some("split"),
+                    (None, x) => best = Some(x),
+                    (Some("petitioner"), "respondent") | (Some("respondent"), "petitioner") => {
+                        best = Some("split")
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
     }
 
     best
+}
+
+/// Federal-circuit appellate disposition scanner.  Federal-Circuit opinions
+/// (and similarly-styled appellate decisions) end with an all-caps disposition
+/// block — typically the last 600 characters of the opinion.  We look for the
+/// keywords in that tail only, so dicta references to prior appellate history
+/// in the body don't pollute the signal.
+///
+/// Convention: the appellant is the party challenging the lower-court ruling,
+/// i.e. the **petitioner** in our binary.  So:
+///   * `AFFIRMED` (lower-court stands) → respondent wins
+///   * `REVERSED` (lower-court overturned) → petitioner wins
+///   * `VACATED` (lower-court set aside) → petitioner wins (boundary-favorable;
+///     vacatur is petitioner-favorable as a binary outcome even though it
+///     usually triggers remand)
+///   * Mixed forms ("AFFIRMED-IN-PART, ..., REVERSED-IN-PART", "AFFIRMED IN
+///     PART AND REVERSED IN PART", etc.) → split
+///   * `DISMISSED` → None (jurisdictional, not on the merits)
+fn detect_outcome_appellate(text: &str) -> Option<&'static str> {
+    // Window the LAST 600 chars — CAFC dispositions live in the closing
+    // block.  If the opinion is shorter, scan the whole text.
+    let tail_start = text.len().saturating_sub(600);
+    let tail = &text[tail_start..];
+    // Whitespace-normalize the tail so multi-line dispositions like
+    // "AFFIRMED-IN-PART, VACATED-IN-PART,\n             REVERSED-IN-PART."
+    // collapse to a single line we can scan.
+    let normalized: String = tail.split_whitespace().collect::<Vec<_>>().join(" ");
+    let upper = normalized.to_ascii_uppercase();
+
+    // Dismissal short-circuits — it's a jurisdictional disposition, not a
+    // merits outcome, so we surface as None rather than guessing a winner.
+    if upper.contains("DISMISSED") && !upper.contains("AFFIRMED") && !upper.contains("REVERSED") {
+        return None;
+    }
+
+    // "IN PART" markers indicate a split disposition regardless of which
+    // verbs surround them.
+    let in_part = upper.contains("IN-PART") || upper.contains("IN PART");
+    let has_affirmed = upper.contains("AFFIRMED");
+    let has_reversed = upper.contains("REVERSED");
+    let has_vacated = upper.contains("VACATED");
+
+    // Mixed-disposition forms.
+    if in_part && (has_affirmed as u8 + has_reversed as u8 + has_vacated as u8) >= 2 {
+        return Some("split");
+    }
+    // Both AFFIRMED + REVERSED without "IN PART" still indicates a mixed
+    // disposition (some CAFC orders just say "AFFIRMED. REVERSED." on
+    // separate counts).
+    if has_affirmed && (has_reversed || has_vacated) {
+        return Some("split");
+    }
+
+    if has_reversed || has_vacated {
+        return Some("petitioner");
+    }
+    if has_affirmed {
+        return Some("respondent");
+    }
+
+    None
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -224,7 +312,7 @@ pub async fn run_extraction(pool: &PgPool, tenant_id: Uuid) -> Result<ExtractSta
 
     for (doc_id, court_slug, text) in &rows {
         let case_type = classify_case_type(text);
-        let outcome = detect_outcome(text);
+        let outcome = detect_outcome_for_court(court_slug, text);
 
         sqlx::query(
             "UPDATE case_documents
@@ -411,5 +499,84 @@ mod tests {
         let t = "Decision will be entered for petitioner.\n\nDecision will be entered \
                  for respondent.";
         assert_eq!(detect_outcome(t), Some("split"));
+    }
+
+    // ── New plural-form + CAFC dispositions (Sprint 14) ────────────────────
+
+    #[test]
+    fn outcome_plural_decisions_respondent() {
+        // Real corpus: "Decisions will be entered for respondent for the
+        // taxable years 2006 and 2007 and under Rule 155 for the taxable
+        // year 2008".  Plural form was missed before Sprint 14.
+        let t = "Decisions will be entered for respondent for the taxable years 2006 \
+                 and 2007 and under Rule 155 for the taxable year 2008";
+        assert_eq!(detect_outcome(t), Some("respondent"));
+    }
+
+    #[test]
+    fn outcome_appellate_affirmed_is_respondent() {
+        // Federal-circuit appeal where the lower-court ruling stands.
+        let t = "For the foregoing reasons, we affirm. AFFIRMED";
+        assert_eq!(detect_outcome_for_court("cafc", t), Some("respondent"));
+    }
+
+    #[test]
+    fn outcome_appellate_reversed_is_petitioner() {
+        let t = "We reverse the district court's grant of summary judgment. REVERSED";
+        assert_eq!(detect_outcome_for_court("cafc", t), Some("petitioner"));
+    }
+
+    #[test]
+    fn outcome_appellate_vacated_is_petitioner() {
+        let t = "The Board's decision is vacated and the matter is remanded. VACATED";
+        assert_eq!(detect_outcome_for_court("cafc", t), Some("petitioner"));
+    }
+
+    #[test]
+    fn outcome_appellate_mixed_is_split() {
+        // Multi-line, hyphenated form from the real corpus.
+        let t = "AFFIRMED-IN-PART, VACATED-IN-PART,\n             REVERSED-IN-PART.";
+        assert_eq!(detect_outcome_for_court("cafc", t), Some("split"));
+    }
+
+    #[test]
+    fn outcome_appellate_in_part_words_is_split() {
+        // Words-not-hyphens form from the real corpus.
+        let t = "AFFIRMED IN PART AND REVERSED IN PART";
+        assert_eq!(detect_outcome_for_court("cafc", t), Some("split"));
+    }
+
+    #[test]
+    fn outcome_appellate_dismissed_is_none() {
+        // Jurisdictional dismissal — not a merits outcome.
+        let t = "we dismiss the appeal for lack of jurisdiction. DISMISSED";
+        assert_eq!(detect_outcome_for_court("cafc", t), None);
+    }
+
+    #[test]
+    fn outcome_appellate_only_scans_tail() {
+        // Body of an opinion can reference prior appellate history ("the
+        // Federal Circuit AFFIRMED in 2018, but on remand…") that must NOT
+        // be confused with the current opinion's disposition.  The scanner
+        // windows the last 600 chars so historical references are out of
+        // scope, and an unrelated final phrase like a Rule 155 boilerplate
+        // returns None.
+        let body = "x".repeat(2000);
+        let t = format!(
+            "Long body referencing AFFIRMED on a previous appeal. {body} Decision will \
+             be entered under Rule 155."
+        );
+        assert_eq!(detect_outcome_for_court("cafc", &t), None);
+    }
+
+    #[test]
+    fn outcome_dispatch_skips_taxcourt_for_cafc_corpus() {
+        // CAFC opinions sometimes recite "decision will be entered" idiom
+        // when discussing a tax-court history.  detect_outcome_for_court
+        // routes by court_id so the tax-court scanner doesn't fire on a
+        // CAFC corpus item.
+        let t = "The tax court below held: Decision will be entered for respondent. \
+                 We disagree. REVERSED";
+        assert_eq!(detect_outcome_for_court("cafc", t), Some("petitioner"));
     }
 }
