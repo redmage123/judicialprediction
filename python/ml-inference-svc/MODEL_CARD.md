@@ -156,6 +156,7 @@ boundary AND at the ML service's `ALLOWLIST_FEATURES` check.
 | **Sprint 12.5** | 2026-09-04 | LogisticRegression | Synthetic v1 + stacker, Brier 0.1662 |
 | Sprint 14 (probe) | 2026-05-18 | _not promoted_ | Real n=41 (CourtListener cafc + tax) — see below |
 | Sprint 15 (probe) | 2026-05-18 | _not promoted_ | Real n=623 (+CAP SCOTUS) — see below |
+| Sprint 16 (probe) | 2026-05-18 | _not promoted_ | Real n=630 + 4 features de-neutralised — see below |
 
 ## Sprint 14 retrain probe (not promoted)
 
@@ -310,3 +311,117 @@ When a better materiality model lands (e.g. an SCDB-trained or
 amount-in-controversy regressor for tax/civil rights cases) the
 helper's signature stays the same; only the formula behind
 `compute_materiality` changes.
+
+## Sprint 16 retrain probe (not promoted)
+
+Sprint 16 attacked the diagnostic from Sprint 15: 4 of 7 features were
+pinned to NEUTRAL_FILL. Five sub-tickets landed:
+
+* **S16.2** — SCOTUS + Federal Circuit panel-name extractor in
+  `rust/ingest-fetcher/src/kg.rs`. Justice signatures
+  (`Marshall, Ch. J.` / `JUSTICE BREYER delivered` / `Mr. Justice
+  HOLMES delivered` / `JOHNSON, J.`) plus circuit panel headers
+  (`Before DYK, REYNA, and STOLL, Circuit Judges.`).
+* **S16.3** — attorney extractor + per-attorney win-rate rollup.
+  New `attorneys` table populated at extract-features time;
+  439 attorneys with `bio.win_rate_proxy` across the 5,109-doc
+  corpus.
+* **S16.4** — `appointing_president → ideology proxy`. 44 presidents
+  mapped in `python/ml-inference-svc/scripts/president_ideology.py`;
+  fallback when DIME / MQ / JCS doesn't have the judge.
+* **S16.5** — materialized opinion-author edge
+  (`case_documents.primary_judge_name`) so the judge↔opinion join is
+  precision-correct rather than substring-collision-prone.
+* **S16.6** — `materiality_score` from
+  `log1p(citation_count) + log1p(text_length / 1000)`, min-max
+  normalised against a per-corpus calibration sidecar.
+
+Net feature-coverage uplift on the 630-row labelled corpus:
+
+| Feature | Sprint 15 | Sprint 16 |
+|---|---|---|
+| `judge_severity` (non-neutral) | 27% (noisy) | **59.8% (precision-correct)** |
+| `attorney_win_rate` | 0% | **15.1%** |
+| `ideology_distance` | 0% | **15.9%** |
+| `materiality_score` | 0% | **100%** |
+
+Retrain metrics on `data/real_corpus_v5.parquet` (n=630, base rate
+33.3%, train/test 504/126):
+
+| Model | Brier ↓ | ECE ↓ | LogLoss ↓ |
+|---|---|---|---|
+| XGBoost (GPU) | 0.2209 | 0.0008 | 0.6335 |
+| LightGBM (GPU) | 0.2217 | 0.0117 | 0.6354 |
+| CatBoost (GPU) | 0.2218 | 0.0028 | 0.6355 |
+| Logistic Regression | 0.2223 | 0.0034 | 0.6367 |
+| Stacked (meta-LR) | 0.2222 | 0.0002 | 0.6365 |
+
+Progression across all real-corpus attempts:
+
+| Sprint | n | Brier | Δ vs prior |
+|---|---|---|---|
+| Sprint 14 | 41 | 0.2571 | — |
+| Sprint 15 | 623 | 0.2231 | −0.034 (corpus 15×) |
+| Sprint 16 | 630 | **0.2209** | −0.002 (4 features de-neutralised) |
+| Sprint 12.5 champion | 2000 synth | **0.1662** | — |
+
+**Promotion gate result:**
+* Brier 0.2209 > 0.18 ceiling → **FAIL**
+
+**Decision:** champion remains Sprint 12.5 LR
+(`run_id 4539e88454d64c7fbce2091be1195bf7`). `data/real_corpus_v5.parquet`
++ the 5 Sprint 16 MLflow runs retained.
+
+**Final diagnostic — why the real-data attempts plateau at ~0.22:**
+
+Feature ↔ outcome correlations on `real_corpus_v5`:
+
+| Feature | Pearson r with outcome |
+|---|---|
+| `judge_severity` | −0.06 |
+| `attorney_win_rate` | +0.02 |
+| `ideology_distance` | +0.05 |
+| `materiality_score` | −0.03 |
+
+The features are **non-neutral but uninformative**. Compare to the
+synthetic v1 corpus (which the champion was trained on):
+
+| Feature | Synthetic v1 r | Real v5 r |
+|---|---|---|
+| `judge_severity` | −0.328 | −0.06 |
+| `attorney_win_rate` | +0.337 | +0.02 |
+| `ideology_distance` | −0.053 | +0.05 |
+| `materiality_score` | +0.109 | −0.03 |
+
+Synthetic v1 had ~6× the predictive correlation per feature. Why is
+the real corpus so much weaker?
+
+1. **Corpus skew toward early SCOTUS (1754–1875).** 93% of the
+   labelled rows are CAP-ingested 18th-/19th-century SCOTUS opinions.
+   Modern legal-outcome dynamics (which the v1 synthetic implicitly
+   models) don't map onto Marshall-era doctrine.
+2. **Multi-judge panels flatten the per-opinion judge signal.** For
+   a SCOTUS opinion with 5+ justices, the `primary_judge_name` is
+   only one of them — the case outcome reflects a panel vote, not
+   that single judge's severity. The synthetic generator assumes a
+   single-judge → single-outcome relationship.
+3. **Coarse feature proxies.** `appointing_president` → ideology is
+   a 44-value lookup; real DIME / MQ / JCS scores are
+   judge-individual continuous values. The proxy loses most of the
+   resolution.
+4. **Attorney win-rate has self-reference noise.** When the same
+   attorney appears in train + test, the rollup is computed across
+   both — a leak that *should* boost correlation but doesn't,
+   because attorneys appear once each on average.
+
+**Sprint 17 candidates:**
+
+1. **Slice the corpus by era.** Train on 1950+ rows only; the
+   modern subset may have stronger feature correlations.
+2. **Multi-judge panel weighting.** Compute per-opinion ideology /
+   severity as the panel *mean* rather than the first author.
+3. **Learned outcome classifier on SCDB-labelled SCOTUS** (deferred
+   from Sprint 15) — train a separate tfidf-LR or small transformer
+   on the SCDB-labelled cases and use it as a feature in the main
+   ensemble.
+4. **Pull more CAP jurisdictions** so `us` isn't 93% of the corpus.
