@@ -12,10 +12,16 @@
 SET app.current_tenant_id = '00000000-0000-0000-0000-000000000001';
 
 WITH cd_judges AS (
-    -- Best-effort match: the first judge in the corpus whose normalized name
-    -- substring-matches the document text.  Crude but correct for the tiny
-    -- 21-judge KG we have today; will be replaced when S5.6 populates
-    -- case_judges edges properly.
+    -- Sprint 16 / S16.2 — prefer normalized_name matching so the early-SCOTUS
+    -- corpus (which signs opinions "Taney, Ch. J." rather than "Roger Brooke
+    -- Taney") joins to the FJC-populated KG. Only judges with severity_proxy
+    -- data are eligible: this filters out FJC rows for never-matched judges
+    -- and avoids picking an unrelated FJC judge whose surname collides with
+    -- a word in the opinion body. Falls back to NULL when no judge matches.
+    --
+    -- Substring strategy: insist on word-boundary tokens via the ' <name> '
+    -- form. Surrounding spaces avoid collisions like "ney" matching inside
+    -- "money".
     SELECT
         cd.id              AS doc_id,
         cd.opinion_id,
@@ -28,9 +34,18 @@ WITH cd_judges AS (
     FROM case_documents cd
     LEFT JOIN LATERAL (
         SELECT *
-        FROM judges
-        WHERE position(full_name IN cd.full_text_plain) > 0
-        ORDER BY position(full_name IN cd.full_text_plain) ASC
+        FROM judges jj
+        WHERE jj.bio ? 'severity_proxy'
+          AND (
+            -- Prefer the FJC-aliased lowercase last-name match.
+            position(' ' || jj.normalized_name || ' '   IN lower(cd.full_text_plain)) > 0
+            OR position(' ' || jj.normalized_name || ',' IN lower(cd.full_text_plain)) > 0
+            OR position(' ' || jj.normalized_name || '.' IN lower(cd.full_text_plain)) > 0
+            -- Then fall through to full_name for any judges whose normalized
+            -- form is a multi-word string (e.g. "william cushing").
+            OR position(jj.full_name IN cd.full_text_plain) > 0
+          )
+        ORDER BY (jj.bio->'severity_proxy'->>'cases_analyzed')::int DESC NULLS LAST
         LIMIT 1
     ) j ON true
     WHERE cd.case_type IS NOT NULL

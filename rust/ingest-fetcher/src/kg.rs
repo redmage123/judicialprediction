@@ -239,15 +239,30 @@ pub fn extract_judge_names(text: &str) -> Vec<String> {
     ordered
 }
 
-/// Line-level extractor — small, dependency-free, tax-court aware.
+/// Line-level extractor — small, dependency-free.
 ///
 /// Recognised shapes (case-sensitive):
-///   * `NAME, Judge:`                 → captures NAME
-///   * `NAME, Judge.`                 → captures NAME
-///   * `NAME, J., delivered`          → captures NAME
-///   * `JUDGE NAME delivered`         → captures NAME (caps-only)
 ///
-/// Anything else returns empty.  Names are accepted as 1–3 whitespace-
+///   Tax court:
+///     * `NAME, Judge:`                → captures NAME
+///     * `NAME, Judge.`                → captures NAME
+///     * `NAME, J., delivered`         → captures NAME
+///     * `JUDGE NAME delivered`        → captures NAME (caps-only)
+///
+///   SCOTUS (Sprint 16):
+///     * `NAME, C. J.` / `NAME, Ch. J.` → captures NAME (Chief Justice
+///                                        signature, early-era SCOTUS)
+///     * `NAME, J.` (alone on a line)   → captures NAME (Associate Justice)
+///     * `JUSTICE NAME delivered`       → captures NAME
+///     * `Chief Justice NAME delivered` → captures NAME
+///     * `Mr. Justice NAME delivered`   → captures NAME (pre-1980 SCOTUS)
+///
+///   Federal-circuit panels (Sprint 16):
+///     * `Before X, Y, and Z, Circuit Judges`     → captures X, Y, Z
+///     * `Before X, Chief Judge, Y and Z, ...`    → captures X, Y, Z
+///     * `NAME, Circuit Judge.` (opinion author)  → captures NAME
+///
+/// Anything else returns empty. Names are accepted as 1–3 whitespace-
 /// separated word-tokens of letters/hyphens/apostrophes — broader patterns
 /// would need a real grammar.
 fn extract_judges_from_line(line: &str) -> Vec<String> {
@@ -257,11 +272,29 @@ fn extract_judges_from_line(line: &str) -> Vec<String> {
     }
     let mut out = Vec::new();
 
-    // Pattern 1 / 2 / 3: `<name>, Judge:` / `<name>, Judge.` / `<name>, J., delivered`
+    // ── Federal-circuit panels: `Before X, Y, and Z, Circuit Judges` ──
+    // Handled first so the comma-list doesn't fall through to the
+    // single-name `, J.` markers.
+    if let Some(names) = extract_circuit_panel(trimmed) {
+        out.extend(names);
+        return out;
+    }
+
+    // ── Tax-court / SCOTUS Justice signatures ──
+    // Pattern 1-5: `<name>, Judge:` / `, Judge.` / `, J., delivered` / `, J.,`
+    //              / `, C. J.` / `, Ch. J.` / `, Circuit Judge.`
     // Break after the first marker hit so a line like
     // `Holmes, J., delivered the opinion` (which contains both `, J., delivered`
     // and `, J.,` as substrings) yields one candidate, not two.
-    for marker in [", Judge:", ", Judge.", ", J., delivered", ", J.,"] {
+    for marker in [
+        ", Judge:",
+        ", Judge.",
+        ", J., delivered",
+        ", J.,",
+        ", C. J.",        // SCOTUS Chief Justice (modern abbreviation)
+        ", Ch. J.",       // SCOTUS Chief Justice (early-era abbreviation)
+        ", Circuit Judge.",
+    ] {
         if let Some(idx) = trimmed.find(marker) {
             let candidate = trimmed[..idx].trim();
             if is_proper_name_candidate(candidate) {
@@ -271,20 +304,102 @@ fn extract_judges_from_line(line: &str) -> Vec<String> {
         }
     }
 
-    // Pattern 4: `JUDGE <NAME> delivered ...`
-    if let Some(rest) = trimmed.strip_prefix("JUDGE ") {
-        let name = rest
-            .split_whitespace()
-            .take_while(|w| w.chars().all(|c| c.is_uppercase() || c == '.' || c == ','))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let name = name.trim_end_matches(',').trim_end_matches('.');
-        if !name.is_empty() && is_proper_name_candidate(name) {
-            out.push(name.to_string());
+    // SCOTUS line of the form `NAME, J.` standing alone (no `delivered`
+    // and no trailing comma after the period). Catches early-era
+    // associate-justice signatures like `JOHNSON, J.`. Skip if anything
+    // already matched on this line.
+    if out.is_empty() && trimmed.ends_with(", J.") {
+        let candidate = trimmed[..trimmed.len() - 4].trim();
+        if is_proper_name_candidate(candidate) {
+            out.push(candidate.to_string());
+        }
+    }
+
+    // Pattern 4 (existing): `JUDGE <NAME> delivered ...`
+    if out.is_empty() {
+        if let Some(rest) = trimmed.strip_prefix("JUDGE ") {
+            let name = rest
+                .split_whitespace()
+                .take_while(|w| w.chars().all(|c| c.is_uppercase() || c == '.' || c == ','))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let name = name.trim_end_matches(',').trim_end_matches('.');
+            if !name.is_empty() && is_proper_name_candidate(name) {
+                out.push(name.to_string());
+            }
+        }
+    }
+
+    // SCOTUS modern: `JUSTICE NAME delivered`, `Chief Justice NAME delivered`,
+    // `Mr. Justice NAME delivered`. Captures NAME (caps-only, 1-2 tokens).
+    if out.is_empty() {
+        for prefix in ["JUSTICE ", "Chief Justice ", "Mr. Justice ", "Mr. Chief Justice "] {
+            if let Some(rest) = trimmed.strip_prefix(prefix) {
+                let name = rest
+                    .split_whitespace()
+                    .take_while(|w| w.chars().all(|c| c.is_uppercase() || c == '.' || c == ','))
+                    .take(2)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let name = name.trim_end_matches(',').trim_end_matches('.');
+                if !name.is_empty() && is_proper_name_candidate(name) {
+                    out.push(name.to_string());
+                    break;
+                }
+            }
         }
     }
 
     out
+}
+
+/// Parse a `Before X, Y, and Z, Circuit Judges` panel header. Returns the
+/// list of panellist surnames (in source order) or None if the line isn't a
+/// recognized panel header.
+///
+/// Accepts the common variations:
+///   * `Before DYK, REYNA, and STOLL, Circuit Judges`
+///   * `Before LOURIE, STOLL, and STARK, Circuit Judges.`
+///   * `Before: TYMKOVICH, Chief Judge, KELLY and PHILLIPS, Circuit Judges`
+///   * `Before TYMKOVICH, C. J., KELLY and PHILLIPS, Circuit Judges`
+fn extract_circuit_panel(line: &str) -> Option<Vec<String>> {
+    let rest = line.strip_prefix("Before:").or_else(|| line.strip_prefix("Before"))?;
+    let rest = rest.trim_start_matches(|c: char| c == ' ' || c == ':');
+
+    // Find the "Circuit Judges" or "Circuit Judge" terminator — anything past
+    // it isn't a panellist.
+    let end = rest.find(", Circuit Judge").or_else(|| rest.find("Circuit Judge"))?;
+    let panel_text = &rest[..end].trim_end_matches(|c: char| c == ',' || c == ' ');
+
+    // Split on commas and "and". Drop tokens that are role labels
+    // ("Chief Judge", "C. J.", "Senior Circuit Judge", "District Judge").
+    let mut names = Vec::new();
+    for raw in panel_text.split(|c: char| c == ',') {
+        for chunk in raw.split(" and ") {
+            let token = chunk.trim().trim_end_matches('.').trim();
+            if token.is_empty() {
+                continue;
+            }
+            // Skip role labels — they're not panellist names.
+            let lower = token.to_lowercase();
+            if lower == "chief judge"
+                || lower == "c. j."
+                || lower == "ch. j."
+                || lower == "senior circuit judge"
+                || lower == "district judge"
+                || lower == "senior judge"
+            {
+                continue;
+            }
+            if is_proper_name_candidate(token) {
+                names.push(token.to_string());
+            }
+        }
+    }
+    if names.is_empty() {
+        return None;
+    }
+    Some(names)
 }
 
 /// Return true if `s` looks like a tax-court judge name in opinion-preamble
@@ -397,5 +512,91 @@ mod tests {
         ";
         let names = extract_judge_names(header);
         assert_eq!(names, vec!["GOEKE".to_string(), "Holmes".to_string()]);
+    }
+
+    // ── Sprint 16 / S16.2 — SCOTUS + circuit panel patterns ──────────────
+
+    #[test]
+    fn extracts_scotus_chief_justice_early_era() {
+        // Real CAP early-SCOTUS opinion: "Marshall, Ch. J." on its own line.
+        let line = "Marshall, Ch. J.";
+        assert_eq!(extract_judges_from_line(line), vec!["Marshall".to_string()]);
+    }
+
+    #[test]
+    fn extracts_scotus_chief_justice_modern_abbrev() {
+        let line = "Roberts, C. J., delivered the opinion of the Court.";
+        assert_eq!(extract_judges_from_line(line), vec!["Roberts".to_string()]);
+    }
+
+    #[test]
+    fn extracts_scotus_associate_justice_standalone() {
+        // Old-era: "JOHNSON, J." alone on a line.
+        let line = "JOHNSON, J.";
+        assert_eq!(extract_judges_from_line(line), vec!["JOHNSON".to_string()]);
+    }
+
+    #[test]
+    fn extracts_scotus_modern_justice_signature() {
+        let line = "JUSTICE BREYER delivered the opinion of the Court.";
+        assert_eq!(extract_judges_from_line(line), vec!["BREYER".to_string()]);
+    }
+
+    #[test]
+    fn extracts_scotus_mr_justice_old_form() {
+        let line = "Mr. Justice HOLMES delivered the opinion of the Court.";
+        assert_eq!(extract_judges_from_line(line), vec!["HOLMES".to_string()]);
+    }
+
+    #[test]
+    fn extracts_cafc_panel_three_judges() {
+        // The canonical Federal Circuit panel header.
+        let line = "Before DYK, REYNA, and STOLL, Circuit Judges.";
+        assert_eq!(
+            extract_judges_from_line(line),
+            vec!["DYK".to_string(), "REYNA".to_string(), "STOLL".to_string()]
+        );
+    }
+
+    #[test]
+    fn extracts_cafc_panel_with_colon_after_before() {
+        let line = "Before: LOURIE, STOLL, and STARK, Circuit Judges";
+        assert_eq!(
+            extract_judges_from_line(line),
+            vec!["LOURIE".to_string(), "STOLL".to_string(), "STARK".to_string()]
+        );
+    }
+
+    #[test]
+    fn extracts_cafc_opinion_author_signature() {
+        let line = "STOLL, Circuit Judge.";
+        assert_eq!(extract_judges_from_line(line), vec!["STOLL".to_string()]);
+    }
+
+    #[test]
+    fn cafc_panel_skips_chief_judge_role_label() {
+        // Tenth-Circuit-style header where one panellist also has a role label.
+        let line = "Before TYMKOVICH, Chief Judge, KELLY and PHILLIPS, Circuit Judges.";
+        let names = extract_judges_from_line(line);
+        // Role label "Chief Judge" must be dropped; panellists remain.
+        assert!(names.contains(&"TYMKOVICH".to_string()));
+        assert!(names.contains(&"KELLY".to_string()));
+        assert!(names.contains(&"PHILLIPS".to_string()));
+        assert!(!names.iter().any(|n| n.to_lowercase().contains("chief")));
+    }
+
+    #[test]
+    fn full_extractor_picks_up_cafc_panel() {
+        // End-to-end via extract_judge_names: a real CAFC opening block.
+        let text = "\
+        United States Court of Appeals\n\
+        for the Federal Circuit\n\
+        Before DYK, MAYER, and TARANTO, Circuit Judges.\n\
+        TARANTO, Circuit Judge.\n\
+        ";
+        let names = extract_judge_names(text);
+        assert!(names.contains(&"DYK".to_string()));
+        assert!(names.contains(&"MAYER".to_string()));
+        assert!(names.contains(&"TARANTO".to_string()));
     }
 }
