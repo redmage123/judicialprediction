@@ -35,6 +35,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from president_ideology import ideology_distance_from_president
+
 # ── Constants ────────────────────────────────────────────────────────────────
 
 # Map S5.7 NLP outcome_for → binary outcome (1 = win for petitioner/plaintiff).
@@ -96,10 +98,18 @@ def project_row(record: dict) -> dict | None:
     severity_raw = record.get("judge_severity")
     if severity_raw is None:
         severity_raw = NEUTRAL_FILL
+    # S16.4 — president-as-ideology fallback.  When the matched judge's row
+    # has an appointing_president (every FJC Article III judge does), map
+    # it through PRESIDENT_IDEOLOGY → |score|.  Unknown / missing presidents
+    # fall back to NEUTRAL_FILL.
+    ideology = ideology_distance_from_president(
+        record.get("appointing_president"),
+        neutral=NEUTRAL_FILL,
+    )
     return {
         "judge_severity": float(severity_raw),
         "attorney_win_rate": NEUTRAL_FILL,
-        "ideology_distance": NEUTRAL_FILL,
+        "ideology_distance": float(ideology),
         "materiality_score": NEUTRAL_FILL,
         "procedural_motion_count": count_motions(record.get("full_text_plain")),
         "case_type": CASE_TYPE_MAP.get(case_type_raw, "civil"),
@@ -110,6 +120,7 @@ def project_row(record: dict) -> dict | None:
         "_court_id": court_id,
         "_raw_case_type": case_type_raw,
         "_raw_outcome": outcome_raw,
+        "_appointing_president": record.get("appointing_president"),
     }
 
 

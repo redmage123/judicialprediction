@@ -30,7 +30,10 @@ WITH cd_judges AS (
         cd.outcome_for,
         cd.full_text_plain,
         j.full_name        AS judge_name,
-        (j.bio->'severity_proxy'->>'severity')::float8 AS judge_severity
+        (j.bio->'severity_proxy'->>'severity')::float8 AS judge_severity,
+        -- S16.4 — appointing_president powers the president-as-ideology
+        -- fallback in build_real_corpus.py (see president_ideology.py).
+        j.appointing_president AS appointing_president
     FROM case_documents cd
     LEFT JOIN LATERAL (
         SELECT *
