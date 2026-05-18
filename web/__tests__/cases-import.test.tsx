@@ -56,9 +56,13 @@ function csvFile(name: string, body: string) {
   return new File([body], name, { type: "text/csv" });
 }
 
+// Apollo Client v4 removed the `addTypename` prop from `MockedProvider`; the
+// MockLink now always rewrites incoming queries with `addTypenameToDocument`.
+// Mocks that don't carry `__typename` in their response data still match by
+// query+variables, which is what these tests rely on.
 function renderWith(mocks: React.ComponentProps<typeof MockedProvider>["mocks"] = []) {
   return render(
-    <MockedProvider mocks={mocks} addTypename={false}>
+    <MockedProvider mocks={mocks}>
       <ImportForm />
     </MockedProvider>
   );

@@ -16,13 +16,20 @@
 
 import React from "react";
 import { describe, it, expect } from "vitest";
-import { pdf } from "@react-pdf/renderer";
+import { pdf, type DocumentProps } from "@react-pdf/renderer";
 import CaseMemo from "@/lib/memo/case-memo";
 import type { CaseResult } from "@/lib/queries/predict";
 
 // v4 .toBuffer() returns a Node Readable stream; collect into a real Buffer.
+// `pdf()` expects a ReactElement<DocumentProps>; CaseMemo always returns a
+// <Document> root, but its declared return type is the generic
+// `React.ReactElement`. Narrow at the test-helper boundary so each call site
+// stays clean — this is structurally safe because CaseMemo's top-level node
+// is a <Document>.
 async function pdfToBuffer(node: React.ReactElement): Promise<Buffer> {
-  const stream = await pdf(node).toBuffer();
+  const stream = await pdf(
+    node as React.ReactElement<DocumentProps>,
+  ).toBuffer();
   const chunks: Buffer[] = [];
   for await (const chunk of stream as unknown as AsyncIterable<Buffer | Uint8Array>) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));

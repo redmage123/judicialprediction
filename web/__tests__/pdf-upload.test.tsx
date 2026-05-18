@@ -44,9 +44,11 @@ vi.mock("next/navigation", () => ({
   usePathname: () => "/case/new",
 }));
 
+// Apollo Client v4 removed `addTypename` from `MockedProvider`; the IntakeForm
+// in these tests issues no queries, so the empty mock list is all we need.
 function renderForm() {
   return render(
-    <MockedProvider mocks={[]} addTypename={false}>
+    <MockedProvider mocks={[]}>
       <IntakeForm />
     </MockedProvider>
   );
