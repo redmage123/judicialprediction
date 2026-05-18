@@ -209,11 +209,12 @@ async fn main() -> Result<()> {
             let stats = extract::run_extraction(&pool, tenant_id).await?;
             println!(
                 "extract-features tenant={tenant_id} \
-                 docs_scanned={} case_type_set={} outcome_set={} judges_updated={}",
+                 docs_scanned={} case_type_set={} outcome_set={} judges_updated={} attorneys_updated={}",
                 stats.docs_scanned,
                 stats.case_type_set,
                 stats.outcome_set,
                 stats.judges_updated,
+                stats.attorneys_updated,
             );
         }
         Command::PopulateCitations { database_url } => {

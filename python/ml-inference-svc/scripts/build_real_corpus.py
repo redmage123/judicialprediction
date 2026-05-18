@@ -83,6 +83,23 @@ def count_motions(text: str | None) -> int:
     return min(50, len(MOTION_RE.findall(text)))
 
 
+# S16.3 — attorney win-rate signal. Pulled from the LATERAL join in
+# export_real_corpus.sql against the `attorneys` table populated by
+# rust/ingest-fetcher/src/extract.rs::run_extraction. When the opinion
+# didn't match any attorney row (e.g. CAFC opinions where the lead
+# attorney's name isn't in our KG yet, or pre-1900 CAP opinions with no
+# counsel block), fall through to NEUTRAL_FILL so the column has no
+# missing values in the parquet.
+def attorney_win_rate_from_record(record: dict) -> float:
+    raw = record.get("attorney_win_rate")
+    if raw is None:
+        return NEUTRAL_FILL
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return NEUTRAL_FILL
+
+
 def project_row(record: dict) -> dict | None:
     """Project one DB row to the trainer's feature dict.  Returns None when
     the row has no usable target (split / null)."""
@@ -108,7 +125,7 @@ def project_row(record: dict) -> dict | None:
     )
     return {
         "judge_severity": float(severity_raw),
-        "attorney_win_rate": NEUTRAL_FILL,
+        "attorney_win_rate": attorney_win_rate_from_record(record),
         "ideology_distance": float(ideology),
         "materiality_score": NEUTRAL_FILL,
         "procedural_motion_count": count_motions(record.get("full_text_plain")),

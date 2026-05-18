@@ -52,6 +52,8 @@ pub struct ExtractStats {
     pub case_type_set: u64,
     pub outcome_set: u64,
     pub judges_updated: u64,
+    /// Sprint 16 / S16.3 — attorney rows touched (inserted + updated).
+    pub attorneys_updated: u64,
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -618,6 +620,28 @@ pub async fn run_extraction(pool: &PgPool, tenant_id: Uuid) -> Result<ExtractSta
     }
     let mut tallies: HashMap<(String, String), JudgeTally> = HashMap::new();
 
+    // Sprint 16 / S16.3 — per-attorney rollup.  Keyed on the canonical
+    // normalized name so the same attorney appearing in two opinions
+    // (possibly under slightly different capitalisations) accumulates
+    // into one row. `full_name` is the first-seen variant.
+    #[derive(Default)]
+    struct AttorneyTally {
+        full_name: String,
+        analyzed: u64,
+        /// Number of cases where this attorney's client (petitioner side)
+        /// won. Counted only for Petitioner-side appearances when
+        /// outcome == petitioner, or Respondent-side appearances when
+        /// outcome == respondent (the attorney's client won in that
+        /// posture — see win_rate_for_petitioner() below).
+        wins_for_client: u64,
+        /// Number of cases where this attorney represented the
+        /// petitioner side (regardless of outcome). Drives the
+        /// win_rate-for-petitioner denominator.
+        appearances_for_petitioner: u64,
+        wins_for_petitioner: u64,
+    }
+    let mut attorney_tallies: HashMap<String, AttorneyTally> = HashMap::new();
+
     for (doc_id, court_slug, text) in &rows {
         let case_type = classify_case_type(text);
         let outcome = detect_outcome_for_court(court_slug, text);
@@ -658,6 +682,47 @@ pub async fn run_extraction(pool: &PgPool, tenant_id: Uuid) -> Result<ExtractSta
                 entry.wins_for_respondent += 1;
             }
         }
+
+        // Sprint 16 / S16.3 — roll attorneys into the win-rate tally.
+        // Scan only the opinion header (first ~6 KB) so dicta in the
+        // body that incidentally mentions a different attorney doesn't
+        // count.  Counsel blocks are always near the top of the opinion.
+        let head: String = text.chars().take(6_000).collect();
+        for (attorney_raw, side) in crate::kg::extract_attorney_names(&head) {
+            let normalized = crate::kg::normalize_attorney_name(&attorney_raw);
+            if normalized.is_empty() {
+                continue;
+            }
+            let entry = attorney_tallies.entry(normalized).or_default();
+            if entry.full_name.is_empty() {
+                entry.full_name = attorney_raw.clone();
+            }
+            entry.analyzed += 1;
+
+            // Side-aware tally.  We compute win_rate from the
+            // petitioner's perspective: of the times this attorney
+            // appeared FOR the petitioner, how often did the petitioner
+            // win?  Cases where the attorney represented the respondent
+            // contribute to `analyzed` (so we know they're a real
+            // courtroom attorney) but not to the petitioner numerator —
+            // the trainer interprets the rate as "if this attorney is
+            // for petitioner, what's the petitioner-win prior".  See
+            // win_rate computation below.
+            match side {
+                crate::kg::AttorneySide::Petitioner => {
+                    entry.appearances_for_petitioner += 1;
+                    if outcome == Some("petitioner") {
+                        entry.wins_for_petitioner += 1;
+                        entry.wins_for_client += 1;
+                    }
+                }
+                crate::kg::AttorneySide::Respondent => {
+                    if outcome == Some("respondent") {
+                        entry.wins_for_client += 1;
+                    }
+                }
+            }
+        }
     }
 
     // Merge tallies into `judges.bio`.  We look up the judge_id by
@@ -692,6 +757,66 @@ pub async fn run_extraction(pool: &PgPool, tenant_id: Uuid) -> Result<ExtractSta
 
         if res.rows_affected() > 0 {
             stats.judges_updated += 1;
+        }
+    }
+
+    // ── Sprint 16 / S16.3 — UPSERT attorney rollup into `attorneys.bio` ──
+    //
+    // We deliberately UPSERT rather than UPDATE because the attorney
+    // node DOESN'T have a separate `populate_from_case_documents` pass
+    // (judges do, via kg::populate_from_case_documents).  Doing it here
+    // keeps the data path: extract counsel names → tally → write row.
+    //
+    // win_rate semantics: probability that this attorney's client wins
+    // when the attorney appears for the petitioner.  Denominator is
+    // `appearances_for_petitioner` (not total appearances) so a defense
+    // attorney with a strong respondent record doesn't get a misleading
+    // low win_rate — they just have a small / zero petitioner sample.
+    // Attorneys with zero petitioner appearances get win_rate=0.5
+    // (neutral prior) and a separate `wins_for_petitioner=0` so the
+    // join in export_real_corpus.sql can still surface them as
+    // "non-neutral" because cases_analyzed > 0.
+    for (normalized, tally) in &attorney_tallies {
+        let win_rate = if tally.appearances_for_petitioner == 0 {
+            0.5_f64
+        } else {
+            tally.wins_for_petitioner as f64 / tally.appearances_for_petitioner as f64
+        };
+        let bio_patch = json!({
+            "win_rate_proxy": {
+                "cases_analyzed": tally.analyzed,
+                "wins_for_petitioner": tally.wins_for_petitioner,
+                "appearances_for_petitioner": tally.appearances_for_petitioner,
+                "wins_for_client": tally.wins_for_client,
+                "win_rate": win_rate,
+            }
+        });
+
+        let res = sqlx::query(
+            r#"
+            INSERT INTO attorneys (
+                tenant_id, full_name, normalized_name, bio, source
+            )
+            VALUES ($1, $2, $3, $4::jsonb, 'courtlistener')
+            ON CONFLICT (tenant_id, normalized_name) DO UPDATE
+                SET bio = attorneys.bio || EXCLUDED.bio,
+                    full_name = CASE
+                        WHEN length(EXCLUDED.full_name) > length(attorneys.full_name)
+                        THEN EXCLUDED.full_name
+                        ELSE attorneys.full_name
+                    END
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(&tally.full_name)
+        .bind(normalized)
+        .bind(&bio_patch)
+        .execute(&mut *tx)
+        .await
+        .context("upsert attorneys.bio win_rate_proxy")?;
+
+        if res.rows_affected() > 0 {
+            stats.attorneys_updated += 1;
         }
     }
 

@@ -33,7 +33,16 @@ WITH cd_judges AS (
         (j.bio->'severity_proxy'->>'severity')::float8 AS judge_severity,
         -- S16.4 — appointing_president powers the president-as-ideology
         -- fallback in build_real_corpus.py (see president_ideology.py).
-        j.appointing_president AS appointing_president
+        j.appointing_president AS appointing_president,
+        -- S16.3 — attorney win-rate join. Mirrors the judge LATERAL above
+        -- but on the new `attorneys` table populated by
+        -- rust/ingest-fetcher/src/extract.rs::run_extraction. Match key
+        -- is `normalized_name` (lowercase multi-token) substring in the
+        -- lowercased opinion text. When multiple attorneys match, pick
+        -- the one with the largest `cases_analyzed` so the corpus row
+        -- gets the attorney with the richest signal.
+        a.full_name        AS attorney_name,
+        (a.bio->'win_rate_proxy'->>'win_rate')::float8 AS attorney_win_rate
     FROM case_documents cd
     LEFT JOIN LATERAL (
         SELECT *
@@ -51,6 +60,14 @@ WITH cd_judges AS (
         ORDER BY (jj.bio->'severity_proxy'->>'cases_analyzed')::int DESC NULLS LAST
         LIMIT 1
     ) j ON true
+    LEFT JOIN LATERAL (
+        SELECT *
+        FROM attorneys aa
+        WHERE aa.bio ? 'win_rate_proxy'
+          AND position(aa.normalized_name IN lower(cd.full_text_plain)) > 0
+        ORDER BY (aa.bio->'win_rate_proxy'->>'cases_analyzed')::int DESC NULLS LAST
+        LIMIT 1
+    ) a ON true
     WHERE cd.case_type IS NOT NULL
 )
 SELECT json_agg(row_to_json(cd_judges)) FROM cd_judges;
