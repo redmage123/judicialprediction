@@ -145,16 +145,127 @@ pub fn detect_outcome(text: &str) -> Option<&'static str> {
     detect_outcome_taxcourt(text).or_else(|| detect_outcome_appellate(text))
 }
 
-/// Same as [`detect_outcome`] but dispatches by court_id.  CAFC is appellate-only,
-/// tax is "decision will be entered"-only; everything else falls back to the
-/// generic [`detect_outcome`].  Routing keeps tax-court appellate-style
-/// affirmance language (which occurs in dicta about prior appeals) from
-/// leaking into the outcome.
+/// Court family used to route opinion text to the right disposition scanner.
+/// The mapping from a court_id slug to a family is intentionally permissive on
+/// the prefix side (district-court slugs are open-ended — we can't enumerate
+/// all 94) but conservative on the disposition side (the scanners themselves
+/// prefer None over a wrong guess).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CourtFamily {
+    /// Supreme Court of the United States.  CourtListener uses `scotus`;
+    /// CAP's reporter-based slug is `us`.
+    Scotus,
+    /// Federal courts of appeals.  CourtListener uses `cafc`, `ca1`-`ca11`,
+    /// and `cadc`; CAP's reporter-based slugs are `f1d`, `f2d`, `f3d`, `f4th`.
+    Appellate,
+    /// Federal district courts.  CourtListener uses slugs like `nyd`, `cad`,
+    /// `txnd`, `dnj` — the convention is that the slug ends in `d` and is not
+    /// one of the well-known appellate or supreme-court slugs.
+    District,
+    /// US Tax Court — uses the "decision will be entered" idiom.
+    Tax,
+    /// Federal bankruptcy courts.  Disposition convention differs from the
+    /// district-court Rule-56 form; deferred to Sprint 16.
+    Bankruptcy,
+    /// Everything else — falls back to the generic [`detect_outcome`].
+    Unknown,
+}
+
+/// Classify a court_id slug into a [`CourtFamily`].  Recognizes CourtListener,
+/// CAP reporter-based, and govinfo slug conventions.  Unknown slugs return
+/// [`CourtFamily::Unknown`] so the generic fallback applies.
+pub fn court_family(court_id: &str) -> CourtFamily {
+    let id = court_id.to_ascii_lowercase();
+
+    // SCOTUS — both CourtListener and CAP slugs.
+    if id == "scotus" || id == "us" {
+        return CourtFamily::Scotus;
+    }
+
+    // Tax court — CourtListener uses `tax`; DAWSON uses `tax-court`.
+    if id == "tax" || id == "tax-court" || id == "ustc" {
+        return CourtFamily::Tax;
+    }
+
+    // Bankruptcy — CourtListener uses `bankr.<district>` / `bankr_<district>`
+    // family slugs; we deliberately don't try to recover anything from them
+    // in Sprint 15.
+    if id.starts_with("bankr") {
+        return CourtFamily::Bankruptcy;
+    }
+
+    // Appellate — federal-circuit, numbered circuits, DC circuit, and CAP's
+    // reporter-based slugs (`f1d`, `f2d`, `f3d`, `f4th`).
+    if id == "cafc" || id == "cadc" || id == "f1d" || id == "f2d" || id == "f3d" || id == "f4th" {
+        return CourtFamily::Appellate;
+    }
+    if let Some(rest) = id.strip_prefix("ca") {
+        // ca1..ca11
+        if rest.parse::<u32>().map(|n| (1..=11).contains(&n)).unwrap_or(false) {
+            return CourtFamily::Appellate;
+        }
+    }
+
+    // District — CourtListener convention is one of:
+    //   * `d<state>` for single-district states (`dnj`, `dmd`, `dde`, `dnh`,
+    //     `dor`, `dvt`, `dme`, `dri`, ...).  3-4 chars starting with `d`.
+    //   * `<state><division>` with division suffix `cd` / `md` / `nd` / `sd`
+    //     / `ed` / `wd` (`nysd`, `nyed`, `cacd`, `txnd`, `flsd`, ...).
+    //   * Govinfo / CAP variants: `usdc<...>`, slug containing `_d_`, slug
+    //     ending in `dist`.
+    //
+    // Intentionally over-broad on the recognition side; the scanner itself
+    // prefers None on ambiguous text.
+    let division_suffixes = ["cd", "md", "nd", "sd", "ed", "wd"];
+    let ends_in_division = division_suffixes.iter().any(|suf| id.ends_with(suf));
+    if ends_in_division && id.len() >= 3 {
+        return CourtFamily::District;
+    }
+    // Single-district `d<state>` pattern: 3-4 chars, starts with `d`, and the
+    // tail is 2-3 alphabetic chars (e.g. `dnj`, `dmd`, `dde`).  Excludes `dc`
+    // (DC Circuit appellate, already claimed above) and ensures the tail is
+    // alphabetic so we don't accept stray numeric IDs.
+    if id.starts_with('d') && (id.len() == 3 || id.len() == 4) && id != "dc" {
+        let rest = &id[1..];
+        if rest.chars().all(|c| c.is_ascii_alphabetic()) {
+            return CourtFamily::District;
+        }
+    }
+    // Short reporter-style district slugs (`nyd`, `cad`, ...) — 3 chars
+    // ending in `d`.  These are not standard CourtListener slugs but appear
+    // in legacy fixtures and reporter abbreviations.
+    if id.len() == 3 && id.ends_with('d') && !id.starts_with('d') {
+        let head = &id[..2];
+        if head.chars().all(|c| c.is_ascii_alphabetic()) {
+            return CourtFamily::District;
+        }
+    }
+    if id.starts_with("usdc") || id.contains("_d_") || id.ends_with("dist") {
+        return CourtFamily::District;
+    }
+
+    CourtFamily::Unknown
+}
+
+/// Same as [`detect_outcome`] but dispatches by court_id via [`court_family`].
+/// Routing keeps appellate-style affirmance language (which appears in dicta
+/// about prior appeals in tax-court opinions, and vice-versa) from leaking
+/// into the outcome.
+///
+/// * SCOTUS → [`detect_outcome_scotus`]
+/// * Appellate (CAFC, CA1-CA11, CADC, F1d-F4th) → [`detect_outcome_appellate`]
+/// * District → [`detect_outcome_district`]
+/// * Tax → [`detect_outcome_taxcourt`]
+/// * Bankruptcy → `None` (Sprint 16)
+/// * Unknown → generic [`detect_outcome`] fallback
 pub fn detect_outcome_for_court(court_id: &str, text: &str) -> Option<&'static str> {
-    match court_id {
-        "cafc" => detect_outcome_appellate(text),
-        "tax" => detect_outcome_taxcourt(text),
-        _ => detect_outcome(text),
+    match court_family(court_id) {
+        CourtFamily::Scotus => detect_outcome_scotus(text),
+        CourtFamily::Appellate => detect_outcome_appellate(text),
+        CourtFamily::District => detect_outcome_district(text),
+        CourtFamily::Tax => detect_outcome_taxcourt(text),
+        CourtFamily::Bankruptcy => None,
+        CourtFamily::Unknown => detect_outcome(text),
     }
 }
 
@@ -270,6 +381,184 @@ fn detect_outcome_appellate(text: &str) -> Option<&'static str> {
     }
 
     None
+}
+
+/// SCOTUS disposition scanner.  Unlike federal-circuit opinions, SCOTUS
+/// opinions don't end with all-caps disposition blocks — the disposition is
+/// stated in prose ("The judgment of the Court of Appeals is affirmed.", etc.)
+/// at the very end of the opinion.  We scan a larger window than the appellate
+/// scanner (~800 chars) because SCOTUS opinions sometimes carry a syllabus or
+/// per-curiam preamble that pushes the operative phrase further from the end.
+///
+/// Convention: in our binary, the **petitioner** is the party that brought the
+/// cert petition (typically the loser below).  So:
+///   * `affirmed` near "judgment"/"decision" → respondent wins (judgment below
+///     stands)
+///   * `reversed` near "judgment"/"decision" → petitioner wins
+///   * `vacated` near "judgment"/"decision" → petitioner wins
+///   * mixed forms ("affirmed in part, reversed in part") → split
+///   * DIG ("dismissed as improvidently granted") → None (procedural)
+///
+/// **Conservative**: we require the disposition verb to co-occur with
+/// "judgment" or "decision" or be preceded by "is" so that body dicta like
+/// "The Court of Appeals affirmed in 2018" doesn't pollute the signal.  Better
+/// to skip an ambiguous case than mislabel it — S15.9 calibrates precision
+/// against SCDB labels.
+fn detect_outcome_scotus(text: &str) -> Option<&'static str> {
+    // Window the LAST 800 chars — SCOTUS dispositions can be a paragraph
+    // longer than CAFC blocks because they're written in prose, not all-caps.
+    let tail_start = text.len().saturating_sub(800);
+    let tail = &text[tail_start..];
+    let normalized: String = tail.split_whitespace().collect::<Vec<_>>().join(" ");
+    let lower = normalized.to_ascii_lowercase();
+
+    // DIG short-circuits — procedural, not on the merits.
+    if lower.contains("dismissed as improvidently granted") {
+        return None;
+    }
+
+    // "In part" markers indicate a mixed disposition.  When the "in part"
+    // idiom is present we relax the strict phrase-match requirement and
+    // accept any two of the disposition verbs as a split, because the
+    // canonical SCOTUS form is "the judgment is affirmed in part and
+    // reversed in part" — the second verb won't satisfy the "is <verb>"
+    // pattern even though it's clearly part of the disposition.
+    let in_part = lower.contains("in part");
+    let has_affirmed = scotus_phrase_match(&lower, "affirmed");
+    let has_reversed = scotus_phrase_match(&lower, "reversed");
+    let has_vacated = scotus_phrase_match(&lower, "vacated");
+
+    if in_part {
+        let verb_count = ["affirmed", "reversed", "vacated"]
+            .iter()
+            .filter(|v| lower.contains(*v))
+            .count();
+        if verb_count >= 2 {
+            return Some("split");
+        }
+    }
+    // Bare "Reversed and remanded." / "Vacated and remanded." at the end is a
+    // very common SCOTUS short-form disposition.
+    if has_affirmed && (has_reversed || has_vacated) {
+        return Some("split");
+    }
+
+    if has_reversed || has_vacated {
+        return Some("petitioner");
+    }
+    if has_affirmed {
+        return Some("respondent");
+    }
+
+    None
+}
+
+/// Helper for [`detect_outcome_scotus`].  A SCOTUS disposition verb counts
+/// only when it appears as the legal-disposition idiom — either:
+///   * immediately preceded by " is " (as in "the judgment ... is affirmed"),
+///   * as the leading word of a short-form sentence (e.g. "Reversed and
+///     remanded."), or
+///   * within ~30 chars of "judgment" or "decision".
+///
+/// Body dicta like "the Court of Appeals affirmed in 2018" are excluded.
+fn scotus_phrase_match(lower: &str, verb: &str) -> bool {
+    // Pattern A: "is <verb>" (the most common form: "...the judgment is
+    // affirmed.").
+    let is_pat = format!(" is {verb}");
+    if lower.contains(&is_pat) {
+        return true;
+    }
+    // Pattern B: short-form sentence — verb appears at the start of the tail
+    // or after a period (e.g. "Reversed and remanded.").
+    if lower.starts_with(&format!("{verb} ")) || lower.starts_with(&format!("{verb}.")) {
+        return true;
+    }
+    let dot_pat = format!(". {verb}");
+    if lower.contains(&dot_pat) {
+        return true;
+    }
+    // Pattern C: verb within 30 chars of "judgment" / "decision".  Bounded
+    // window so far-away mentions don't co-trigger.
+    for anchor in ["judgment", "decision"] {
+        for (a_idx, _) in lower.match_indices(anchor) {
+            // Look in a 60-char window around the anchor for the verb.
+            let lo = a_idx.saturating_sub(30);
+            let hi = (a_idx + anchor.len() + 30).min(lower.len());
+            if lower[lo..hi].contains(verb) {
+                // But still exclude bare "[Court] affirmed in <year>"
+                // history-style dicta — i.e. require an "is" or "are"
+                // somewhere in the window so we're seeing the legal idiom,
+                // not the past-tense narrative.
+                let win = &lower[lo..hi];
+                if win.contains(" is ") || win.contains(" are ") {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Federal district-court disposition scanner.  District opinions don't use
+/// the all-caps appellate blocks; they end with verbose Rule 12 / Rule 56 /
+/// Rule 41 orderings ("DENIED", "GRANTED IN PART", "DISMISSED").
+///
+/// The plaintiff/defendant vocabulary doesn't map cleanly to our
+/// petitioner/respondent binary (it depends on case posture), so this scanner
+/// is **deliberately conservative**:
+///   * "motion to dismiss ... granted" or "complaint is dismissed" →
+///     respondent wins (the defending side wins a threshold motion)
+///   * "plaintiff's motion ... granted" (no qualifier) → petitioner wins
+///   * "defendant's motion ... granted" (no qualifier) → respondent wins
+///   * any "in part" qualifier with both grant + deny → split
+///   * everything else → None
+///
+/// Recall will be low — that's intentional.  Mislabeling district-court
+/// outcomes is worse for the downstream model than skipping them.
+fn detect_outcome_district(text: &str) -> Option<&'static str> {
+    // Window the last 1000 chars — district orderings are wordy.
+    let tail_start = text.len().saturating_sub(1000);
+    let tail = &text[tail_start..];
+    let normalized: String = tail.split_whitespace().collect::<Vec<_>>().join(" ");
+    let lower = normalized.to_ascii_lowercase();
+
+    // "In part" + both grant and deny → split.
+    let in_part = lower.contains("in part");
+    let has_granted = lower.contains("granted");
+    let has_denied = lower.contains("denied");
+    if in_part && has_granted && has_denied {
+        return Some("split");
+    }
+
+    // Motion-to-dismiss granted → respondent.  We also catch the closing
+    // "complaint is dismissed (with|without) prejudice" idiom which is the
+    // most reliable district-court signal.
+    let dismiss_granted = lower.contains("motion to dismiss is granted")
+        || lower.contains("motion to dismiss") && lower.contains("granted")
+            && !lower.contains("motion to dismiss is denied");
+    let complaint_dismissed = lower.contains("complaint is dismissed")
+        || lower.contains("action is dismissed")
+        || lower.contains("case is dismissed");
+    if dismiss_granted || complaint_dismissed {
+        return Some("respondent");
+    }
+
+    // Plaintiff's vs defendant's motion granted.  Use simple substring checks
+    // — we accept some false negatives in exchange for keeping precision
+    // high.
+    let pl_granted = lower.contains("plaintiff's motion") && lower.contains("granted")
+        && !lower.contains("plaintiff's motion is denied")
+        && !lower.contains("plaintiff's motion for summary judgment is denied");
+    let def_granted = lower.contains("defendant's motion") && lower.contains("granted")
+        && !lower.contains("defendant's motion is denied")
+        && !lower.contains("defendant's motion for summary judgment is denied");
+
+    match (pl_granted, def_granted) {
+        (true, true) => Some("split"),
+        (true, false) => Some("petitioner"),
+        (false, true) => Some("respondent"),
+        (false, false) => None,
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -578,5 +867,161 @@ mod tests {
         let t = "The tax court below held: Decision will be entered for respondent. \
                  We disagree. REVERSED";
         assert_eq!(detect_outcome_for_court("cafc", t), Some("petitioner"));
+    }
+
+    // ── S15.8: court_family classification ─────────────────────────────────
+
+    #[test]
+    fn court_family_scotus() {
+        assert_eq!(court_family("scotus"), CourtFamily::Scotus);
+        assert_eq!(court_family("us"), CourtFamily::Scotus);
+    }
+
+    #[test]
+    fn court_family_appellate() {
+        assert_eq!(court_family("cafc"), CourtFamily::Appellate);
+        assert_eq!(court_family("ca1"), CourtFamily::Appellate);
+        assert_eq!(court_family("ca9"), CourtFamily::Appellate);
+        assert_eq!(court_family("ca11"), CourtFamily::Appellate);
+        assert_eq!(court_family("cadc"), CourtFamily::Appellate);
+        assert_eq!(court_family("f3d"), CourtFamily::Appellate);
+        assert_eq!(court_family("f4th"), CourtFamily::Appellate);
+    }
+
+    #[test]
+    fn court_family_district() {
+        assert_eq!(court_family("nyd"), CourtFamily::District);
+        assert_eq!(court_family("cad"), CourtFamily::District);
+        assert_eq!(court_family("txnd"), CourtFamily::District);
+        assert_eq!(court_family("dnj"), CourtFamily::District);
+    }
+
+    #[test]
+    fn court_family_tax() {
+        assert_eq!(court_family("tax"), CourtFamily::Tax);
+        assert_eq!(court_family("tax-court"), CourtFamily::Tax);
+    }
+
+    #[test]
+    fn court_family_bankruptcy() {
+        assert_eq!(court_family("bankr_sdny"), CourtFamily::Bankruptcy);
+        assert_eq!(court_family("bankr.dnj"), CourtFamily::Bankruptcy);
+    }
+
+    #[test]
+    fn court_family_unknown() {
+        assert_eq!(court_family("mystery_court"), CourtFamily::Unknown);
+        assert_eq!(court_family("statesc_ny"), CourtFamily::Unknown);
+    }
+
+    // ── S15.8: SCOTUS scanner ───────────────────────────────────────────────
+
+    #[test]
+    fn scotus_judgment_affirmed_is_respondent() {
+        let t = "For the foregoing reasons, the petitioner's challenge fails. \
+                 The judgment of the Court of Appeals is affirmed.";
+        assert_eq!(detect_outcome_for_court("scotus", t), Some("respondent"));
+    }
+
+    #[test]
+    fn scotus_reversed_and_remanded_is_petitioner() {
+        // Short-form disposition — common SCOTUS per-curiam pattern.
+        let preamble = "x".repeat(500);
+        let t = format!("{preamble} The judgment of the Court of Appeals is reversed, \
+             and the case is remanded for further proceedings consistent with this opinion.");
+        assert_eq!(detect_outcome_for_court("scotus", &t), Some("petitioner"));
+    }
+
+    #[test]
+    fn scotus_vacated_is_petitioner() {
+        let t = "Accordingly, the decision of the Court of Appeals is vacated, \
+                 and the case is remanded for further proceedings consistent with this opinion.";
+        assert_eq!(detect_outcome_for_court("scotus", t), Some("petitioner"));
+    }
+
+    #[test]
+    fn scotus_split_disposition() {
+        let t = "The judgment of the Court of Appeals is affirmed in part \
+                 and reversed in part, and the case is remanded.";
+        assert_eq!(detect_outcome_for_court("scotus", t), Some("split"));
+    }
+
+    #[test]
+    fn scotus_dig_is_none() {
+        let t = "The writ of certiorari is dismissed as improvidently granted.";
+        assert_eq!(detect_outcome_for_court("scotus", t), None);
+    }
+
+    #[test]
+    fn scotus_body_dicta_does_not_match() {
+        // Body mentions "the Court of Appeals affirmed in 2018" but the
+        // opinion ends with no operative disposition (e.g. only a footnote
+        // or further-proceedings note).  Conservative scanner: None, not a
+        // guess.
+        let t = "The Court of Appeals affirmed in 2018, and the petitioner sought \
+                 review.  We granted certiorari to resolve a circuit split.  \
+                 So ordered, with further proceedings to follow on the merits panel.";
+        assert_eq!(detect_outcome_for_court("scotus", t), None);
+    }
+
+    // ── S15.8: non-CAFC appellate dispatch ──────────────────────────────────
+
+    #[test]
+    fn appellate_ca9_affirmed_is_respondent() {
+        let t = "For the foregoing reasons, we affirm. AFFIRMED";
+        assert_eq!(detect_outcome_for_court("ca9", t), Some("respondent"));
+    }
+
+    #[test]
+    fn appellate_cadc_reversed_is_petitioner() {
+        let t = "We reverse the agency's order and remand for further proceedings. REVERSED";
+        assert_eq!(detect_outcome_for_court("cadc", t), Some("petitioner"));
+    }
+
+    #[test]
+    fn appellate_f3d_vacated_is_petitioner() {
+        let t = "The district court's order is vacated and the case remanded. VACATED";
+        assert_eq!(detect_outcome_for_court("f3d", t), Some("petitioner"));
+    }
+
+    // ── S15.8: District-court scanner ───────────────────────────────────────
+
+    #[test]
+    fn district_motion_to_dismiss_granted_is_respondent() {
+        let t = "For the foregoing reasons, Defendant's motion to dismiss is GRANTED. \
+                 The complaint is dismissed with prejudice.";
+        assert_eq!(detect_outcome_for_court("nyd", t), Some("respondent"));
+    }
+
+    #[test]
+    fn district_plaintiff_msj_granted_is_petitioner() {
+        let t = "For the foregoing reasons, Plaintiff's motion for summary judgment is GRANTED.";
+        assert_eq!(detect_outcome_for_court("cad", t), Some("petitioner"));
+    }
+
+    #[test]
+    fn district_msj_granted_in_part_is_split() {
+        let t = "Defendant's motion for summary judgment is GRANTED IN PART and DENIED IN PART.";
+        assert_eq!(detect_outcome_for_court("txnd", t), Some("split"));
+    }
+
+    #[test]
+    fn district_no_clear_disposition_is_none() {
+        let t = "The case is set for trial on the merits beginning January 10, 2026.";
+        assert_eq!(detect_outcome_for_court("dnj", t), None);
+    }
+
+    #[test]
+    fn district_action_dismissed_is_respondent() {
+        let t = "Accordingly, the action is dismissed without prejudice for lack of subject-matter jurisdiction.";
+        assert_eq!(detect_outcome_for_court("nyd", t), Some("respondent"));
+    }
+
+    #[test]
+    fn bankruptcy_returns_none() {
+        // Bankruptcy is deferred to Sprint 16 — even a clear-looking
+        // disposition phrase routes to None.
+        let t = "Defendant's motion to dismiss is GRANTED. The complaint is dismissed.";
+        assert_eq!(detect_outcome_for_court("bankr_sdny", t), None);
     }
 }
