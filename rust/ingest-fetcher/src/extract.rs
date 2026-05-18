@@ -58,6 +58,20 @@ pub struct ExtractStats {
 // Pure helpers (testable without a DB)
 // ────────────────────────────────────────────────────────────────────────────
 
+/// Return the last `max_bytes` of `text` as a `&str`, snapping `tail_start` UP
+/// to the next char boundary so the slice never lands inside a multi-byte
+/// UTF-8 codepoint.  CAP-ingested opinions contain non-ASCII characters
+/// (smart quotes, em dashes, accented names) and a naive `&text[start..]`
+/// panics with "byte index is not a char boundary".  If `text` is shorter
+/// than `max_bytes`, returns the whole slice.
+fn tail_window(text: &str, max_bytes: usize) -> &str {
+    let mut start = text.len().saturating_sub(max_bytes);
+    while start < text.len() && !text.is_char_boundary(start) {
+        start += 1;
+    }
+    &text[start..]
+}
+
 /// Classify the case type from the full opinion text.  Always returns a
 /// value — defaults to `income_tax` (the most common tax-court case type)
 /// when no specific signal is found.
@@ -341,8 +355,7 @@ fn detect_outcome_taxcourt(text: &str) -> Option<&'static str> {
 fn detect_outcome_appellate(text: &str) -> Option<&'static str> {
     // Window the LAST 600 chars — CAFC dispositions live in the closing
     // block.  If the opinion is shorter, scan the whole text.
-    let tail_start = text.len().saturating_sub(600);
-    let tail = &text[tail_start..];
+    let tail = tail_window(text, 600);
     // Whitespace-normalize the tail so multi-line dispositions like
     // "AFFIRMED-IN-PART, VACATED-IN-PART,\n             REVERSED-IN-PART."
     // collapse to a single line we can scan.
@@ -407,8 +420,7 @@ fn detect_outcome_appellate(text: &str) -> Option<&'static str> {
 fn detect_outcome_scotus(text: &str) -> Option<&'static str> {
     // Window the LAST 800 chars — SCOTUS dispositions can be a paragraph
     // longer than CAFC blocks because they're written in prose, not all-caps.
-    let tail_start = text.len().saturating_sub(800);
-    let tail = &text[tail_start..];
+    let tail = tail_window(text, 800);
     let normalized: String = tail.split_whitespace().collect::<Vec<_>>().join(" ");
     let lower = normalized.to_ascii_lowercase();
 
@@ -482,8 +494,16 @@ fn scotus_phrase_match(lower: &str, verb: &str) -> bool {
     for anchor in ["judgment", "decision"] {
         for (a_idx, _) in lower.match_indices(anchor) {
             // Look in a 60-char window around the anchor for the verb.
-            let lo = a_idx.saturating_sub(30);
-            let hi = (a_idx + anchor.len() + 30).min(lower.len());
+            // Snap both ends to UTF-8 char boundaries — CAP opinions
+            // contain smart quotes / accented names that crash a raw slice.
+            let mut lo = a_idx.saturating_sub(30);
+            while lo < lower.len() && !lower.is_char_boundary(lo) {
+                lo += 1;
+            }
+            let mut hi = (a_idx + anchor.len() + 30).min(lower.len());
+            while hi < lower.len() && !lower.is_char_boundary(hi) {
+                hi += 1;
+            }
             if lower[lo..hi].contains(verb) {
                 // But still exclude bare "[Court] affirmed in <year>"
                 // history-style dicta — i.e. require an "is" or "are"
@@ -517,8 +537,7 @@ fn scotus_phrase_match(lower: &str, verb: &str) -> bool {
 /// outcomes is worse for the downstream model than skipping them.
 fn detect_outcome_district(text: &str) -> Option<&'static str> {
     // Window the last 1000 chars — district orderings are wordy.
-    let tail_start = text.len().saturating_sub(1000);
-    let tail = &text[tail_start..];
+    let tail = tail_window(text, 1000);
     let normalized: String = tail.split_whitespace().collect::<Vec<_>>().join(" ");
     let lower = normalized.to_ascii_lowercase();
 
@@ -856,6 +875,23 @@ mod tests {
              be entered under Rule 155."
         );
         assert_eq!(detect_outcome_for_court("cafc", &t), None);
+    }
+
+    #[test]
+    fn tail_window_snaps_to_char_boundary() {
+        // CAP opinions contain smart-quotes / em-dashes. A naive byte slice
+        // at saturating_sub panics with "byte index is not a char boundary"
+        // when the cut point lands inside a multi-byte codepoint.
+        // Reproducer (real CAP text from a 1799 SCOTUS opinion that
+        // panicked the appellate scanner before this fix):
+        let body = format!("McKean, Chief Justice. {} affirmed.", "“some text”".repeat(40));
+        // Caller passes (text, 600); tail_window must snap to a boundary.
+        let tail = tail_window(&body, 600);
+        assert!(body.is_char_boundary(body.len() - tail.len()));
+        // And no panic when run through the scanner.
+        let _ = detect_outcome_appellate(&body);
+        let _ = detect_outcome_scotus(&body);
+        let _ = detect_outcome_district(&body);
     }
 
     #[test]

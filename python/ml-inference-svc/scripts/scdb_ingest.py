@@ -62,7 +62,7 @@ DEFAULT_DSN = (
 )
 
 SCDB_MODERN_URL = (
-    "https://supremecourt.wustl.edu/files/data/SCDB_2024_01_caseCentered_Citation.csv.zip"
+    "http://scdb.wustl.edu/_brickFiles/2024_01/SCDB_2024_01_caseCentered_Citation.csv.zip"
 )
 
 # SCDB encoding is windows-1252 / latin-1, NOT utf-8. Older releases have
