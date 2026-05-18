@@ -420,11 +420,33 @@ fn detect_outcome_appellate(text: &str) -> Option<&'static str> {
 /// to skip an ambiguous case than mislabel it — S15.9 calibrates precision
 /// against SCDB labels.
 fn detect_outcome_scotus(text: &str) -> Option<&'static str> {
-    // Window the LAST 800 chars — SCOTUS dispositions can be a paragraph
-    // longer than CAFC blocks because they're written in prose, not all-caps.
-    let tail = tail_window(text, 800);
-    let normalized: String = tail.split_whitespace().collect::<Vec<_>>().join(" ");
-    let lower = normalized.to_ascii_lowercase();
+    // Sprint 17 — modern SCOTUS opinions concatenate the majority opinion with
+    // concurrences and dissents, so the disposition is NOT in the tail; it's
+    // at the boundary between the majority and the next opinion, marked by
+    // "It is so ordered." (the canonical close of the SCOTUS majority).
+    //
+    // Strategy: find the LAST "it is so ordered" in the text and window the
+    // ~600 chars before it. That section contains the disposition. Fall
+    // back to the original tail-only scan for early-era SCOTUS (1754-1900)
+    // where "It is so ordered" wasn't used.
+    let text_lower_full = text.to_ascii_lowercase();
+    let scan_region: String = if let Some(marker_end) = text_lower_full.rfind("it is so ordered") {
+        // Pull from 600 chars before the marker up to 50 chars after.
+        let mut start = marker_end.saturating_sub(600);
+        while start < text.len() && !text.is_char_boundary(start) {
+            start += 1;
+        }
+        let mut end = (marker_end + 60).min(text.len());
+        while end < text.len() && !text.is_char_boundary(end) {
+            end += 1;
+        }
+        text[start..end].split_whitespace().collect::<Vec<_>>().join(" ")
+    } else {
+        // Pre-1900 fallback: scan only the last 800 chars.
+        let tail = tail_window(text, 800);
+        tail.split_whitespace().collect::<Vec<_>>().join(" ")
+    };
+    let lower = scan_region.to_ascii_lowercase();
 
     // DIG short-circuits — procedural, not on the merits.
     if lower.contains("dismissed as improvidently granted") {
@@ -1042,6 +1064,25 @@ mod tests {
         let _ = detect_outcome_appellate(&body);
         let _ = detect_outcome_scotus(&body);
         let _ = detect_outcome_district(&body);
+    }
+
+    #[test]
+    fn scotus_disposition_found_before_concurrences_modern_form() {
+        // Real modern-CAP shape: majority disposition is at ~41% through the
+        // text, then "It is so ordered." marks the end of the majority,
+        // then concurrences and dissents continue for another 90KB of text.
+        // The pre-Sprint-17 scanner only looked at the LAST 800 chars and
+        // missed this. The new scanner anchors on "It is so ordered."
+        let majority_body = "x".repeat(60_000);
+        let concurrence = "y".repeat(80_000);
+        let text = format!(
+            "{majority_body} The judgment of the District Court is reversed, \
+             and the case is remanded for further proceedings. \
+             It is so ordered. Justice THOMAS, concurring in the judgment. {concurrence}"
+        );
+        // The disposition is "reversed" → petitioner wins.
+        assert_eq!(detect_outcome_for_court("us", &text), Some("petitioner"));
+        assert_eq!(detect_outcome_for_court("scotus", &text), Some("petitioner"));
     }
 
     #[test]
