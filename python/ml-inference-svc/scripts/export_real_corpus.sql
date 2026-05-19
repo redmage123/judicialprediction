@@ -71,6 +71,14 @@ WITH cd_judges AS (
         ORDER BY (aa.bio->'win_rate_proxy'->>'cases_analyzed')::int DESC NULLS LAST
         LIMIT 1
     ) a ON true
+    -- Sprint 19 perf: filter to LABELLED rows before the LATERALs run.
+    -- The attorney LATERAL does `position(aa.normalized_name IN
+    -- lower(cd.full_text_plain))` for every row × every attorney; at
+    -- 40K rows × 439 attorneys × 150KB text per row that's 2.6T byte
+    -- comparisons and the query stalls. The trainer only consumes
+    -- labelled rows anyway (split/null are dropped in build_real_corpus.py),
+    -- so push the filter into the CTE.
     WHERE cd.case_type IS NOT NULL
+      AND cd.outcome_for IN ('petitioner', 'respondent', 'split')
 )
 SELECT json_agg(row_to_json(cd_judges)) FROM cd_judges;
