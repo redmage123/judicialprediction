@@ -158,6 +158,7 @@ boundary AND at the ML service's `ALLOWLIST_FEATURES` check.
 | Sprint 15 (probe) | 2026-05-18 | _not promoted_ | Real n=623 (+CAP SCOTUS) — see below |
 | Sprint 16 (probe) | 2026-05-18 | _not promoted_ | Real n=630 + 4 features de-neutralised — see below |
 | Sprint 17 (probe) | 2026-05-18 | _not promoted_ | Modern detector fix + per-court diagnostic — see below |
+| Sprint 18 (probe) | 2026-05-19 | _pending operator review_ | Real n=3,699 (2,960 f3d + others); LGBM Brier 0.1924 vs 0.18 gate — see below |
 
 ## Sprint 14 retrain probe (not promoted)
 
@@ -513,3 +514,78 @@ diagnostic now tells us EXACTLY which slice of the corpus moves the
 model. The actual promotion comes when we have ≥ 1,000 CAFC /
 circuit rows in `case_documents` — single-author appellate
 dispositions where `judge_severity` is meaningful.
+
+## Sprint 18 retrain probe (gate-decision pending)
+
+Sprint 18 capitalized on the S17 diagnostic ("we need single-author
+appellate corpus, not SCOTUS"). Two code changes shipped:
+
+* **`cb97638`** — `cap.rs` parallelizes case fetches via
+  `tokio::task::JoinSet` (10 concurrent). Benchmarked at ~1,720
+  cases/min vs the prior 15 cases/min — **100× speedup**.
+* (No feature or detector changes — purely an ingest throughput fix.)
+
+With the parallel fetcher the f3d corpus could be ingested in
+minutes, not hours. Two probes:
+
+| corpus | n labelled | XGB Brier | LGBM Brier | best |
+|---|---|---|---|---|
+| v7 (1420 = 681 f3d + others) | 1420 | 0.2059 | 0.2095 | 0.2059 |
+| v8 (2177 = 1438 f3d + others) | 2177 | 0.1939 | 0.1959 | 0.1939 |
+| **v9 (3699 = 2960 f3d + others)** | 3699 | 0.1933 | **0.1924** | **0.1924** |
+
+Full progression across all real-corpus attempts:
+
+| Sprint | n | Brier | Δ |
+|---|---|---|---|
+| 14 | 41 | 0.2571 | — |
+| 15 | 623 | 0.2231 | −0.034 |
+| 16 | 630 | 0.2209 | −0.002 |
+| 17 | 666 | 0.2266 | +0.006 (mixed-era) |
+| 18.1 | 1420 | 0.2059 | −0.020 |
+| 18.2 | 2177 | 0.1939 | −0.012 |
+| **18.3** | **3699** | **0.1924** | **−0.0015** |
+| Sprint 12.5 (synth target) | 2000 | 0.1662 | — |
+| Promotion gate | — | ≤ 0.18 | — |
+
+**Trajectory is flattening sharply.** From 1420 → 3699 labelled rows
+(2.6×), Brier moved 0.0135. From 2177 → 3699 (1.7×), only 0.0015.
+Linear extrapolation to clear the 0.18 gate would need ~20,000+
+labelled rows — feasible (f3d has ~46,000 cases total) but at
+diminishing returns.
+
+**v9 meta-LR coefficients on the stacked ensemble:**
+```
+xgboost:              +1.12
+lightgbm:             +1.16
+catboost:             +1.57   <- best-calibrated tree learner
+logistic_regression:  -0.67   <- down-weighted (as predicted in S12.5)
+```
+
+The Sprint-12.5 prediction that "trees catch non-linear feature
+interactions LR misses on real data" is now empirically confirmed.
+
+**ECE** for the v9 champion (LightGBM): **0.0230** — well under the
+0.08 gate. **PASSES.**
+
+### The gate-decision question
+
+Brier 0.1924 vs ≤ 0.18 gate: missing by **0.012**. Two defensible
+readings:
+
+1. **Hold the gate strictly.** Champion remains Sprint 12.5 LR on
+   synthetic_v1 (Brier 0.1662). Sprint 19 ingests another 5K-10K
+   f3d rows and retries.
+2. **Relax the gate to 0.20.** Brier 0.18 was set somewhat
+   arbitrarily (modest regression in exchange for real data). The
+   legal-prediction literature (e.g. Katz et al. on SCOTUS) reports
+   real-world Brier scores in the 0.18-0.22 range. 0.1924 on
+   3,699 real opinions is genuinely competitive with that
+   literature and meaningfully better than the base-rate Brier
+   (0.205 at 29% base rate). The synthetic champion's 0.1662 is
+   not a defensible *target* — it's an artifact of the synthetic
+   generator.
+
+**Decision: deferred to operator review.** Champion remains
+Sprint 12.5 LR pending review. `data/real_corpus_v9.parquet` + the
+Sprint 18 MLflow runs are retained.
