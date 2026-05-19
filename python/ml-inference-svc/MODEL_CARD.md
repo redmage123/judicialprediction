@@ -164,6 +164,7 @@ boundary AND at the ML service's `ALLOWLIST_FEATURES` check.
 | Sprint 20.2 (probe) | 2026-05-19 | _not promoted_ | v11 (= v10 + party types: petitioner_type, respondent_type, pro_se); XGBoost_per_court Brier 0.1932 / ECE 0.0168 — Δ −0.0008 over S20.1. |
 | Sprint 20.3 (probe) | 2026-05-19 | _not promoted_ | v12 (= v11 + procedural_posture, tier-1 regex over 10-bucket enum); CatBoost_per_court Brier 0.1914 / ECE 0.0258 — Δ −0.0018 over S20.2. Tier-2 LLM fallback for 'unknown' bucket deferred. |
 | Sprint 20.4 (probe) | 2026-05-19 | _not promoted_ | v13 (= v12 + citation density features: cite_total/density + 5 reporter-family counts via eyecite); LightGBM Brier 0.1913 / ECE 0.0228 — Δ −0.0001 over S20.3 (essentially flat). Density alone doesn't predict outcomes; pet/resp-favored counts need a citation→opinion lookup deferred to S21. |
+| Sprint 20.5 (probe) | 2026-05-19 | _pending S20.6 decision_ | v14 (= v13 + 384-dim sentence-transformers/all-MiniLM-L6-v2 embeddings of opinion text); stacked_ensemble_per_court Brier 0.1861 / ECE 0.0259 — Δ −0.0052 over S20.4. Biggest single-feature win in S20. Cumulative S19→S20.5 = −0.0088. |
 
 ## Sprint 14 retrain probe (not promoted)
 

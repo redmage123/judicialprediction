@@ -40,6 +40,8 @@ from president_ideology import ideology_distance_from_president
 from party_types import classify_party_types
 from procedural_posture import classify_procedural_posture
 from citation_features import extract_citation_features
+# text_embeddings is imported lazily inside main() so the module-load
+# cost (torch + transformers, ~5s) only fires when --embeddings is set.
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -245,6 +247,9 @@ def project_row(record: dict, materiality_calibration: dict | None = None) -> di
         "cite_taxcourt": cites.cite_taxcourt,
         "cite_admin": cites.cite_admin,
         "outcome": OUTCOME_MAP[outcome_raw],
+        # Carried through to main() for the S20.5 embedding pass; popped
+        # off the dataframe before write so it never lands in parquet.
+        "_full_text_plain": record.get("full_text_plain") or "",
         # Keep the raw fields around for auditability / debugging.
         "_opinion_id": record.get("opinion_id"),
         "_court_id": court_id,
@@ -261,6 +266,7 @@ def main(
     input_path: Path,
     output_path: Path,
     calibration_path: Path | None = None,
+    embeddings: bool = False,
 ) -> None:
     raw = json.loads(input_path.read_text())
     if not isinstance(raw, list):
@@ -280,6 +286,28 @@ def main(
         raise SystemExit("no usable rows — every row had outcome=split/null")
 
     df = pd.DataFrame(rows)
+
+    # S20.5 — opinion text embeddings. 384-dim MiniLM vectors are
+    # appended as `emb_000` … `emb_383` columns. Off by default to keep
+    # the build cheap for non-embedding sprints.
+    if embeddings:
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from text_embeddings import embed_opinions, column_names, EMBEDDING_DIM
+        print(f"S20.5: embedding {len(df)} opinions with MiniLM (CPU)...")
+        texts = df["_full_text_plain"].tolist()
+        # Truncate to ~2K chars so the encoder's tokenizer (256-token
+        # cap) doesn't drop the most informative head of the opinion.
+        texts = [t[:2000] for t in texts]
+        vecs = embed_opinions(texts, batch_size=32, show_progress=True)
+        emb_df = pd.DataFrame(vecs, columns=column_names())
+        df = pd.concat([df.reset_index(drop=True), emb_df], axis=1)
+        print(f"  added {EMBEDDING_DIM} embedding columns")
+
+    # Drop the temporary text-carry column before write — it isn't a
+    # feature and would bloat the parquet by 100s of MB.
+    if "_full_text_plain" in df.columns:
+        df = df.drop(columns=["_full_text_plain"])
     output_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(output_path, index=False)
 
@@ -342,5 +370,11 @@ if __name__ == "__main__":
         help="Path to materiality calibration JSON sidecar (default: "
         "data/materiality_calibration.json next to this script).",
     )
+    parser.add_argument(
+        "--embeddings",
+        action="store_true",
+        help="S20.5: compute 384-dim MiniLM embeddings for each opinion "
+        "and append as emb_000…emb_383 columns.",
+    )
     args = parser.parse_args()
-    main(args.input, args.output, args.materiality_calibration)
+    main(args.input, args.output, args.materiality_calibration, args.embeddings)

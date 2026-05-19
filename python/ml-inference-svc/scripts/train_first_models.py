@@ -105,6 +105,10 @@ def _resolve_feature_cols(df) -> tuple[list[str], list[str], list[str]]:
     has_s20_2 = all(c in df.columns for c in CATEGORICAL_FEATURES_S20_2 + NUMERIC_FEATURES_S20_2)
     has_s20_3 = all(c in df.columns for c in CATEGORICAL_FEATURES_S20_3)
     has_s20_4 = all(c in df.columns for c in NUMERIC_FEATURES_S20_4)
+    # S20.5 — embedding columns are named emb_NNN. Detect dynamically
+    # so we don't hard-code the dim (future model swaps can re-emit
+    # with a different EMBEDDING_DIM and the trainer keeps working).
+    embedding_features = sorted(c for c in df.columns if c.startswith("emb_"))
     cat = list(CATEGORICAL_FEATURES_BASE)
     num = list(NUMERIC_FEATURES_BASE)
     if has_s20_2:
@@ -114,6 +118,8 @@ def _resolve_feature_cols(df) -> tuple[list[str], list[str], list[str]]:
         cat += CATEGORICAL_FEATURES_S20_3
     if has_s20_4:
         num += NUMERIC_FEATURES_S20_4
+    if embedding_features:
+        num += embedding_features
     return cat, num, num + cat
 
 
