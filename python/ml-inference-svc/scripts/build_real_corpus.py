@@ -37,6 +37,7 @@ from pathlib import Path
 import pandas as pd
 
 from president_ideology import ideology_distance_from_president
+from party_types import classify_party_types
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -207,6 +208,12 @@ def project_row(record: dict, materiality_calibration: dict | None = None) -> di
         )
     else:
         materiality = NEUTRAL_FILL
+    # S20.2 — party-type extraction. Coarse three-way classification of
+    # each side (individual / corporation / government) plus a pro-se
+    # flag. Computed from `full_text_plain`'s caption head; rows whose
+    # caption can't be parsed default to ("individual", "individual",
+    # False) so the column has no missing values. See scripts/party_types.py.
+    parties = classify_party_types(record.get("full_text_plain"))
     return {
         "judge_severity": float(severity_raw),
         "attorney_win_rate": attorney_win_rate_from_record(record),
@@ -215,6 +222,9 @@ def project_row(record: dict, materiality_calibration: dict | None = None) -> di
         "procedural_motion_count": count_motions(record.get("full_text_plain")),
         "case_type": CASE_TYPE_MAP.get(case_type_raw, "civil"),
         "jurisdiction": JURISDICTION_MAP.get(court_id, "Federal"),
+        "petitioner_type": parties.petitioner,
+        "respondent_type": parties.respondent,
+        "pro_se": int(parties.pro_se),
         "outcome": OUTCOME_MAP[outcome_raw],
         # Keep the raw fields around for auditability / debugging.
         "_opinion_id": record.get("opinion_id"),
@@ -269,6 +279,19 @@ def main(
     print(
         f"materiality_score non-neutral: {non_neutral}/{len(df)} "
         f"(mean={df['materiality_score'].mean():.3f})"
+    )
+    # S20.2 — party-type distribution. If everything's "individual" then
+    # the caption regex didn't match — surface that loudly so we can
+    # investigate before retraining.
+    print(
+        f"petitioner_type: {df['petitioner_type'].value_counts().to_dict()}"
+    )
+    print(
+        f"respondent_type: {df['respondent_type'].value_counts().to_dict()}"
+    )
+    print(
+        f"pro_se: {int(df['pro_se'].sum())}/{len(df)} "
+        f"({df['pro_se'].mean():.1%})"
     )
 
 

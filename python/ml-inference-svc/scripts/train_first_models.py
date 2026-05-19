@@ -62,16 +62,44 @@ from ml_inference_svc.per_court_calibration import (  # noqa: E402
     PerCourtCalibratedChampion,
 )
 
-CATEGORICAL_FEATURES = ["case_type", "jurisdiction"]
-NUMERIC_FEATURES = [
+# S20.2 — petitioner_type / respondent_type are categorical (individual /
+# corporation / government); pro_se is a 0/1 numeric flag. The trainer
+# auto-detects whether the parquet has these columns and silently drops
+# them when absent, so older corpora (synthetic_v1, real_v9) still build.
+CATEGORICAL_FEATURES_BASE = ["case_type", "jurisdiction"]
+CATEGORICAL_FEATURES_S20_2 = ["petitioner_type", "respondent_type"]
+NUMERIC_FEATURES_BASE = [
     "judge_severity",
     "attorney_win_rate",
     "ideology_distance",
     "materiality_score",
     "procedural_motion_count",
 ]
-FEATURE_COLS = NUMERIC_FEATURES + CATEGORICAL_FEATURES
+NUMERIC_FEATURES_S20_2 = ["pro_se"]
+
+# Filled by `main()` after reading the parquet, so the script doesn't
+# hardcode an assumption about which feature classes the corpus carries.
+CATEGORICAL_FEATURES: list[str] = []
+NUMERIC_FEATURES: list[str] = []
+FEATURE_COLS: list[str] = []
 TARGET_COL = "outcome"
+
+
+def _resolve_feature_cols(df) -> tuple[list[str], list[str], list[str]]:
+    """
+    Pick the feature column lists based on what's actually in the
+    parquet. Lets the same trainer run against synthetic_v1, real_v9
+    (no party types) and real_v11+ (party types) without branching at
+    every call site.
+    """
+    has_s20_2 = all(c in df.columns for c in CATEGORICAL_FEATURES_S20_2 + NUMERIC_FEATURES_S20_2)
+    if has_s20_2:
+        cat = CATEGORICAL_FEATURES_BASE + CATEGORICAL_FEATURES_S20_2
+        num = NUMERIC_FEATURES_BASE + NUMERIC_FEATURES_S20_2
+    else:
+        cat = list(CATEGORICAL_FEATURES_BASE)
+        num = list(NUMERIC_FEATURES_BASE)
+    return cat, num, num + cat
 
 
 def _detect_gpu() -> bool:
@@ -271,6 +299,12 @@ def main(data_path: str, seed: int = 42) -> None:
     tracking_uri = "file://" + os.path.join(project_root, "mlruns")
 
     df = pd.read_parquet(data_path)
+    # S20.2 — resolve which feature columns this corpus carries before
+    # encoding. Mutates module-level FEATURE_COLS / NUMERIC_FEATURES /
+    # CATEGORICAL_FEATURES so the encode_features helper picks them up.
+    global CATEGORICAL_FEATURES, NUMERIC_FEATURES, FEATURE_COLS  # noqa: PLW0603
+    CATEGORICAL_FEATURES, NUMERIC_FEATURES, FEATURE_COLS = _resolve_feature_cols(df)
+    print(f"Features in this corpus  : {FEATURE_COLS}")
     X, _encoder = encode_features(df)
     y = df[TARGET_COL].values.astype(int)
 
