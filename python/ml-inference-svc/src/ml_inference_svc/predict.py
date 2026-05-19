@@ -29,7 +29,11 @@ FEATURE_ORDER = [
 ]
 
 # Tier-A/B allowlist — Tier-C party features are never accepted here.
-ALLOWLIST_FEATURES: frozenset[str] = frozenset(FEATURE_ORDER)
+# `court_id` is allowed in addition to the model features because Sprint
+# 20.1's per-court isotonic calibrator routes by it. It does NOT enter
+# the model's feature vector — it only selects which final-stage
+# calibration curve to apply.
+ALLOWLIST_FEATURES: frozenset[str] = frozenset(FEATURE_ORDER) | frozenset({"court_id"})
 
 # Categorical ordinal encoding maps (mirrors train_first_models.py OrdinalEncoder fit order).
 _CASE_TYPE_MAP = {"civil": 0.0, "criminal": 1.0, "bankruptcy": 2.0}
@@ -171,6 +175,22 @@ def predict_case_outcome(
     """
     model, conformal, meta = _load_champion()
     X = _encode_features(features)
-    p_win = float(model.predict_proba(X)[0, 1])
+
+    # Sprint 20.1 — when the champion is a `PerCourtCalibratedChampion`
+    # it accepts an optional `court_ids` array that routes to the
+    # per-court isotonic calibrator. Falls back to the global isotonic
+    # when court_id isn't supplied so legacy callers keep working.
+    court_id = features.get("court_id")
+    if court_id is not None:
+        try:
+            p_win = float(
+                model.predict_proba(X, court_ids=np.array([str(court_id)]))[0, 1]
+            )
+        except TypeError:
+            # Inner model isn't per-court-aware (raw champion); fall back.
+            p_win = float(model.predict_proba(X)[0, 1])
+    else:
+        p_win = float(model.predict_proba(X)[0, 1])
+
     ci_lower, ci_upper = conformal.predict_interval(p_win, alpha=alpha)
     return p_win, ci_lower, ci_upper, meta["run_id"]

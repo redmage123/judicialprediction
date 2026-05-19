@@ -48,6 +48,20 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OrdinalEncoder, StandardScaler
 from xgboost import XGBClassifier
 
+# Sprint 20.1 — per-court isotonic calibration. Lives in the package
+# rather than this script so predict.py can import the wrapper class
+# for unpickling.
+import sys
+_SRC_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "src"
+)
+if _SRC_DIR not in sys.path:
+    sys.path.insert(0, _SRC_DIR)
+from ml_inference_svc.per_court_calibration import (  # noqa: E402
+    PerCourtIsotonicCalibrator,
+    PerCourtCalibratedChampion,
+)
+
 CATEGORICAL_FEATURES = ["case_type", "jurisdiction"]
 NUMERIC_FEATURES = [
     "judge_severity",
@@ -260,9 +274,23 @@ def main(data_path: str, seed: int = 42) -> None:
     X, _encoder = encode_features(df)
     y = df[TARGET_COL].values.astype(int)
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=seed, stratify=y
-    )
+    # Sprint 20.1 — propagate `_court_id` through the train/test split
+    # so we can fit per-court calibrators downstream. The synthetic
+    # corpora never carried this column, so per-court calibration is
+    # opt-in based on presence.
+    has_court = "_court_id" in df.columns
+    if has_court:
+        court_ids_all = df["_court_id"].astype(str).values
+        X_train, X_test, y_train, y_test, courts_train, courts_test = train_test_split(
+            X, y, court_ids_all,
+            test_size=0.2, random_state=seed, stratify=y,
+        )
+    else:
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=seed, stratify=y
+        )
+        courts_train = None
+        courts_test = None
 
     # Sprint 12.5 — four base models with intentionally diverse inductive
     # biases.  The three GBMs find non-linear interactions; the LR
@@ -464,7 +492,126 @@ def main(data_path: str, seed: int = 42) -> None:
         "run_id": stacker_run_id,
     })
 
-    # ── Champion selection (now across 5 candidates) ──────────────────────
+    # ── Sprint 20.1 — per-court isotonic calibration ──────────────────────
+    # The OOF base-model probabilities used by the stacker double as
+    # OOF predictions for each base model individually. For the stacker,
+    # we get OOF predictions by feeding `oof_probs` through the trained
+    # meta-LR — this gives us a "what would the stacker have said about
+    # row i without having seen it" estimate, which is the unbiased input
+    # we need for fitting per-court iso.
+    #
+    # Per-court iso is then fit per candidate on OOF + train labels +
+    # train court_ids. Each calibrated variant is evaluated on the test
+    # set (with its court_ids) and logged as its own MLflow run, so
+    # champion selection runs across all 10 candidates (5 raw +
+    # 5 calibrated). Whichever has the lowest Brier wins.
+    #
+    # Falls back to global isotonic for courts with < min_n=50 cal-set
+    # samples (cafc=36, bia=14, tax=9 in the v10 corpus); only f3d and
+    # us currently have enough data for their own calibrators.
+    inner_by_name: dict[str, object] = dict(calibrated_by_name)
+    inner_by_name["stacked_ensemble"] = stacker
+
+    if courts_train is not None:
+        oof_stacker = meta.predict_proba(oof_probs)[:, 1]
+        oof_by_name: dict[str, np.ndarray] = {
+            name: oof_probs[:, col] for col, name in enumerate(base_names)
+        }
+        oof_by_name["stacked_ensemble"] = oof_stacker
+
+        print("\nFitting per-court isotonic calibrators (S20.1)...")
+        unique_train_courts, train_court_counts = np.unique(
+            courts_train, return_counts=True
+        )
+        print(
+            "  cal-set court counts: "
+            + ", ".join(
+                f"{c}={n}" for c, n in zip(unique_train_courts, train_court_counts)
+            )
+        )
+
+        calibrated_results: list[dict] = []
+        for r in list(results):
+            name = r["model_name"]
+            inner = inner_by_name[name]
+
+            # Test-set raw probabilities (already Platt-calibrated by the
+            # inner model; per-court iso layers on top).
+            p_test_raw = inner.predict_proba(X_test)[:, 1]
+
+            pc = PerCourtIsotonicCalibrator(min_n=50)
+            pc.fit(oof_by_name[name], y_train, courts_train)
+
+            p_test_cal = pc.transform(p_test_raw, courts_test)
+            cal_brier = brier_score_loss(y_test, p_test_cal)
+            cal_ece = ece(y_test, p_test_cal)
+            cal_logloss = log_loss(y_test, p_test_cal)
+
+            wrapped = PerCourtCalibratedChampion(inner=inner, calibrator=pc)
+
+            mlflow.set_tracking_uri(tracking_uri)
+            mlflow.set_experiment("judicialpredict-gbm-ensemble")
+            with mlflow.start_run(run_name=f"{name}_per_court") as run:
+                mlflow.log_params({
+                    "model": f"{name}_per_court",
+                    "base_model": name,
+                    "calibration": "per_court_isotonic",
+                    "min_n_per_court": 50,
+                    "fitted_courts": ",".join(pc.fitted_courts()) or "(none — all fallback)",
+                    "seed": seed,
+                })
+                mlflow.log_metrics({
+                    "brier_score": cal_brier,
+                    "ece": cal_ece,
+                    "log_loss": cal_logloss,
+                })
+                mlflow.set_tag("model_name", f"{name}_per_court")
+                mlflow.set_tag("sprint", "20.1")
+                mlflow.sklearn.log_model(wrapped, artifact_path="model")
+
+                # Conformal residuals against the same cal split the
+                # inner model used — for the stacker this is the test
+                # set (mirrors the unwrapped stacker's residual choice).
+                if name == "stacked_ensemble":
+                    res_source = y_test.astype(float) - p_test_cal
+                else:
+                    # Re-derive cal split for this base model identically
+                    # to train_and_evaluate_v2 so residuals match the
+                    # raw run.
+                    cal_size = max(50, int(0.2 * len(X_train)))
+                    _, X_cal_re, _, y_cal_re, _, courts_cal_re = train_test_split(
+                        X_train, y_train, courts_train,
+                        test_size=cal_size, random_state=seed, stratify=y_train,
+                    )
+                    p_cal_inner = inner.predict_proba(X_cal_re)[:, 1]
+                    p_cal_pc = pc.transform(p_cal_inner, courts_cal_re)
+                    res_source = y_cal_re.astype(float) - p_cal_pc
+                residuals = np.abs(res_source)
+                with tempfile.TemporaryDirectory() as tmp:
+                    res_path = os.path.join(tmp, "conformal_residuals.npy")
+                    np.save(res_path, residuals)
+                    mlflow.log_artifact(res_path)
+
+                cal_run_id = run.info.run_id
+
+            print(
+                f"  {name + '_per_court':22s}  Brier={cal_brier:.4f}"
+                f"  ECE={cal_ece:.4f}  LogLoss={cal_logloss:.4f}"
+                f"  fitted={len(pc.fitted_courts())} courts"
+                f"  run_id={cal_run_id}"
+            )
+            calibrated_results.append({
+                "model_name": f"{name}_per_court",
+                "brier": cal_brier,
+                "ece": cal_ece,
+                "log_loss": cal_logloss,
+                "run_id": cal_run_id,
+            })
+        results.extend(calibrated_results)
+    else:
+        print("\n(S20.1 per-court calibration skipped — `_court_id` not in parquet)")
+
+    # ── Champion selection (now across 5 raw + 5 calibrated = 10) ─────────
     champion = min(results, key=lambda r: r["brier"])
     mlflow.set_tracking_uri(tracking_uri)
     client = mlflow.tracking.MlflowClient()

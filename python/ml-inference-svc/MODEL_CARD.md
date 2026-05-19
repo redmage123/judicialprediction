@@ -160,6 +160,7 @@ boundary AND at the ML service's `ALLOWLIST_FEATURES` check.
 | Sprint 17 (probe) | 2026-05-18 | _not promoted_ | Modern detector fix + per-court diagnostic — see below |
 | Sprint 18 (probe) | 2026-05-19 | _not promoted_ | Real n=3,699 (2,960 f3d + others); LGBM Brier 0.1924 vs 0.18 gate — see below |
 | Sprint 19 (probe) | 2026-05-19 | _not promoted_ | Real n=5,937 (5,198 f3d + others); LGBM Brier 0.1949 — plateau confirmed, see below |
+| Sprint 20.1 (probe) | 2026-05-19 | _not promoted_ | Same v10 corpus + per-court isotonic calibration; CatBoost_per_court Brier 0.1940 / ECE 0.0211 — best real-data result so far. Promotion held until S20.2–S20.5 land. |
 
 ## Sprint 14 retrain probe (not promoted)
 
