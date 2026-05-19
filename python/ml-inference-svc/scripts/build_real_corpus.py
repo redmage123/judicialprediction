@@ -38,6 +38,7 @@ import pandas as pd
 
 from president_ideology import ideology_distance_from_president
 from party_types import classify_party_types
+from procedural_posture import classify_procedural_posture
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -214,6 +215,10 @@ def project_row(record: dict, materiality_calibration: dict | None = None) -> di
     # caption can't be parsed default to ("individual", "individual",
     # False) so the column has no missing values. See scripts/party_types.py.
     parties = classify_party_types(record.get("full_text_plain"))
+    # S20.3 — procedural posture. Tier-1 regex over the first 2K chars
+    # of the opinion; tier-2 LLM fallback wired separately for the
+    # 'unknown' bucket (off the build hot path).
+    posture = classify_procedural_posture(record.get("full_text_plain"))
     return {
         "judge_severity": float(severity_raw),
         "attorney_win_rate": attorney_win_rate_from_record(record),
@@ -225,6 +230,7 @@ def project_row(record: dict, materiality_calibration: dict | None = None) -> di
         "petitioner_type": parties.petitioner,
         "respondent_type": parties.respondent,
         "pro_se": int(parties.pro_se),
+        "procedural_posture": posture.label,
         "outcome": OUTCOME_MAP[outcome_raw],
         # Keep the raw fields around for auditability / debugging.
         "_opinion_id": record.get("opinion_id"),
@@ -292,6 +298,9 @@ def main(
     print(
         f"pro_se: {int(df['pro_se'].sum())}/{len(df)} "
         f"({df['pro_se'].mean():.1%})"
+    )
+    print(
+        f"procedural_posture: {df['procedural_posture'].value_counts().to_dict()}"
     )
 
 

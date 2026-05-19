@@ -68,6 +68,7 @@ from ml_inference_svc.per_court_calibration import (  # noqa: E402
 # them when absent, so older corpora (synthetic_v1, real_v9) still build.
 CATEGORICAL_FEATURES_BASE = ["case_type", "jurisdiction"]
 CATEGORICAL_FEATURES_S20_2 = ["petitioner_type", "respondent_type"]
+CATEGORICAL_FEATURES_S20_3 = ["procedural_posture"]
 NUMERIC_FEATURES_BASE = [
     "judge_severity",
     "attorney_win_rate",
@@ -93,12 +94,14 @@ def _resolve_feature_cols(df) -> tuple[list[str], list[str], list[str]]:
     every call site.
     """
     has_s20_2 = all(c in df.columns for c in CATEGORICAL_FEATURES_S20_2 + NUMERIC_FEATURES_S20_2)
+    has_s20_3 = all(c in df.columns for c in CATEGORICAL_FEATURES_S20_3)
+    cat = list(CATEGORICAL_FEATURES_BASE)
+    num = list(NUMERIC_FEATURES_BASE)
     if has_s20_2:
-        cat = CATEGORICAL_FEATURES_BASE + CATEGORICAL_FEATURES_S20_2
-        num = NUMERIC_FEATURES_BASE + NUMERIC_FEATURES_S20_2
-    else:
-        cat = list(CATEGORICAL_FEATURES_BASE)
-        num = list(NUMERIC_FEATURES_BASE)
+        cat += CATEGORICAL_FEATURES_S20_2
+        num += NUMERIC_FEATURES_S20_2
+    if has_s20_3:
+        cat += CATEGORICAL_FEATURES_S20_3
     return cat, num, num + cat
 
 
