@@ -77,6 +77,15 @@ NUMERIC_FEATURES_BASE = [
     "procedural_motion_count",
 ]
 NUMERIC_FEATURES_S20_2 = ["pro_se"]
+NUMERIC_FEATURES_S20_4 = [
+    "cite_total",
+    "cite_density",
+    "cite_scotus",
+    "cite_circuit",
+    "cite_district",
+    "cite_taxcourt",
+    "cite_admin",
+]
 
 # Filled by `main()` after reading the parquet, so the script doesn't
 # hardcode an assumption about which feature classes the corpus carries.
@@ -95,6 +104,7 @@ def _resolve_feature_cols(df) -> tuple[list[str], list[str], list[str]]:
     """
     has_s20_2 = all(c in df.columns for c in CATEGORICAL_FEATURES_S20_2 + NUMERIC_FEATURES_S20_2)
     has_s20_3 = all(c in df.columns for c in CATEGORICAL_FEATURES_S20_3)
+    has_s20_4 = all(c in df.columns for c in NUMERIC_FEATURES_S20_4)
     cat = list(CATEGORICAL_FEATURES_BASE)
     num = list(NUMERIC_FEATURES_BASE)
     if has_s20_2:
@@ -102,6 +112,8 @@ def _resolve_feature_cols(df) -> tuple[list[str], list[str], list[str]]:
         num += NUMERIC_FEATURES_S20_2
     if has_s20_3:
         cat += CATEGORICAL_FEATURES_S20_3
+    if has_s20_4:
+        num += NUMERIC_FEATURES_S20_4
     return cat, num, num + cat
 
 

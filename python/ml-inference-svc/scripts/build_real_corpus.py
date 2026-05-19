@@ -39,6 +39,7 @@ import pandas as pd
 from president_ideology import ideology_distance_from_president
 from party_types import classify_party_types
 from procedural_posture import classify_procedural_posture
+from citation_features import extract_citation_features
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -219,6 +220,11 @@ def project_row(record: dict, materiality_calibration: dict | None = None) -> di
     # of the opinion; tier-2 LLM fallback wired separately for the
     # 'unknown' bucket (off the build hot path).
     posture = classify_procedural_posture(record.get("full_text_plain"))
+    # S20.4 — citation density features. Eyecite outgoing-citation
+    # extraction by reporter family. The richer pet/resp-favored
+    # citation counts are deferred until we have a citation→opinion
+    # lookup; this is the cheap signal we can ship today.
+    cites = extract_citation_features(record.get("full_text_plain"))
     return {
         "judge_severity": float(severity_raw),
         "attorney_win_rate": attorney_win_rate_from_record(record),
@@ -231,6 +237,13 @@ def project_row(record: dict, materiality_calibration: dict | None = None) -> di
         "respondent_type": parties.respondent,
         "pro_se": int(parties.pro_se),
         "procedural_posture": posture.label,
+        "cite_total": cites.cite_total,
+        "cite_density": cites.cite_density,
+        "cite_scotus": cites.cite_scotus,
+        "cite_circuit": cites.cite_circuit,
+        "cite_district": cites.cite_district,
+        "cite_taxcourt": cites.cite_taxcourt,
+        "cite_admin": cites.cite_admin,
         "outcome": OUTCOME_MAP[outcome_raw],
         # Keep the raw fields around for auditability / debugging.
         "_opinion_id": record.get("opinion_id"),
@@ -302,6 +315,20 @@ def main(
     print(
         f"procedural_posture: {df['procedural_posture'].value_counts().to_dict()}"
     )
+    # S20.4 — citation density summary
+    if "cite_total" in df.columns:
+        print(
+            f"cite_total: mean={df['cite_total'].mean():.1f}, "
+            f"median={df['cite_total'].median():.0f}, max={df['cite_total'].max()}, "
+            f"zero-rate={(df['cite_total'] == 0).mean():.1%}"
+        )
+        print(
+            f"cite per family — scotus_mean={df['cite_scotus'].mean():.1f}, "
+            f"circuit_mean={df['cite_circuit'].mean():.1f}, "
+            f"district_mean={df['cite_district'].mean():.1f}, "
+            f"taxcourt_mean={df['cite_taxcourt'].mean():.1f}, "
+            f"admin_mean={df['cite_admin'].mean():.1f}"
+        )
 
 
 if __name__ == "__main__":
