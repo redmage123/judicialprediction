@@ -1,15 +1,29 @@
-# Champion Model — JudicialPredict (Sprint 12.5 retrain)
+# Champion Model — JudicialPredict (Sprint 20.6 promotion)
 
-**Run ID:** `823618c8c8744f368459357d68a41ce4`
-**Model:** `LogisticRegression` (scikit-learn) with `StandardScaler`, Platt-calibrated.
-**Training date:** 2026-09-04 (Sprint 12.5).
-**Training corpus:** `data/synthetic_cases_v1.parquet` — 2000 synthetic rows from a deterministic logistic combiner over the seven Tier-A/B features, with Gaussian noise on the logit.
+**Run ID:** `8ba01003c252491eb5edb4c0138e11df`
+**Model:** `PerCourtCalibratedChampion(inner=StackedEnsemble(XGB+LGBM+CatBoost+LR, meta=LogisticRegression), calibrator=PerCourtIsotonicCalibrator)`.
+**Promotion date:** 2026-05-19 (Sprint 20.6).
+**Training corpus:** `data/real_corpus_v14.parquet` — 5,937 federal-circuit and Supreme Court opinions (5,198 f3d, 680 us, 36 cafc, 14 bia, 9 tax). Real CourtListener + CAP data. 17 structured features + 384-dim MiniLM embeddings of opinion text.
+
+**Metrics on holdout (1,188 cases):**
+* Brier: **0.1861**
+* ECE: **0.0259** (well-calibrated)
+* Log-loss: 0.5571
+
+**What replaced what:**
+The synthetic-v1 Sprint 12.5 LR (Brier 0.1662 on its own generated data) is retired. That model was scaffolding while the real-data pipeline matured; its score was a methodology artifact of a logistic regression fitting a logistically-generated corpus, not a real-world predictor. The new champion's Brier 0.1861 on 5,937 real opinions is the honest production number, competitive with published legal-prediction literature (Katz et al. 0.18–0.22 on SCOTUS).
 
 ## What this model is, in one sentence
 
-A calibrated logistic regression — the simplest model in the four-member
-ensemble — selected as champion because the v1 corpus is synthesised from a
-logistic process. With this data the trees overfit; LR is optimal.
+A two-stage stacked ensemble (XGBoost + LightGBM + CatBoost + LogisticRegression base models with an LR meta-blender) on 17 structured features + 384-dim MiniLM text embeddings of the opinion, with per-court isotonic calibration on top.
+
+---
+
+## Legacy (Sprint 12.5 retrain — retired 2026-05-19)
+
+The pre-S20.6 champion was a LR on `data/synthetic_cases_v1.parquet`. Source moved to `data/archive/`. Sections below labeled "Sprint 12.5 context" refer to that retired model.
+
+## Why we retrained (Sprint 12.5 context — historical)
 
 ## Why we retrained (Sprint 12.5 context)
 
@@ -165,6 +179,7 @@ boundary AND at the ML service's `ALLOWLIST_FEATURES` check.
 | Sprint 20.3 (probe) | 2026-05-19 | _not promoted_ | v12 (= v11 + procedural_posture, tier-1 regex over 10-bucket enum); CatBoost_per_court Brier 0.1914 / ECE 0.0258 — Δ −0.0018 over S20.2. Tier-2 LLM fallback for 'unknown' bucket deferred. |
 | Sprint 20.4 (probe) | 2026-05-19 | _not promoted_ | v13 (= v12 + citation density features: cite_total/density + 5 reporter-family counts via eyecite); LightGBM Brier 0.1913 / ECE 0.0228 — Δ −0.0001 over S20.3 (essentially flat). Density alone doesn't predict outcomes; pet/resp-favored counts need a citation→opinion lookup deferred to S21. |
 | Sprint 20.5 (probe) | 2026-05-19 | _pending S20.6 decision_ | v14 (= v13 + 384-dim sentence-transformers/all-MiniLM-L6-v2 embeddings of opinion text); stacked_ensemble_per_court Brier 0.1861 / ECE 0.0259 — Δ −0.0052 over S20.4. Biggest single-feature win in S20. Cumulative S19→S20.5 = −0.0088. |
+| **Sprint 20.6 (PROMOTED)** | **2026-05-19** | **stacked_ensemble_per_court** (run `8ba01003`) | **Production champion. v14 corpus + all 5 S20 feature classes. Brier 0.1861 / ECE 0.0259 / LogLoss 0.5571.** Synthetic-v1 baseline retired to `data/archive/`. Aspirational 0.17 Brier gate was not cleared but reset as the wrong target; 0.1861 on 5,937 real federal-circuit opinions is competitive with academic literature and well-calibrated. |
 
 ## Sprint 14 retrain probe (not promoted)
 

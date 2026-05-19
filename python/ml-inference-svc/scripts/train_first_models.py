@@ -672,12 +672,54 @@ def main(data_path: str, seed: int = 42) -> None:
     client = mlflow.tracking.MlflowClient()
     client.set_tag(champion["run_id"], "champion", "true")
 
+    # S20.6 — emit feature_contract.json + structured_encoder.pkl as
+    # artifacts of the champion run, so predict.py can rebuild the
+    # input vector at inference time without depending on script
+    # globals. Mirrors what `scripts/promote_champion.py` does on a
+    # one-shot run.
+    embedding_cols = sorted(c for c in df.columns if c.startswith("emb_"))
+    category_orders = {
+        col: [str(v) for v in _encoder.categories_[i]]
+        for i, col in enumerate(CATEGORICAL_FEATURES)
+    } if CATEGORICAL_FEATURES else {}
+    feature_contract = {
+        "model_name": champion["model_name"],
+        "run_id": champion["run_id"],
+        "structured_features_order": list(FEATURE_COLS),
+        "categorical_features": list(CATEGORICAL_FEATURES),
+        "numeric_features": list(NUMERIC_FEATURES),
+        "category_orders": category_orders,
+        "embedding_dim": len(embedding_cols),
+        "embedding_columns": embedding_cols,
+        "embedding_model": "sentence-transformers/all-MiniLM-L6-v2" if embedding_cols else None,
+        "embedding_input_field": "opinion_text" if embedding_cols else None,
+        "embedding_max_chars": 2000 if embedding_cols else None,
+    }
+    # Attach the contract + encoder to the champion's mlflow run.
+    with tempfile.TemporaryDirectory() as tmp:
+        contract_path = os.path.join(tmp, "feature_contract.json")
+        with open(contract_path, "w") as f:
+            json.dump(feature_contract, f, indent=2)
+        encoder_path = os.path.join(tmp, "structured_encoder.pkl")
+        import pickle
+        with open(encoder_path, "wb") as f:
+            pickle.dump(_encoder, f)
+        with mlflow.start_run(run_id=champion["run_id"]):
+            mlflow.log_artifact(contract_path)
+            mlflow.log_artifact(encoder_path)
+
+    # Inline the contract in champion.json so predict.py can route
+    # without a second artifact lookup on the cold path.
+    champion_with_contract = dict(champion)
+    champion_with_contract["feature_contract"] = feature_contract
+
     meta_path = os.path.join(project_root, "mlruns", "champion.json")
     with open(meta_path, "w") as f:
-        json.dump(champion, f, indent=2)
+        json.dump(champion_with_contract, f, indent=2)
 
     print(f"\nChampion     : {champion['model_name']}  run_id={champion['run_id']}")
     print(f"Metadata     : {meta_path}")
+    print(f"Feature contract: {len(FEATURE_COLS)} structured + {len(embedding_cols)} embedding columns")
 
 
 if __name__ == "__main__":
