@@ -62,6 +62,16 @@ ALLOWLIST_FEATURES: frozenset[str] = frozenset(FEATURE_ORDER) | frozenset({
     "cite_district", "cite_taxcourt", "cite_admin",
 })
 
+# Features the caller MUST supply. This is the original Tier-A/B set the
+# intake form always collects. Everything else on ALLOWLIST_FEATURES is
+# optional: the feature contract neutral-fills absent numerics (0.0) and
+# maps absent categoricals to the unknown ordinal (-1.0), and `opinion_text`
+# absence yields a zero embedding vector. Keeping REQUIRED a strict subset
+# of ALLOWLIST is what lets the v14 text-conditional champion serve a
+# 9-field gateway request without rejecting it for "missing" S20.2–S20.4
+# features the gateway never computes.
+REQUIRED_FEATURES: frozenset[str] = frozenset(FEATURE_ORDER)
+
 
 def _champion_meta() -> dict:
     here = os.path.dirname(os.path.abspath(__file__))

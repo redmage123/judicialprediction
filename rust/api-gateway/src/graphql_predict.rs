@@ -167,6 +167,12 @@ pub(crate) async fn call_ml(
         // 0.0 → server uses its configured default coverage (90%).
         conformal_coverage: 0.0,
         trace_id: String::new(),
+        // S21.1 — raw opinion text + court id ride dedicated proto fields so
+        // the text-conditional champion can embed the opinion and route
+        // per-court calibration. Empty string => zero embedding / global
+        // isotonic fallback on the Python side.
+        opinion_text: features.opinion_text.clone().unwrap_or_default(),
+        court_id: features.court_id.clone().unwrap_or_default(),
     });
 
     // Attach x-tenant-id metadata so the ML service's audit_recorder fires
@@ -227,6 +233,18 @@ pub struct PredictInput {
     pub procedural_motion_count: f32,
     pub case_type: String,
     pub jurisdiction: String,
+    /// S21.1 — raw opinion text. Threaded to ml-inference-svc as a dedicated
+    /// gRPC field so the text-conditional champion (v14+) can embed it.
+    /// Optional: omit it and the model receives a zero embedding vector.
+    /// Also reused by `createCase` for the S5.7/S5.8 NLP extractor when no
+    /// separate `opinionText` mutation argument is supplied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opinion_text: Option<String>,
+    /// S21.1 — court identifier (CourtListener slug, e.g. `ca9`, `scotus`).
+    /// Routes per-court isotonic calibration (S20.1) downstream. Optional:
+    /// omit it and the global isotonic calibrator is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub court_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1079,7 +1097,15 @@ impl Mutation {
         // so the MQ branch (S10) picks the term that was current at filing
         // time, not today's snapshot. When dateFiled is omitted, as_of_year
         // is None and the resolver falls back to the latest-MQ snapshot.
-        let nlp_suggestion: Option<ExtractedFeatures> = match opinion_text.as_deref() {
+        // S21.1 — opinion text now also rides PredictInput.opinion_text (so a
+        // single field powers both the model embedding and this NLP pass).
+        // Prefer the explicit `opinionText` mutation argument for backward
+        // compatibility; fall back to the value carried on `input`.
+        let effective_opinion_text: Option<&str> = opinion_text
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .or(input.opinion_text.as_deref());
+        let nlp_suggestion: Option<ExtractedFeatures> = match effective_opinion_text {
             Some(text) if !text.trim().is_empty() => {
                 Some(extract_features_from_text(pool, tenant_id, text, as_of_year).await?)
             }
@@ -1539,6 +1565,10 @@ mod tests {
             procedural_motion_count: 3.0,
             case_type: "civil".to_string(),
             jurisdiction: "Federal".to_string(),
+            // S21.1 — exercise the new optional fields so a future rename or
+            // serde regression on opinion_text/court_id breaks here.
+            opinion_text: Some("The petitioner appeals the Tax Court...".to_string()),
+            court_id: Some("ca9".to_string()),
         };
 
         let json = serde_json::to_string(&input).expect("serialize");
@@ -1554,6 +1584,20 @@ mod tests {
         );
         assert_eq!(decoded.case_type, input.case_type);
         assert_eq!(decoded.jurisdiction, input.jurisdiction);
+        assert_eq!(decoded.opinion_text, input.opinion_text);
+        assert_eq!(decoded.court_id, input.court_id);
+
+        // S21.1 — the new fields are `skip_serializing_if = "Option::is_none"`,
+        // so an all-None input must NOT emit the keys (keeps the audit payload
+        // hash stable for the pre-S21 7-field shape).
+        let bare = PredictInput {
+            opinion_text: None,
+            court_id: None,
+            ..input
+        };
+        let bare_json = serde_json::to_string(&bare).expect("serialize");
+        assert!(!bare_json.contains("opinion_text"));
+        assert!(!bare_json.contains("court_id"));
     }
 
     /// sha256 hashing of serialised PredictInput is deterministic.
@@ -1570,6 +1614,8 @@ mod tests {
             procedural_motion_count: 1.0,
             case_type: "criminal".to_string(),
             jurisdiction: "California".to_string(),
+            opinion_text: None,
+            court_id: None,
         };
 
         let bytes_a1 = serde_json::to_vec(&input_a).unwrap();
@@ -1590,6 +1636,8 @@ mod tests {
             procedural_motion_count: 1.0,
             case_type: "criminal".to_string(),
             jurisdiction: "California".to_string(),
+            opinion_text: None,
+            court_id: None,
         };
         let bytes_b = serde_json::to_vec(&input_b).unwrap();
         let h3 = hash_payload(&bytes_b);
@@ -1629,6 +1677,8 @@ mod tests {
                 procedural_motion_count: 3.0,
                 case_type:               "civil".to_string(),
                 jurisdiction:            "Federal".to_string(),
+                opinion_text: None,
+                court_id: None,
             }),
             prediction: PredictResult {
                 p_win:             0.72,
@@ -1642,6 +1692,8 @@ mod tests {
             created_by:  None,
             created_at:  "2026-05-10T12:00:00Z".to_string(),
             nlp_suggestion: None,
+            ideology_provenance: None,
+            date_filed: None,
         };
 
         let json_str = serde_json::to_string(&case).expect("Case must serialize to JSON");
@@ -1681,6 +1733,11 @@ mod tests {
             case_type_suggestion: Some("civil".to_string()),
             outcome_for: Some("respondent".to_string()),
             jurisdiction_suggestion: Some("us-federal".to_string()),
+            ideology_distance: None,
+            ideology_source: None,
+            ideology_release: None,
+            ideology_cfscore: None,
+            ideology_term: None,
         };
         let case = Case {
             id: ID::from("00000000-0000-0000-0000-000000000010"),
@@ -1693,6 +1750,8 @@ mod tests {
                 procedural_motion_count: 2.0,
                 case_type:               "civil".to_string(),
                 jurisdiction:            "us-federal".to_string(),
+                opinion_text: None,
+                court_id: None,
             }),
             prediction: PredictResult {
                 p_win:             0.6,
@@ -1717,6 +1776,8 @@ mod tests {
             created_by: None,
             created_at: "2026-05-10T12:00:00Z".to_string(),
             nlp_suggestion: Some(Json(suggestion)),
+            ideology_provenance: None,
+            date_filed: None,
         };
 
         let json_str = serde_json::to_string(&case).expect("Case must serialize");
@@ -1779,6 +1840,8 @@ mod tests {
                 procedural_motion_count: 3.0,
                 case_type:               "civil".to_string(),
                 jurisdiction:            "Federal".to_string(),
+                opinion_text: None,
+                court_id: None,
             }),
             prediction: PredictResult {
                 p_win:             0.72,
@@ -1803,6 +1866,8 @@ mod tests {
             created_by: None,
             created_at: "2026-05-10T12:00:00Z".to_string(),
             nlp_suggestion: None,
+            ideology_provenance: None,
+            date_filed: None,
         }
     }
 

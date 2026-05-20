@@ -67,6 +67,19 @@ message PredictCaseOutcomeRequest {
 
   // Caller-supplied trace correlation ID (OpenTelemetry propagation).
   string trace_id = 5;
+
+  // S21.1 — raw opinion text. When non-empty, the ML service embeds the
+  // first N chars (MiniLM today, legal-BERT in S21.4) and feeds the vector
+  // into the text-conditional champion. Empty string => zero embedding
+  // vector (degraded but functional). Carried as a dedicated field rather
+  // than a feature_ids "key:value" pair because it is a raw payload, not a
+  // feature-store identifier.
+  string opinion_text = 6;
+
+  // S21.1 — court identifier (CourtListener slug, e.g. "ca9", "scotus").
+  // Routes per-court isotonic calibration (S20.1); empty => global isotonic
+  // fallback.
+  string court_id = 7;
 }
 
 // Prediction response including point estimate, conformal interval, and SHAP.

@@ -118,6 +118,18 @@ export interface PredictInput {
   caseType: CaseType;
   /** Jurisdiction identifier. */
   jurisdiction: Jurisdiction;
+  /**
+   * S21.1 — raw opinion text. Carried on the input so the text-conditional
+   * champion (v14+) embeds it; also reused server-side for the NLP feature
+   * extractor in createCase. Optional: omit it and the model gets a zero
+   * embedding vector.
+   */
+  opinionText?: string;
+  /**
+   * S21.1 — court identifier (CourtListener slug, e.g. "ca9", "scotus").
+   * Routes per-court isotonic calibration downstream. Optional.
+   */
+  courtId?: string;
 }
 
 /** Result returned by the predictCaseOutcome mutation. */

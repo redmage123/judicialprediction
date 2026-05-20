@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n5judicialpredict/ml_plane/inference/v1/inference.proto\x12%judicialpredict.ml_plane.inference.v1\"H\n\tShapValue\x12\x12\n\nfeature_id\x18\x01 \x01(\t\x12\x19\n\x11shap_contribution\x18\x02 \x01(\x01\x12\x0c\n\x04rank\x18\x03 \x01(\x05\"C\n\x11\x43onformalInterval\x12\r\n\x05lower\x18\x01 \x01(\x01\x12\r\n\x05upper\x18\x02 \x01(\x01\x12\x10\n\x08\x63overage\x18\x03 \x01(\x01\"\xbb\x01\n\x19PredictCaseOutcomeRequest\x12\x0f\n\x07\x63\x61se_id\x18\x01 \x01(\t\x12\x13\n\x0b\x66\x65\x61ture_ids\x18\x02 \x03(\t\x12J\n\rmodel_variant\x18\x03 \x01(\x0e\x32\x33.judicialpredict.ml_plane.inference.v1.ModelVariant\x12\x1a\n\x12\x63onformal_coverage\x18\x04 \x01(\x01\x12\x10\n\x08trace_id\x18\x05 \x01(\t\"\xdc\x02\n\x1aPredictCaseOutcomeResponse\x12\x0f\n\x07\x63\x61se_id\x18\x01 \x01(\t\x12\r\n\x05p_win\x18\x02 \x01(\x01\x12T\n\x12\x63onformal_interval\x18\x03 \x01(\x0b\x32\x38.judicialpredict.ml_plane.inference.v1.ConformalInterval\x12\x45\n\x0bshap_values\x18\x04 \x03(\x0b\x32\x30.judicialpredict.ml_plane.inference.v1.ShapValue\x12O\n\x12model_variant_used\x18\x05 \x01(\x0e\x32\x33.judicialpredict.ml_plane.inference.v1.ModelVariant\x12\x15\n\rmlflow_run_id\x18\x06 \x01(\t\x12\x19\n\x11predicted_at_unix\x18\x07 \x01(\x03*\xa9\x01\n\x0cModelVariant\x12\x1d\n\x19MODEL_VARIANT_UNSPECIFIED\x10\x00\x12\x19\n\x15MODEL_VARIANT_XGBOOST\x10\x01\x12 \n\x1cMODEL_VARIANT_BAYESIAN_JUDGE\x10\x02\x12\x1d\n\x19MODEL_VARIANT_RF_ATTORNEY\x10\x03\x12\x1e\n\x1aMODEL_VARIANT_META_LEARNER\x10\x04\x32\xae\x01\n\x10InferenceService\x12\x99\x01\n\x12PredictCaseOutcome\x12@.judicialpredict.ml_plane.inference.v1.PredictCaseOutcomeRequest\x1a\x41.judicialpredict.ml_plane.inference.v1.PredictCaseOutcomeResponseB\x7f\n\'ai.judicialpredict.mlplane.inference.v1ZTgithub.com/judicialpredict/protos/judicialpredict/ml_plane/inference/v1;inference_v1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n5judicialpredict/ml_plane/inference/v1/inference.proto\x12%judicialpredict.ml_plane.inference.v1\"H\n\tShapValue\x12\x12\n\nfeature_id\x18\x01 \x01(\t\x12\x19\n\x11shap_contribution\x18\x02 \x01(\x01\x12\x0c\n\x04rank\x18\x03 \x01(\x05\"C\n\x11\x43onformalInterval\x12\r\n\x05lower\x18\x01 \x01(\x01\x12\r\n\x05upper\x18\x02 \x01(\x01\x12\x10\n\x08\x63overage\x18\x03 \x01(\x01\"\xe3\x01\n\x19PredictCaseOutcomeRequest\x12\x0f\n\x07\x63\x61se_id\x18\x01 \x01(\t\x12\x13\n\x0b\x66\x65\x61ture_ids\x18\x02 \x03(\t\x12J\n\rmodel_variant\x18\x03 \x01(\x0e\x32\x33.judicialpredict.ml_plane.inference.v1.ModelVariant\x12\x1a\n\x12\x63onformal_coverage\x18\x04 \x01(\x01\x12\x10\n\x08trace_id\x18\x05 \x01(\t\x12\x14\n\x0copinion_text\x18\x06 \x01(\t\x12\x10\n\x08\x63ourt_id\x18\x07 \x01(\t\"\xdc\x02\n\x1aPredictCaseOutcomeResponse\x12\x0f\n\x07\x63\x61se_id\x18\x01 \x01(\t\x12\r\n\x05p_win\x18\x02 \x01(\x01\x12T\n\x12\x63onformal_interval\x18\x03 \x01(\x0b\x32\x38.judicialpredict.ml_plane.inference.v1.ConformalInterval\x12\x45\n\x0bshap_values\x18\x04 \x03(\x0b\x32\x30.judicialpredict.ml_plane.inference.v1.ShapValue\x12O\n\x12model_variant_used\x18\x05 \x01(\x0e\x32\x33.judicialpredict.ml_plane.inference.v1.ModelVariant\x12\x15\n\rmlflow_run_id\x18\x06 \x01(\t\x12\x19\n\x11predicted_at_unix\x18\x07 \x01(\x03*\xa9\x01\n\x0cModelVariant\x12\x1d\n\x19MODEL_VARIANT_UNSPECIFIED\x10\x00\x12\x19\n\x15MODEL_VARIANT_XGBOOST\x10\x01\x12 \n\x1cMODEL_VARIANT_BAYESIAN_JUDGE\x10\x02\x12\x1d\n\x19MODEL_VARIANT_RF_ATTORNEY\x10\x03\x12\x1e\n\x1aMODEL_VARIANT_META_LEARNER\x10\x04\x32\xae\x01\n\x10InferenceService\x12\x99\x01\n\x12PredictCaseOutcome\x12@.judicialpredict.ml_plane.inference.v1.PredictCaseOutcomeRequest\x1a\x41.judicialpredict.ml_plane.inference.v1.PredictCaseOutcomeResponseB\x7f\n\'ai.judicialpredict.mlplane.inference.v1ZTgithub.com/judicialpredict/protos/judicialpredict/ml_plane/inference/v1;inference_v1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -32,16 +32,16 @@ _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'judicialpredict.ml_plane.in
 if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._loaded_options = None
   _globals['DESCRIPTOR']._serialized_options = b'\n\'ai.judicialpredict.mlplane.inference.v1ZTgithub.com/judicialpredict/protos/judicialpredict/ml_plane/inference/v1;inference_v1'
-  _globals['_MODELVARIANT']._serialized_start=781
-  _globals['_MODELVARIANT']._serialized_end=950
+  _globals['_MODELVARIANT']._serialized_start=821
+  _globals['_MODELVARIANT']._serialized_end=990
   _globals['_SHAPVALUE']._serialized_start=96
   _globals['_SHAPVALUE']._serialized_end=168
   _globals['_CONFORMALINTERVAL']._serialized_start=170
   _globals['_CONFORMALINTERVAL']._serialized_end=237
   _globals['_PREDICTCASEOUTCOMEREQUEST']._serialized_start=240
-  _globals['_PREDICTCASEOUTCOMEREQUEST']._serialized_end=427
-  _globals['_PREDICTCASEOUTCOMERESPONSE']._serialized_start=430
-  _globals['_PREDICTCASEOUTCOMERESPONSE']._serialized_end=778
-  _globals['_INFERENCESERVICE']._serialized_start=953
-  _globals['_INFERENCESERVICE']._serialized_end=1127
+  _globals['_PREDICTCASEOUTCOMEREQUEST']._serialized_end=467
+  _globals['_PREDICTCASEOUTCOMERESPONSE']._serialized_start=470
+  _globals['_PREDICTCASEOUTCOMERESPONSE']._serialized_end=818
+  _globals['_INFERENCESERVICE']._serialized_start=993
+  _globals['_INFERENCESERVICE']._serialized_end=1167
 # @@protoc_insertion_point(module_scope)

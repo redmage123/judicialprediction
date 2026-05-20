@@ -48,8 +48,13 @@ pub struct ImportCaseRow {
     pub jurisdiction: String,
     /// Optional raw opinion text; treated identically to `createCase`'s
     /// `opinionText` arg — when present, the NLP suggestion is persisted
-    /// in `cases.nlp_suggestion`.
+    /// in `cases.nlp_suggestion`.  S21.1: it now also rides PredictInput so
+    /// the text-conditional champion embeds it.
     pub opinion_text: Option<String>,
+    /// S21.1 — optional court slug (e.g. `ca9`) for per-court isotonic
+    /// routing on the imported rows.
+    #[serde(default)]
+    pub court_id: Option<String>,
 }
 
 impl ImportCaseRow {
@@ -63,6 +68,10 @@ impl ImportCaseRow {
                 procedural_motion_count:  self.procedural_motion_count,
                 case_type:                self.case_type,
                 jurisdiction:             self.jurisdiction,
+                // Carry opinion text on the input so call_ml embeds it; the
+                // clone is also returned for the NLP-suggestion path below.
+                opinion_text:             self.opinion_text.clone(),
+                court_id:                 self.court_id,
             },
             self.opinion_text,
         )
@@ -350,6 +359,7 @@ mod tests {
             case_type:               case_type.to_string(),
             jurisdiction:            "us-federal".to_string(),
             opinion_text:            None,
+            court_id:                None,
         }
     }
 

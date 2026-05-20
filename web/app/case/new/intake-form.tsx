@@ -174,6 +174,12 @@ export function IntakeForm() {
   const [extractCtx, setExtractCtx] = useState<ExtractionContext | null>(null);
   const [prefilled, setPrefilled] = useState<Partial<Record<keyof FormState, true>>>({});
 
+  // S21.1 — optional CourtListener court slug (e.g. "ca9", "scotus"). When
+  // supplied it routes per-court isotonic calibration on the prediction;
+  // blank falls back to the global calibrator. Free text because the form's
+  // coarse `jurisdiction` field can't name a specific circuit/court.
+  const [courtId, setCourtId] = useState("");
+
   // S11.4 — filing date. Default to today. Year is fed to the gateway's
   // MQ resolver so historical cases pull the term snapshot that was
   // current when they were filed.
@@ -332,6 +338,13 @@ export function IntakeForm() {
     setSubmitError(null);
     if (!validate()) return;
 
+    // S6.8 — the prior-opinion text (if the operator pasted any) and
+    // S21.1 — the optional court slug now ride on PredictInput. The gateway
+    // embeds opinion_text into the text-conditional champion AND reuses it
+    // for the NLP suggestion; court_id routes per-court calibration. Both are
+    // omitted when blank so the wire shape matches the pre-S21 7-field input.
+    const trimmedOpinion = opinionText.trim();
+    const trimmedCourt = courtId.trim();
     const input: PredictInput = {
       judgeSeverity: parseFloat(form.judgeSeverity),
       attorneyWinRate: parseFloat(form.attorneyWinRate),
@@ -340,22 +353,20 @@ export function IntakeForm() {
       proceduralMotionCount: parseInt(form.proceduralMotionCount, 10),
       caseType: form.caseType,
       jurisdiction: form.jurisdiction,
+      ...(trimmedOpinion ? { opinionText: trimmedOpinion } : {}),
+      ...(trimmedCourt ? { courtId: trimmedCourt } : {}),
     };
 
     try {
-      // S6.8 — forward the prior-opinion text (if the operator pasted any)
-      // so the server persists its NLP suggestion alongside these final,
-      // possibly hand-edited, values.  Omitted entirely when the field is
-      // blank, leaving the server-side nlp_suggestion NULL.
-      const trimmedOpinion = opinionText.trim();
       // S11.4 — forward the operator-supplied filing date so the gateway
       // can derive as_of_year for the MQ resolver AND persist date_filed
-      // to the cases row.  Omit when blank.
+      // to the cases row.  Omit when blank.  opinion_text rides `input` now
+      // (the gateway's createCase falls back to input.opinionText for NLP),
+      // so we no longer pass it as a separate mutation argument.
       const trimmedDate = dateFiled.trim();
       const result = await createCase({
         variables: {
           input,
-          ...(trimmedOpinion ? { opinionText: trimmedOpinion } : {}),
           ...(trimmedDate ? { dateFiled: trimmedDate } : {}),
         },
       });
@@ -775,6 +786,24 @@ export function IntakeForm() {
               <p id="dateFiled-help" className="text-xs text-muted-foreground">
                 Used to pick the Martin-Quinn term snapshot that was current
                 when the case was filed. Defaults to today.
+              </p>
+            </div>
+
+            {/* S21.1 — Court slug. Optional; routes per-court calibration. */}
+            <div className="space-y-1.5 sm:col-span-2">
+              <Label htmlFor="courtId">Court (optional)</Label>
+              <Input
+                id="courtId"
+                name="courtId"
+                type="text"
+                placeholder="CourtListener slug, e.g. ca9, scotus"
+                value={courtId}
+                onChange={(e) => setCourtId(e.target.value)}
+                aria-describedby="courtId-help"
+              />
+              <p id="courtId-help" className="text-xs text-muted-foreground">
+                When set, the prediction uses that court&apos;s calibration
+                curve; otherwise it falls back to the global calibrator.
               </p>
             </div>
           </div>

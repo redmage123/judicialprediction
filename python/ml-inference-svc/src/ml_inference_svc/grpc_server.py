@@ -25,7 +25,11 @@ from ml_inference_svc.grpc_stubs import (
     add_InferenceServiceServicer_to_server,
 )
 from ml_inference_svc.grpc_stubs.judicialpredict.ml_plane.inference.v1 import inference_pb2_grpc
-from ml_inference_svc.predict import ALLOWLIST_FEATURES, predict_case_outcome
+from ml_inference_svc.predict import (
+    ALLOWLIST_FEATURES,
+    REQUIRED_FEATURES,
+    predict_case_outcome,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +57,16 @@ class _InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
             else:
                 features[fid] = fid  # sentinel — will fail validation below
 
+        # S21.1 — opinion_text and court_id arrive as dedicated proto fields
+        # (raw payload / routing key) rather than feature_ids "key:value"
+        # pairs. Only add them when non-empty so an absent opinion_text yields
+        # a zero embedding vector and an absent court_id falls back to the
+        # global isotonic calibrator inside predict_case_outcome.
+        if request.opinion_text:
+            features["opinion_text"] = request.opinion_text
+        if request.court_id:
+            features["court_id"] = request.court_id
+
         # Tier enforcement: any field not on the allowlist is rejected.
         forbidden = set(features.keys()) - ALLOWLIST_FEATURES
         if forbidden:
@@ -62,7 +76,12 @@ class _InferenceServicer(inference_pb2_grpc.InferenceServiceServicer):
             )
             return PredictCaseOutcomeResponse()
 
-        missing = ALLOWLIST_FEATURES - set(features.keys())
+        # Only the REQUIRED subset must be present. Optional S20.2–S20.4
+        # features (party type, posture, citations) and opinion_text/court_id
+        # are neutral-filled by the feature contract when absent, so we do NOT
+        # demand the full allowlist here — doing so would reject every caller
+        # that doesn't recompute the entire enriched feature set.
+        missing = REQUIRED_FEATURES - set(features.keys())
         if missing:
             await context.abort(
                 grpc.StatusCode.INVALID_ARGUMENT,

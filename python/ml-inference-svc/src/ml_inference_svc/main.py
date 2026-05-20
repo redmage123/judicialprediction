@@ -23,7 +23,11 @@ from pydantic import BaseModel, Field
 
 from ml_inference_svc import audit_recorder
 from ml_inference_svc.grpc_server import build_grpc_server
-from ml_inference_svc.predict import ALLOWLIST_FEATURES, predict_case_outcome
+from ml_inference_svc.predict import (
+    ALLOWLIST_FEATURES,
+    REQUIRED_FEATURES,
+    predict_case_outcome,
+)
 
 
 @asynccontextmanager
@@ -98,7 +102,12 @@ async def predict(
             detail=f"Forbidden feature(s) not in Tier-A/B allowlist: {sorted(forbidden)}",
         )
 
-    missing = ALLOWLIST_FEATURES - set(body.keys())
+    # Only the REQUIRED subset must be present. Optional S20.2–S20.4 features
+    # (party type, posture, citations) plus opinion_text/court_id are
+    # neutral-filled by the feature contract when absent, so demanding the
+    # full allowlist here would wrongly reject every caller that supplies just
+    # the Tier-A/B intake fields.
+    missing = REQUIRED_FEATURES - set(body.keys())
     if missing:
         raise HTTPException(
             status_code=400,
