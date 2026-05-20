@@ -72,7 +72,7 @@ export function LoginForm({
         const data = await res.json().catch(() => ({}));
         setError(
           data.error === "invalid_credentials"
-            ? "Invalid email or password."
+            ? "Invalid email/username or password."
             : "Sign-in failed. Please try again."
         );
       }
@@ -104,18 +104,21 @@ export function LoginForm({
         <form onSubmit={handleSubmit} noValidate aria-label="Sign in">
           <div className="space-y-4">
             <div className="space-y-1.5">
-              <Label htmlFor="email">Email</Label>
+              <Label htmlFor="email">Email or username</Label>
               <Input
                 id="email"
                 name="email"
-                type="email"
-                autoComplete="email"
+                type="text"
+                autoComplete="username"
                 required
-                placeholder="dev@example.test"
+                placeholder="you@example.com or username"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                aria-describedby={error ? "login-error" : undefined}
+                aria-describedby={error ? "login-error" : "email-help"}
               />
+              <p id="email-help" className="text-xs text-muted-foreground">
+                Use the email associated with your operator account or your username.
+              </p>
             </div>
 
             <div className="space-y-1.5">

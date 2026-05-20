@@ -41,6 +41,7 @@ from urllib.parse import urlencode
 
 from django.conf import settings
 from django.contrib.auth import authenticate
+from django.db.models import Q
 from django.contrib.auth.password_validation import (
     ValidationError as PasswordValidationError,
 )
@@ -73,17 +74,27 @@ def login(request):
     except (json.JSONDecodeError, ValueError):
         return JsonResponse({"ok": False, "error": "invalid_request"}, status=400)
 
-    email = body.get("email", "")
+    # The form field is labeled "Email or username" — accept either. The
+    # OperatorAuthBackend already does a case-insensitive OR lookup against
+    # both columns; we mirror that here when re-fetching the Operator row
+    # to mint the JWT, so submitting a username doesn't 401 after a
+    # successful authenticate().
+    identifier = body.get("email", "")
     password = body.get("password", "")
 
     # OperatorAuthBackend.authenticate() verifies the bcrypt hash.
-    user = authenticate(request, username=email, password=password)
+    user = authenticate(request, username=identifier, password=password)
     if user is None:
         return JsonResponse({"ok": False, "error": "invalid_credentials"}, status=401)
 
-    # Fetch the Operator row to build JWT claims.
+    # Fetch the Operator row to build JWT claims. Match the backend's
+    # email-OR-username lookup so a successful authenticate() never
+    # subsequently 401s on this re-fetch.
     try:
-        operator = Operator.objects.get(email=email, is_active=True)
+        operator = Operator.objects.get(
+            Q(email__iexact=identifier) | Q(username__iexact=identifier),
+            is_active=True,
+        )
     except Operator.DoesNotExist:
         return JsonResponse({"ok": False, "error": "invalid_credentials"}, status=401)
 
