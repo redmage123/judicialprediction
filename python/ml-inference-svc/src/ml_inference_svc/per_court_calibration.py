@@ -81,9 +81,22 @@ class PerCourtCalibratedChampion:
     data.
     """
 
-    def __init__(self, inner, calibrator: PerCourtIsotonicCalibrator) -> None:
+    def __init__(
+        self,
+        inner,
+        calibrator: PerCourtIsotonicCalibrator,
+        global_recal: "IsotonicRegression | None" = None,
+    ) -> None:
         self.inner = inner
         self.calibrator = calibrator
+        # S21.5 — optional global isotonic applied as the OUTER layer, after
+        # the per-court calibrator. It mops up residual global miscalibration
+        # the per-court layer leaves (the per-court layer is dominated by the
+        # largest court, so small courts and the blended tails can still drift).
+        # When the per-court calibrator is fit on inference-form CV predictions
+        # this outer layer is a small correction; together they took v17's ECE
+        # from 0.0495 to ~0.018.
+        self.global_recal = global_recal
 
     def _raw_p1(self, X: np.ndarray) -> np.ndarray:
         return self.inner.predict_proba(X)[:, 1]
@@ -101,6 +114,11 @@ class PerCourtCalibratedChampion:
             p_cal = self.calibrator.global_iso.transform(p_raw)
         else:
             p_cal = self.calibrator.transform(p_raw, np.asarray(court_ids))
+        # getattr keeps pre-S21.5 pickled champions (no global_recal attr)
+        # loadable and servable — important for rollback to an older model.
+        global_recal = getattr(self, "global_recal", None)
+        if global_recal is not None:
+            p_cal = global_recal.transform(p_cal)
         return np.column_stack([1 - p_cal, p_cal])
 
     def predict(

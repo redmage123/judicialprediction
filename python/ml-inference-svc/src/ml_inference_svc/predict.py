@@ -127,6 +127,34 @@ def _load_embedding_model():
     return SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
 
 
+def _embed_opinion(text: str, contract: dict, emb_dim: int) -> np.ndarray:
+    """
+    Embed `text` with whatever model the champion was trained on.
+
+    Dispatch is driven by the contract's `embedding_model`:
+      * legal-BERT (S21.4) -> ml_inference_svc.legal_bert.embed_texts, which
+        mean-pools the last hidden state over the first 512 tokens. The build
+        path uses the exact same function, so train/serve stay bit-compatible.
+        No char truncation — the tokenizer's 512-token cap is the bound, as it
+        was at build time.
+      * MiniLM (S20.5) -> sentence-transformers encode over the first
+        `embedding_max_chars` characters.
+
+    Returns a float64 vector of length `emb_dim`; an empty/whitespace text
+    yields a zero vector.
+    """
+    model_name = (contract.get("embedding_model") or "").lower()
+    if not text or not text.strip():
+        return np.zeros(emb_dim, dtype=np.float64)
+    if "legal-bert" in model_name or "legal_bert" in model_name:
+        from ml_inference_svc.legal_bert import embed_texts
+        return embed_texts([text])[0].astype(np.float64)
+    # MiniLM / sentence-transformers fallback.
+    max_chars = contract.get("embedding_max_chars") or 2000
+    model = _load_embedding_model()
+    return model.encode([text[:max_chars]], convert_to_numpy=True)[0].astype(np.float64)
+
+
 @lru_cache(maxsize=1)
 def _load_champion():
     """Load champion model + contract + encoder + conformal predictor."""
@@ -223,18 +251,12 @@ def _encode_from_contract(
             cat_ordinal[col] = float(val)
 
     # Compute the embedding vector once, then index by emb_NNN below.
+    # The model (legal-BERT vs MiniLM) is selected from the contract so the
+    # served embedding matches the one the champion was trained on.
     embedding_vec: np.ndarray | None = None
     if emb_dim and emb_dim > 0:
         opinion_text = features.get("opinion_text") or ""
-        max_chars = contract.get("embedding_max_chars") or 2000
-        text = opinion_text[:max_chars]
-        if text.strip():
-            model = _load_embedding_model()
-            embedding_vec = model.encode(
-                [text], convert_to_numpy=True,
-            )[0].astype(np.float64)
-        else:
-            embedding_vec = np.zeros(emb_dim, dtype=np.float64)
+        embedding_vec = _embed_opinion(opinion_text, contract, emb_dim)
 
     cat_set = set(cat_cols)
     row: list[float] = []

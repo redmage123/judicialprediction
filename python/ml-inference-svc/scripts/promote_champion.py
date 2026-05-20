@@ -43,7 +43,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import train_first_models as tfm  # noqa: E402
 from train_first_models import (  # noqa: E402
-    _resolve_feature_cols, encode_features,
+    _embedding_contract, _resolve_feature_cols, encode_features,
 )
 
 
@@ -104,9 +104,9 @@ def main(
         # computed at inference time and appended to the structured
         # vector in the order numeric→categorical→embedding (matching
         # train_first_models.encode_features + the embedding columns).
-        "embedding_model": "sentence-transformers/all-MiniLM-L6-v2" if embedding_cols else None,
+        "embedding_model": _embedding_contract(len(embedding_cols))[0] if embedding_cols else None,
         "embedding_input_field": "opinion_text" if embedding_cols else None,
-        "embedding_max_chars": 2000 if embedding_cols else None,
+        "embedding_max_chars": _embedding_contract(len(embedding_cols))[1] if embedding_cols else None,
         "promoted_at": "2026-05-19",
         "promotion_note": (
             "Real-data champion replacing the synthetic Sprint 12.5 LR. "

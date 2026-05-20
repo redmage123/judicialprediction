@@ -1,21 +1,27 @@
-# Champion Model — JudicialPredict (Sprint 20.6 promotion)
+# Champion Model — JudicialPredict (Sprint 21 promotion)
 
-**Run ID:** `8ba01003c252491eb5edb4c0138e11df`
-**Model:** `PerCourtCalibratedChampion(inner=StackedEnsemble(XGB+LGBM+CatBoost+LR, meta=LogisticRegression), calibrator=PerCourtIsotonicCalibrator)`.
-**Promotion date:** 2026-05-19 (Sprint 20.6).
-**Training corpus:** `data/real_corpus_v14.parquet` — 5,937 federal-circuit and Supreme Court opinions (5,198 f3d, 680 us, 36 cafc, 14 bia, 9 tax). Real CourtListener + CAP data. 17 structured features + 384-dim MiniLM embeddings of opinion text.
+**Run ID:** `6ef82aa2764641e39fc083c851f7edba`
+**Model:** `PerCourtCalibratedChampion(inner=StackedEnsemble(XGB+LGBM+CatBoost+LR, meta=LogisticRegression), calibrator=PerCourtIsotonicCalibrator, global_recal=IsotonicRegression)`.
+**Promotion date:** 2026-05-20 (Sprint 21.5).
+**Training corpus:** `data/real_corpus_v17.parquet` — 5,937 federal-circuit and Supreme Court opinions (5,198 f3d, 680 us, 36 cafc, 14 bia, 9 tax). Real CourtListener + CAP data. 18 structured features + **768-dim legal-BERT embeddings** of opinion text (`nlpaueb/legal-bert-base-uncased`, mean-pooled over the first 512 tokens).
 
 **Metrics on holdout (1,188 cases):**
-* Brier: **0.1861**
-* ECE: **0.0259** (well-calibrated)
-* Log-loss: 0.5571
+* Brier: **0.1768**  (was 0.1861 under MiniLM v14)
+* ECE: **0.0181**  (was 0.0259 under v14 — better calibrated)
+* Log-loss: 0.6144
 
-**What replaced what:**
-The synthetic-v1 Sprint 12.5 LR (Brier 0.1662 on its own generated data) is retired. That model was scaffolding while the real-data pipeline matured; its score was a methodology artifact of a logistic regression fitting a logistically-generated corpus, not a real-world predictor. The new champion's Brier 0.1861 on 5,937 real opinions is the honest production number, competitive with published legal-prediction literature (Katz et al. 0.18–0.22 on SCOTUS).
+**What changed in Sprint 21 (vs the v14 MiniLM champion):**
+* **S21.1** — `opinion_text` + `court_id` wired end-to-end (web → gateway → gRPC → model), so the text embedding is actually populated at inference instead of receiving a zero vector.
+* **S21.2** — tier-2 LLM procedural-posture labels (via the `claude` CLI) reduced `unknown` postures (4,350 → 3,515 in v17; relabel ongoing).
+* **S21.4** — embedding swap from 384-dim MiniLM to **768-dim legal-BERT**. This is the dominant lever: it lifts discrimination (Brier 0.1861 → 0.1798 pre-recal) and lets the model use the full [0,1] probability range instead of clustering near the base rate.
+* **S21.5** — calibration fix. Legal-BERT's sharper outputs exposed an apply-space mismatch (the per-court isotonic was fit on OOF base→meta predictions but applied to full-train base→meta predictions at inference), inflating ECE to 0.0495. Refitting the calibrator on **inference-form 5-fold CV predictions** plus a **global outer isotonic** (`global_recal`) restored ECE to 0.0181 while keeping the Brier gain.
+* **S21.3** (citation→opinion pet/resp-favored counts) was **deferred** — no corpus-wide citation-graph data exists locally and the CourtListener REST quota is 125/day.
+
+The honest production Brier of **0.1768** sits at the strong end of published legal-prediction literature (Katz et al. 0.18–0.22 on SCOTUS).
 
 ## What this model is, in one sentence
 
-A two-stage stacked ensemble (XGBoost + LightGBM + CatBoost + LogisticRegression base models with an LR meta-blender) on 17 structured features + 384-dim MiniLM text embeddings of the opinion, with per-court isotonic calibration on top.
+A two-stage stacked ensemble (XGBoost + LightGBM + CatBoost + LogisticRegression base models with an LR meta-blender) on 18 structured features + 768-dim legal-BERT text embeddings of the opinion, with per-court isotonic calibration and a global isotonic recalibration layer on top.
 
 ---
 

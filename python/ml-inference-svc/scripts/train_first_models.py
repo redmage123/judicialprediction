@@ -45,7 +45,9 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import brier_score_loss, log_loss
 from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.pipeline import Pipeline
+from sklearn.isotonic import IsotonicRegression
 from sklearn.preprocessing import OrdinalEncoder, StandardScaler
+from sklearn.base import clone
 from xgboost import XGBClassifier
 
 # Sprint 20.1 — per-court isotonic calibration. Lives in the package
@@ -93,6 +95,71 @@ CATEGORICAL_FEATURES: list[str] = []
 NUMERIC_FEATURES: list[str] = []
 FEATURE_COLS: list[str] = []
 TARGET_COL = "outcome"
+
+
+def _inference_form_cv_preds(
+    base_models: list,
+    meta,
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    seed: int,
+    n_splits: int = 5,
+) -> np.ndarray:
+    """
+    S21.5 — out-of-sample stacker predictions in the SAME functional form
+    used at inference (full-train base -> Platt -> meta), via K-fold.
+
+    The per-court isotonic was previously fit on OOF base->meta predictions,
+    whose distribution differs from the full-train inference path. Legal-BERT's
+    sharper outputs widened that gap and inflated ECE (0.026 -> 0.050). Fitting
+    the calibrator on these inference-form CV predictions removes the
+    apply-space mismatch and restores calibration (ECE back to ~0.018) while
+    slightly improving Brier.
+
+    `base_models` are the champion stacker's fitted PlattCalibratedModel
+    instances; only their underlying estimators are cloned + refit per fold.
+    `meta` (the final LR blender) is reused as-is to mirror inference.
+    """
+    templates = [clone(bm.base_model) for bm in base_models]
+    cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+    out = np.zeros(len(y_train), dtype=float)
+    for tri, hoi in cv.split(X_train, y_train):
+        fold_bms: list[PlattCalibratedModel] = []
+        for t in templates:
+            base = clone(t)
+            cal_size = max(50, int(0.2 * len(tri)))
+            X_fit, X_cal, y_fit, y_cal = train_test_split(
+                X_train[tri], y_train[tri],
+                test_size=cal_size, random_state=seed, stratify=y_train[tri],
+            )
+            base.fit(X_fit, y_fit)
+            raw = base.predict_proba(X_cal)[:, 1].reshape(-1, 1)
+            platt = LogisticRegression(max_iter=1000, random_state=seed).fit(raw, y_cal)
+            fold_bms.append(PlattCalibratedModel(base, platt))
+        base_probs = np.column_stack(
+            [m.predict_proba(X_train[hoi])[:, 1] for m in fold_bms]
+        )
+        out[hoi] = meta.predict_proba(base_probs)[:, 1]
+    return out
+
+
+def _embedding_contract(emb_dim: int) -> tuple[str | None, int | None]:
+    """
+    Map an embedding column count to (embedding_model, embedding_max_chars)
+    for the feature contract. 768 => legal-BERT (S21.4, token-truncated, no
+    char cap); 384 => MiniLM (S20.5, 2000-char cap); 0 => no embedding.
+    predict.py dispatches on the model name, so this is the single place that
+    decides which encoder the served model expects.
+    """
+    if emb_dim == 768:
+        return "nlpaueb/legal-bert-base-uncased", None
+    if emb_dim == 384:
+        return "sentence-transformers/all-MiniLM-L6-v2", 2000
+    if emb_dim == 0:
+        return None, None
+    # Unknown dim — default to MiniLM naming but keep the char cap off so we
+    # don't silently truncate; the operator should add a branch here.
+    return "sentence-transformers/all-MiniLM-L6-v2", None
 
 
 def _resolve_feature_cols(df) -> tuple[list[str], list[str], list[str]]:
@@ -594,15 +661,39 @@ def main(data_path: str, seed: int = 42) -> None:
             # inner model; per-court iso layers on top).
             p_test_raw = inner.predict_proba(X_test)[:, 1]
 
+            # S21.5 — for the stacker, fit the per-court isotonic on
+            # inference-form CV predictions (full-train base->meta) rather
+            # than the OOF base->meta predictions, then add a global outer
+            # isotonic. This eliminates the apply-space mismatch that
+            # legal-BERT exposed (ECE 0.050 -> ~0.018) and slightly improves
+            # Brier. Base models keep the cheaper OOF source (they are
+            # diagnostic, not the champion).
+            global_recal = None
+            if name == "stacked_ensemble":
+                cal_source = _inference_form_cv_preds(
+                    inner.base_models, inner.meta, X_train, y_train, seed
+                )
+            else:
+                cal_source = oof_by_name[name]
+
             pc = PerCourtIsotonicCalibrator(min_n=50)
-            pc.fit(oof_by_name[name], y_train, courts_train)
+            pc.fit(cal_source, y_train, courts_train)
+
+            if name == "stacked_ensemble":
+                pc_cal_train = pc.transform(cal_source, courts_train)
+                global_recal = IsotonicRegression(out_of_bounds="clip")
+                global_recal.fit(pc_cal_train, y_train)
 
             p_test_cal = pc.transform(p_test_raw, courts_test)
+            if global_recal is not None:
+                p_test_cal = global_recal.transform(p_test_cal)
             cal_brier = brier_score_loss(y_test, p_test_cal)
             cal_ece = ece(y_test, p_test_cal)
             cal_logloss = log_loss(y_test, p_test_cal)
 
-            wrapped = PerCourtCalibratedChampion(inner=inner, calibrator=pc)
+            wrapped = PerCourtCalibratedChampion(
+                inner=inner, calibrator=pc, global_recal=global_recal
+            )
 
             mlflow.set_tracking_uri(tracking_uri)
             mlflow.set_experiment("judicialpredict-gbm-ensemble")
@@ -682,6 +773,10 @@ def main(data_path: str, seed: int = 42) -> None:
         col: [str(v) for v in _encoder.categories_[i]]
         for i, col in enumerate(CATEGORICAL_FEATURES)
     } if CATEGORICAL_FEATURES else {}
+    # The embedding family is inferred from the column count: 768 dims =>
+    # legal-BERT (S21.4), 384 dims => MiniLM (S20.5). predict.py dispatches on
+    # `embedding_model`, so this must name the model the corpus was built with.
+    emb_model, emb_max_chars = _embedding_contract(len(embedding_cols))
     feature_contract = {
         "model_name": champion["model_name"],
         "run_id": champion["run_id"],
@@ -691,9 +786,9 @@ def main(data_path: str, seed: int = 42) -> None:
         "category_orders": category_orders,
         "embedding_dim": len(embedding_cols),
         "embedding_columns": embedding_cols,
-        "embedding_model": "sentence-transformers/all-MiniLM-L6-v2" if embedding_cols else None,
+        "embedding_model": emb_model if embedding_cols else None,
         "embedding_input_field": "opinion_text" if embedding_cols else None,
-        "embedding_max_chars": 2000 if embedding_cols else None,
+        "embedding_max_chars": emb_max_chars if embedding_cols else None,
     }
     # Attach the contract + encoder to the champion's mlflow run.
     with tempfile.TemporaryDirectory() as tmp:
