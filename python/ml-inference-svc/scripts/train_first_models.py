@@ -71,6 +71,8 @@ from ml_inference_svc.per_court_calibration import (  # noqa: E402
 CATEGORICAL_FEATURES_BASE = ["case_type", "jurisdiction"]
 CATEGORICAL_FEATURES_S20_2 = ["petitioner_type", "respondent_type"]
 CATEGORICAL_FEATURES_S20_3 = ["procedural_posture"]
+# S22.1 — substantive-law area (15-bucket enum + unknown).
+CATEGORICAL_FEATURES_S22_1 = ["practice_area"]
 NUMERIC_FEATURES_BASE = [
     "judge_severity",
     "attorney_win_rate",
@@ -172,6 +174,7 @@ def _resolve_feature_cols(df) -> tuple[list[str], list[str], list[str]]:
     has_s20_2 = all(c in df.columns for c in CATEGORICAL_FEATURES_S20_2 + NUMERIC_FEATURES_S20_2)
     has_s20_3 = all(c in df.columns for c in CATEGORICAL_FEATURES_S20_3)
     has_s20_4 = all(c in df.columns for c in NUMERIC_FEATURES_S20_4)
+    has_s22_1 = all(c in df.columns for c in CATEGORICAL_FEATURES_S22_1)
     # S20.5 — embedding columns are named emb_NNN. Detect dynamically
     # so we don't hard-code the dim (future model swaps can re-emit
     # with a different EMBEDDING_DIM and the trainer keeps working).
@@ -185,6 +188,8 @@ def _resolve_feature_cols(df) -> tuple[list[str], list[str], list[str]]:
         cat += CATEGORICAL_FEATURES_S20_3
     if has_s20_4:
         num += NUMERIC_FEATURES_S20_4
+    if has_s22_1:
+        cat += CATEGORICAL_FEATURES_S22_1
     if embedding_features:
         num += embedding_features
     return cat, num, num + cat
