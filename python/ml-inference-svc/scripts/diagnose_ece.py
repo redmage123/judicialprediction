@@ -96,4 +96,4 @@ def evaluate(label: str, parquet: str, run_id: str):
 
 if __name__ == "__main__":
     evaluate("v14 MiniLM", "data/real_corpus_v14.parquet", "8ba01003c252491eb5edb4c0138e11df")
-    evaluate("v17 legal-BERT", "data/real_corpus_v17.parquet", "6ef82aa2764641e39fc083c851f7edba")
+    evaluate("v18 + full postures", "data/real_corpus_v18.parquet", "13c77263f3f845a2ae4382b47030da7f")

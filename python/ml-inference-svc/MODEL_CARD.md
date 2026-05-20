@@ -1,14 +1,16 @@
-# Champion Model — JudicialPredict (Sprint 21 promotion)
+# Champion Model — JudicialPredict (Sprint 21 promotion, v18 refresh)
 
-**Run ID:** `6ef82aa2764641e39fc083c851f7edba`
+**Run ID:** `13c77263f3f845a2ae4382b47030da7f`
 **Model:** `PerCourtCalibratedChampion(inner=StackedEnsemble(XGB+LGBM+CatBoost+LR, meta=LogisticRegression), calibrator=PerCourtIsotonicCalibrator, global_recal=IsotonicRegression)`.
-**Promotion date:** 2026-05-20 (Sprint 21.5).
-**Training corpus:** `data/real_corpus_v17.parquet` — 5,937 federal-circuit and Supreme Court opinions (5,198 f3d, 680 us, 36 cafc, 14 bia, 9 tax). Real CourtListener + CAP data. 18 structured features + **768-dim legal-BERT embeddings** of opinion text (`nlpaueb/legal-bert-base-uncased`, mean-pooled over the first 512 tokens).
+**Promotion date:** 2026-05-20 (Sprint 21.5; v18 refresh with full S21.2 posture coverage).
+**Training corpus:** `data/real_corpus_v18.parquet` — 5,937 federal-circuit and Supreme Court opinions (5,198 f3d, 680 us, 36 cafc, 14 bia, 9 tax). Real CourtListener + CAP data. 18 structured features (including S21.2 procedural-posture labels for **4,185 / 4,350** previously-unknown rows) + **768-dim legal-BERT embeddings** of opinion text (`nlpaueb/legal-bert-base-uncased`, mean-pooled over the first 512 tokens).
 
 **Metrics on holdout (1,188 cases):**
-* Brier: **0.1768**  (was 0.1861 under MiniLM v14)
-* ECE: **0.0181**  (was 0.0259 under v14 — better calibrated)
-* Log-loss: 0.6144
+* Brier: **0.1748**  (was 0.1768 under v17, 0.1861 under MiniLM v14)
+* ECE: **0.0188**   (was 0.0181 under v17, 0.0259 under v14 — +0.0007, noise-level)
+* Log-loss: 0.5801
+
+**v18 vs v17:** Brier improves another 0.002 (1.1% relative) once the full LLM posture coverage is folded in (S21.2 went from 835 applied postures in v17 to 4,185 in v18). The reliability table now uses the full [0,1] probability range — `[0.0,0.1)` and `[0.9,1.0]` bins each carry 100+ cases, where v14 had near-zero mass outside `[0.2,0.4)`.
 
 **What changed in Sprint 21 (vs the v14 MiniLM champion):**
 * **S21.1** — `opinion_text` + `court_id` wired end-to-end (web → gateway → gRPC → model), so the text embedding is actually populated at inference instead of receiving a zero vector.
