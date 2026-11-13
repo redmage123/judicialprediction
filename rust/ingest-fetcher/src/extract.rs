@@ -260,6 +260,21 @@ pub fn court_family(court_id: &str) -> CourtFamily {
         return CourtFamily::District;
     }
 
+    // S22.5 — California + New Jersey state courts ingested via
+    // `ingest_state_bulks.py`. Disposition language in CA Courts of Appeal,
+    // NJ Appellate Division, and the two state supreme courts mirrors the
+    // federal appellate AFFIRMED/REVERSED/VACATED form, so we route them to
+    // `detect_outcome_appellate`. The NJ Tax Court uses the same
+    // "Decision will be entered" idiom as the U.S. Tax Court, so it goes
+    // to `detect_outcome_taxcourt`. `calag` (CA AG advisory opinions) has
+    // no adversarial winner — we leave it `Unknown` so the generic scanner
+    // returns None and we don't manufacture spurious labels.
+    match id.as_str() {
+        "cal" | "calctapp" | "nj" | "njsuperctappdiv" => return CourtFamily::Appellate,
+        "njtaxct" => return CourtFamily::Tax,
+        _ => {}
+    }
+
     CourtFamily::Unknown
 }
 
@@ -1139,6 +1154,19 @@ mod tests {
     fn court_family_unknown() {
         assert_eq!(court_family("mystery_court"), CourtFamily::Unknown);
         assert_eq!(court_family("statesc_ny"), CourtFamily::Unknown);
+    }
+
+    #[test]
+    fn court_family_state_appellate() {
+        // S22.5: CA + NJ state appellate / supreme courts route to the
+        // appellate scanner; NJ Tax Court to the tax scanner; CA AG advisory
+        // opinions stay Unknown (no adversarial outcome).
+        assert_eq!(court_family("cal"), CourtFamily::Appellate);
+        assert_eq!(court_family("calctapp"), CourtFamily::Appellate);
+        assert_eq!(court_family("nj"), CourtFamily::Appellate);
+        assert_eq!(court_family("njsuperctappdiv"), CourtFamily::Appellate);
+        assert_eq!(court_family("njtaxct"), CourtFamily::Tax);
+        assert_eq!(court_family("calag"), CourtFamily::Unknown);
     }
 
     // ── S15.8: SCOTUS scanner ───────────────────────────────────────────────
